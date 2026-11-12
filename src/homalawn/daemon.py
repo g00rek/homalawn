@@ -1915,7 +1915,7 @@ DRAFTS = {
 }
 
 INFO_WAIT = 5   # phone.info waits this long for the phone's link before answering without it
-LATEST_TTL = 3600   # s: app_latest is worked out again at least this often (release.TTL_S keeps GitHub's answer as long)
+LATEST_TTL = 60     # s: app_latest is worked out again this often, so a build made here shows within a minute; GitHub is still asked at most once an hour (release.TTL_S keeps its answer)
 INTERNAL = "Something went wrong in the Homa Lawn service; its log has the details (journalctl --user -u homalawnd)."
 
 
