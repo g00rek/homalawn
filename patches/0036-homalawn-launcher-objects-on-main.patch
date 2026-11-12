@@ -1,0 +1,95 @@
+From 64feb71d1bad38e88714357796ce48ced29167c5 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 11:16:40 +0100
+Subject: [PATCH] Homa Lawn: launcher objects built on the main thread, never
+ by a request (patch 0036)
+
+A request handler that was first to reach Launcher3's app objects (launcher.ping through
+InvariantDeviceProfile) held Dagger's device-profile and theme-manager locks while ThemeProvider's
+constructor waited for the main thread (WallpaperManagerCompat is created on the main thread
+only); the main thread, starting the home screen, waited for the theme manager's lock. Both
+stopped for good. OmalawnCommands.dispatch, which every link and provider request passes, now has
+the main thread build them first and waits holding nothing (MainBuilt).
+---
+ .../src/app/lawnchair/omalawn/MainBuilt.kt    | 45 +++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  8 ++--
+ 2 files changed, 50 insertions(+), 3 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/MainBuilt.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/MainBuilt.kt b/lawnchair/src/app/lawnchair/omalawn/MainBuilt.kt
+new file mode 100644
+index 0000000000..b461bb753c
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/MainBuilt.kt
+@@ -0,0 +1,45 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import android.os.Looper
++import com.android.launcher3.InvariantDeviceProfile
++import com.android.launcher3.LauncherAppState
++import com.android.launcher3.util.Executors.MAIN_EXECUTOR
++
++/**
++ * Launcher3's app objects are built on the main thread, never by a request (patch 0036).
++ *
++ * Those objects are Dagger singletons, each built once under its own lock, and some of them need
++ * the main thread while they are built: ThemeProvider's constructor reads
++ * WallpaperManagerCompat.INSTANCE, a MainThreadInitializedObject, which from any other thread
++ * posts its creation to the main thread and waits. A request handler (the adb provider's binder
++ * thread or a link connection) that was first to reach them, e.g. `launcher.ping` through
++ * InvariantDeviceProfile -> ThemeManager -> ThemeProvider, held the device profile's and the theme
++ * manager's locks while it waited for the main thread; the main thread, starting the home screen
++ * (Launcher.onCreate -> LauncherAppState -> LawnchairIconProvider -> ThemeManager), waited for the
++ * theme manager's lock. Neither moved again, and every later call hung on the same locks.
++ *
++ * So [OmalawnCommands.dispatch], which every request from the link and the provider passes, first
++ * calls [ensure]: the first time, it has the main thread build them (LauncherAppState
++ * pulls in the icon provider, the theme manager and provider, the icon database; the device
++ * profile is built with it) and waits for that while holding nothing, so the main thread is never
++ * waiting for the caller. Afterwards it is one volatile read. The provider's debug hooks do not
++ * pass it: none of them builds these objects, and some must act before the main thread does
++ * anything (`debug_crash_link_start` 0 has to land before a starting process creates the link
++ * service).
++ */
++object MainBuilt {
++    @Volatile private var built = false
++
++    fun ensure(ctx: Context) {
++        if (built) return
++        val app = ctx.applicationContext
++        if (Looper.myLooper() == Looper.getMainLooper()) build(app) else MAIN_EXECUTOR.submit { build(app) }.get()
++    }
++
++    private fun build(ctx: Context) {
++        LauncherAppState.getInstance(ctx)
++        InvariantDeviceProfile.INSTANCE.get(ctx)
++        built = true
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 5d1e792528..ed5f9628e5 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -54,8 +54,10 @@ object OmalawnCommands {
+      * every caller, so concurrent link connections and the provider never interleave writes.
+      * [caller] is the calling computer's certificate fingerprint (null from the adb provider).
+      */
+-    fun dispatch(ctx: Context, method: String, params: JSONObject, paired: Boolean = false, caller: String? = null): Any =
+-        if (method in SERIAL) serially { run(ctx, method, params, paired, caller) } else run(ctx, method, params, paired, caller)
++    fun dispatch(ctx: Context, method: String, params: JSONObject, paired: Boolean = false, caller: String? = null): Any {
++        MainBuilt.ensure(ctx) // the launcher's objects come from the main thread, never from here (patch 0036)
++        return if (method in SERIAL) serially { run(ctx, method, params, paired, caller) } else run(ctx, method, params, paired, caller)
++    }
+ 
+     private val SERIAL = setOf(
+         "launcher.pref_set",
+@@ -248,7 +250,7 @@ object OmalawnCommands {
+     private fun ping(ctx: Context) = JSONObject()
+         .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
+         .put("package", ctx.packageName)
+-        // null until something has opened the home screen; reading it never creates the app state
++        // null until something has opened the home screen
+         .put("db", InvariantDeviceProfile.INSTANCE.get(ctx).dbFile ?: JSONObject.NULL)
+         // true once the workspace has been loaded from the DB (LoaderTask finished); false while
+         // the launcher is starting, loading, or has never been started in this process

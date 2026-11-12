@@ -1,0 +1,1765 @@
+From 32d860866a2f40739413c232f6a8c124e3e39a12 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:36:44 +0100
+Subject: [PATCH] Homa Lawn: Computers only computers, Wallpaper & style with
+ Source and one draft, pairing dialog in Compose (patch 0034)
+
+---
+ lawnchair/AndroidManifest.xml                 |   2 +-
+ lawnchair/res/values/homar_strings.xml        |  15 +-
+ .../lawnchair/omalawn/HomaLawnDashboard.kt    |  13 +-
+ .../src/app/lawnchair/omalawn/HomaLawnUi.kt   | 159 +++++++
+ .../src/app/lawnchair/omalawn/LookBook.kt     |   6 +-
+ .../omalawn/ThemeWallpapersScreen.kt          | 344 +++++++++++-----
+ .../lawnchair/omalawn/link/ComputersScreen.kt | 389 +++++++-----------
+ .../omalawn/link/PairConfirmActivity.kt       | 353 ++++++++++------
+ 8 files changed, 780 insertions(+), 501 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomaLawnUi.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index 9629b3c253..ef2d801572 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -247,7 +247,7 @@
+             android:excludeFromRecents="true"
+             android:noHistory="true"
+             android:taskAffinity=""
+-            android:theme="@android:style/Theme.DeviceDefault.Dialog.NoActionBar" />
++            android:theme="@style/Theme.Transparent" />
+ 
+         <provider
+             android:name="app.lawnchair.search.LawnchairRecentSuggestionProvider"
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index cdc971b50d..e9bc28359c 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -7,22 +7,21 @@
+     <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017; named Wallpaper & style since 0033) -->
+     <string name="homar_wallpapers_label">Wallpaper &amp; style</string>
+     <string name="homar_wallpapers_theme">Omarchy theme: %1$s</string>
+-    <string name="homar_wallpapers_sync_off">Wallpaper sync is off for this phone. Turn it on in Homa Lawn on your computer.</string>
+-    <string name="homar_wallpapers_book_unreadable">The looks stored on this phone can\'t be read. Forget all computers to clear them.</string>
++    <string name="homar_wallpapers_sync_off">Wallpaper &amp; style is off for this phone on %1$s. Turn it on in Homa Lawn on that computer.</string>
++    <string name="homar_wallpapers_book_unreadable">The wallpaper &amp; style stored on this phone can\'t be read. To clear it, forget all computers in Computers.</string>
+     <string name="homar_wallpapers_update_computer">Update Homa Lawn on your computer to choose the lock screen and home screen wallpapers here.</string>
+     <string name="homar_wallpapers_empty">This theme has no wallpapers.</string>
+     <string name="homar_wallpapers_no_gradients">This theme has no colors to make gradients from.</string>
+-    <string name="homar_wallpapers_from">From %1$s</string>
+-    <string name="homar_wallpapers_changed_last">(changed last)</string>
+-    <string name="homar_wallpapers_not_sent">%1$s has not sent its wallpapers yet.</string>
+-    <string name="homar_wallpapers_none_sent">No computer has sent its wallpapers yet.</string>
+-    <string name="homar_wallpapers_source_changed">The look now comes from %1$s; choose again.</string>
++    <string name="homar_wallpapers_not_sent">%1$s has not sent its wallpapers yet. Open Homa Lawn on that computer.</string>
++    <string name="homar_wallpapers_none_sent">No computer has sent its wallpapers yet. Open Homa Lawn on your computer.</string>
++    <string name="homar_wallpapers_source_changed">Wallpaper &amp; style now comes from %1$s; choose again.</string>
+     <string name="homar_wallpapers_applying">Applying…</string>
+     <string name="homar_wallpapers_selected">selected</string>
+     <string name="homar_wallpapers_discard">Discard</string>
+     <!-- our own words, not Android's or Lawnchair's: those come translated, and Homa Lawn speaks English -->
+     <string name="homar_wallpapers_apply">Apply</string>
+     <string name="homar_wallpapers_replace_title">Replace current wallpaper?</string>
++    <string name="homar_wallpapers_replace_text">The wallpaper set on this phone can\'t be backed up, so Undo can\'t bring it back.</string>
+     <string name="homar_wallpapers_replace">Replace</string>
+     <string name="homar_wallpapers_cancel">Cancel</string>
+     <string name="homar_wallpapers_target_home">Home screen</string>
+@@ -40,7 +39,7 @@
+     <string name="homar_wallpapers_on_lock">on the lock screen</string>
+     <string name="homar_wallpapers_on_home">on the home screen</string>
+     <string name="homar_wallpapers_gradient">gradient</string>
+-    <string name="homar_wallpapers_unreachable">Computer not reachable — your choice is applied when it is.</string>
++    <string name="homar_wallpapers_unreachable">%1$s is not reachable — your choice is applied when it is.</string>
+     <!-- settings › About (patch 0026; rows, credits and en-US spelling since 0033) -->
+     <string name="homalawn_about_build">build %1$d</string>
+     <string name="homalawn_about_project_github">Homa Lawn on GitHub</string>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
+index 82623cc541..5795c55668 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
+@@ -106,7 +106,7 @@ private fun computersSummary(paired: List<Computer>, online: Set<String>): Strin
+         when {
+             c.fp in online -> "$name · online now"
+             c.seen == 0L -> "$name · not seen yet"
+-            else -> "$name · last seen ${ago(c.seen)}"
++            else -> "$name · last seen ${HomaLawnDates.ago(c.seen)}"
+         }
+     }
+     else -> "${paired.size} paired"
+@@ -123,14 +123,3 @@ private fun lookSummary(ctx: Context, paired: List<Computer>): String {
+         ?: paired.singleOrNull()?.name?.ifEmpty { null }
+     return if (name != null) "From $name's Omarchy theme" else "From your computer's Omarchy theme"
+ }
+-
+-// English whatever the phone's language is, as on the Computers screen
+-private fun ago(ms: Long): String {
+-    val m = (System.currentTimeMillis() - ms) / 60_000
+-    return when {
+-        m < 1 -> "just now"
+-        m < 60 -> "$m min ago"
+-        m < 1440 -> "${m / 60} h ago"
+-        else -> "${m / 1440} days ago"
+-    }
+-}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnUi.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnUi.kt
+new file mode 100644
+index 0000000000..4547b41299
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnUi.kt
+@@ -0,0 +1,159 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.dp
++import app.lawnchair.omalawn.link.Computer
++import app.lawnchair.omalawn.link.Pins
++import com.android.launcher3.R
++import java.text.SimpleDateFormat
++import java.util.Calendar
++import java.util.Date
++import java.util.Locale
++
++/**
++ * What Homa Lawn's own screens share (patch 0034): one way to write dates, the one "Replace
++ * current wallpaper?" question, the online dot, and the wallpaper & style source as the Computers
++ * and Wallpaper & style screens read and change it.
++ */
++object HomaLawnDates {
++    // English whatever the phone's language is: Homa Lawn's screens are English on every phone
++    private val EN = Locale.ENGLISH
++
++    /** "just now", "5 min ago", "3 h ago", "1 day ago", "4 days ago". */
++    fun ago(ms: Long, now: Long = System.currentTimeMillis()): String {
++        val m = (now - ms) / 60_000
++        return when {
++            m < 1 -> "just now"
++            m < 60 -> "$m min ago"
++            m < 1440 -> "${m / 60} h ago"
++            m < 2880 -> "1 day ago"
++            else -> "${m / 1440} days ago"
++        }
++    }
++
++    /** "10 Nov", with the year when it is not this year: "10 Nov 2025". */
++    fun day(ms: Long, now: Long = System.currentTimeMillis()): String =
++        SimpleDateFormat(if (sameYear(ms, now)) "d MMM" else "d MMM yyyy", EN).format(Date(ms))
++
++    /** "21:45" today, else the day and the time: "10 Nov, 21:45" (with the year when not this year). */
++    fun moment(ms: Long, now: Long = System.currentTimeMillis()): String {
++        val time = SimpleDateFormat("HH:mm", EN).format(Date(ms))
++        return if (ms >= startOfDay(now) && ms < startOfDay(now) + 86_400_000L) time else day(ms, now) + ", " + time
++    }
++
++    /** The date as a phone screen shows it in the previews: "Thu, 12 Nov" (short) or "Thursday, 12 Nov". */
++    fun screenDate(ms: Long, long: Boolean): String = SimpleDateFormat(if (long) "EEEE, d MMM" else "EEE, d MMM", EN).format(Date(ms))
++
++    private fun sameYear(a: Long, b: Long): Boolean =
++        Calendar.getInstance().apply { timeInMillis = a }.get(Calendar.YEAR) == Calendar.getInstance().apply { timeInMillis = b }.get(Calendar.YEAR)
++
++    private fun startOfDay(ms: Long): Long = Calendar.getInstance().apply {
++        timeInMillis = ms
++        set(Calendar.HOUR_OF_DAY, 0)
++        set(Calendar.MINUTE, 0)
++        set(Calendar.SECOND, 0)
++        set(Calendar.MILLISECOND, 0)
++    }.timeInMillis
++}
++
++/**
++ * "Replace current wallpaper?": asked before a picture something else set is replaced (Apply of a
++ * source, forgetting the source, or the computer's own refusal to replace an unsaved wallpaper).
++ */
++@Composable
++fun ReplaceWallpaperDialog(onReplace: () -> Unit, onCancel: () -> Unit) {
++    AlertDialog(
++        onDismissRequest = onCancel,
++        title = { Text(stringResource(R.string.homar_wallpapers_replace_title)) },
++        text = { Text(stringResource(R.string.homar_wallpapers_replace_text)) },
++        confirmButton = { TextButton(onClick = onReplace) { Text(stringResource(R.string.homar_wallpapers_replace)) } },
++        dismissButton = { TextButton(onClick = onCancel) { Text(stringResource(R.string.homar_wallpapers_cancel)) } },
++    )
++}
++
++/** The green dot of a computer that is online now. */
++@Composable
++fun OnlineDot(modifier: Modifier = Modifier) {
++    Box(modifier.size(8.dp).background(Color(0xFF34A853), CircleShape))
++}
++
++/** A computer's name as a person reads it. */
++fun Computer.label(): String = name.ifEmpty { "Computer" }
++
++/**
++ * The look book as the screens need it, read once per change: the scope, the last change, the
++ * source, what is on the screen and each paired computer's entry.
++ */
++class StyleView(
++    val scope: String?,
++    val last: String?,
++    val source: String?,
++    val applied: LookBook.Applied?,
++    val entries: Map<String, LookBook.Entry>,
++) {
++    /** Whose wallpaper & style the phone shows once [gone] is forgotten: the last change, else the newest of the others. */
++    fun nextSource(gone: String): String? =
++        last?.takeIf { it != gone && it in entries } ?: entries.values.filter { it.fp != gone }.maxByOrNull { it.changedAt }?.fp
++}
++
++object StyleSource {
++    /** The Source choice "Latest change" (the scope is then empty). */
++    const val LATEST = "latest"
++
++    /** The book, or null when it cannot be read (the screen says so and "Forget all computers" clears it). */
++    fun read(ctx: Context): StyleView? = try {
++        val entries = Pins.list(ctx).mapNotNull { c -> LookBook.entry(ctx, c.fp)?.let { c.fp to it } }.toMap()
++        StyleView(LookBook.scope(ctx), LookBook.last(ctx), LookBook.source(ctx), LookBook.applied(ctx), entries)
++    } catch (e: OmalawnError) {
++        if (e.code != LookBook.UNREADABLE) throw e
++        null
++    }
++
++    /** "On screen: Laptop's wallpaper & style (Tokyo Night), since 21:45" / "On screen: not from a computer". */
++    fun onScreenLine(view: StyleView, computers: List<Computer>): String {
++        val a = view.applied ?: return "On screen: not from a computer"
++        val name = computers.firstOrNull { it.fp == a.fp }?.label() ?: "A forgotten computer"
++        val theme = view.entries[a.fp]?.theme?.ifEmpty { null }
++        return "On screen: $name's wallpaper & style" + (theme?.let { " ($it)" } ?: "") + ", since " + HomaLawnDates.moment(a.at)
++    }
++
++    /** [fp]'s current wallpaper & style is the one on the screen already. */
++    private fun isShown(ctx: Context, fp: String): Boolean =
++        LookBook.applied(ctx)?.let { it.fp == fp && it.key == LookBook.entry(ctx, fp)?.key } == true
++
++    /** Following [want] (null = latest change) would replace a picture something else set since the book last showed one. */
++    fun wouldReplace(ctx: Context, want: String?): Boolean {
++        val next = want ?: LookBook.last(ctx) ?: return false
++        return LookBook.entry(ctx, next) != null && !isShown(ctx, next) && LookBook.needsReplace(ctx, next)
++    }
++
++    /** The Source becomes [fp] (null = latest change) and its wallpaper & style goes on the screen. */
++    fun applyScope(ctx: Context, fp: String?) {
++        OmalawnCommands.serially {
++            LookBook.setScope(ctx, fp)
++            showSource(ctx)
++        }
++    }
++
++    /** The source's wallpaper & style goes on the screen unless it is there already; a source that sent none leaves the screen alone. */
++    fun showSource(ctx: Context) {
++        OmalawnCommands.serially {
++            val src = LookBook.source(ctx) ?: return@serially
++            if (LookBook.entry(ctx, src) != null && !isShown(ctx, src)) LookBook.show(ctx, src)
++        }
++    }
++
++    /** What a person reads of a failure: the message without its machine code ("no_look: …"). */
++    fun plain(e: Exception): String = (e.message ?: e.javaClass.simpleName).replace(Regex("^[a-z_]+: "), "")
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/LookBook.kt b/lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+index fe35b85a22..6a46c05d06 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/LookBook.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+@@ -238,7 +238,7 @@ object LookBook {
+ 
+     /** `launcher.look_show`: [fp]'s look goes on the screen, if [fp] is still the source and its key the stored one. */
+     fun showFromLink(ctx: Context, fp: String, p: JSONObject): JSONObject {
+-        if (source(ctx) != fp) throw OmalawnError("not_source", "not_source: the phone shows another computer's look now")
++        if (source(ctx) != fp) throw OmalawnError("not_source", "not_source: the phone shows another computer's wallpaper & style now")
+         val e = entry(ctx, fp)
+         if (e?.key != p.optString("key")) throw OmalawnError("stale_key", "stale_key: send look_put again")
+         show(ctx, fp, e.sent)
+@@ -250,7 +250,7 @@ object LookBook {
+      * picture, then the lock one; [parts] limits the pictures (a `look_show` sets those its put sent).
+      */
+     fun show(ctx: Context, fp: String, parts: Set<String>? = null): Applied {
+-        val e = entry(ctx, fp) ?: throw OmalawnError("no_look", "no_look: this computer has sent no look")
++        val e = entry(ctx, fp) ?: throw OmalawnError("no_look", "no_look: this computer has sent no wallpaper & style yet")
+         val set = parts ?: e.parts
+         if (e.prefs.length() > 0) OmalawnCommands.applyPrefWrites(ctx, e.prefs) // one commit, one reload
+         val wm = WallpaperManager.getInstance(ctx)
+@@ -337,7 +337,7 @@ object LookBook {
+         val o = try {
+             JSONObject(f.readText())
+         } catch (e: Exception) {
+-            throw OmalawnError(UNREADABLE, "$UNREADABLE: the phone's record of computer looks cannot be read (${e.javaClass.simpleName}: ${e.message})")
++            throw OmalawnError(UNREADABLE, "$UNREADABLE: the wallpaper & style stored on this phone cannot be read (${e.javaClass.simpleName}: ${e.message})")
+         }
+         loaded = true
+         val cs = o.optJSONObject("computers") ?: JSONObject()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+index 42c4108943..929469ce0b 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+@@ -41,25 +41,28 @@ import androidx.compose.material.icons.rounded.Search
+ import androidx.compose.material.icons.rounded.SignalCellular4Bar
+ import androidx.compose.material.icons.rounded.Wallpaper
+ import androidx.compose.material.icons.rounded.Wifi
+-import androidx.compose.material3.AlertDialog
+ import androidx.compose.material3.Button
+ import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.FilledTonalButton
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.OutlinedButton
++import androidx.compose.material3.RadioButton
+ import androidx.compose.material3.Slider
+ import androidx.compose.material3.SliderDefaults
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+-import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableLongStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.produceState
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+@@ -91,8 +94,11 @@ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
+ import app.lawnchair.omalawn.ThemeWallpapers.Look
+ import app.lawnchair.omalawn.ThemeWallpapers.Sel
++import app.lawnchair.omalawn.link.Computer
++import app.lawnchair.omalawn.link.HomarComputers
+ import app.lawnchair.omalawn.link.Pins
+ import app.lawnchair.ui.preferences.LocalIsExpandedScreen
++import app.lawnchair.ui.preferences.LocalNavController
+ import app.lawnchair.ui.preferences.components.controls.SwitchPreference
+ import app.lawnchair.ui.preferences.components.layout.BottomSpacer
+ import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
+@@ -107,13 +113,14 @@ import kotlin.coroutines.resume
+ import kotlin.math.roundToInt
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
+ import kotlinx.coroutines.suspendCancellableCoroutine
+ import kotlinx.coroutines.withContext
+ import kotlinx.coroutines.withTimeoutOrNull
+ import kotlinx.serialization.Serializable
+ import org.json.JSONObject
+ 
+-/** The settings route of the "Wallpaper from Omarchy" screen (patch 0017). */
++/** The settings route of the "Wallpaper & style" screen (patch 0017; Source and one draft since 0034). */
+ @Serializable
+ data object HomarWallpapers
+ 
+@@ -141,47 +148,67 @@ private fun encode(l: Look): String = l.toJson().toString()
+ private fun decode(s: String?): Look? = s?.let { runCatching { Look.fromJson(JSONObject(it)) }.getOrNull() }
+ 
+ /**
+- * The screen. On top, the lock screen and the home screen as they will look (the draft; views,
+- * not controls). Below, a Lock screen panel and a Home screen panel: the two screens are always
+- * set separately. Each panel: Keep current, the theme's wallpapers or gradients made from its
+- * colours; its darken / lighten layer; on the Home screen panel, while it shows Theme wallpapers,
+- * the parallax switch. A computer from before the look model takes no layers or parallax: those stay
+- * hidden. Taps only change the draft (it survives a rotation; leaving the screen drops it); Apply
+- * sends it as one choice and the bar shows how it goes; Discard returns to what is applied.
++ * The screen (patch 0034): on top what the screens show now ("On screen: …"), then **Source**:
++ * "Latest change" or one paired computer, then that source's picker: the lock screen and the home
++ * screen as they will look (the draft; views, not controls), and a Lock screen panel and a Home
++ * screen panel (the two screens are always set separately). Each panel: Keep current, the theme's
++ * wallpapers or gradients made from its colours; its darken / lighten layer; on the Home screen
++ * panel, while it shows Theme wallpapers, the parallax switch. A computer from before the look model
++ * takes no layers or parallax: those stay hidden.
++ *
++ * The source and the picker are ONE draft with one Apply / Discard bar, shown only while there is
++ * something to apply (or an Apply is on its way). The picker draft belongs to the source it was made
++ * for: choosing another source drops it, and the picker shows that source's list with its current
++ * choice, so a choice is never sent to a computer it was not made for. Apply first makes the chosen
++ * source the phone's (asking "Replace current wallpaper?" when that would replace a picture
++ * something else set; Cancel applies nothing), then sends the picker's choice to that computer.
++ * The draft survives a rotation; leaving the screen drops it.
+  */
+ @Composable
+ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     val ctx = LocalContext.current
+-    // the list shown is the one of the computer the look comes from; it follows the look book
+-    var source by remember { mutableStateOf<LookSource?>(null) }
+-    val src = source?.fp
+-    var unreadable by remember { mutableStateOf(false) } // the look book cannot be read: no source to name
+-    var loaded by remember { mutableStateOf(false) } // the first read of the book is done
+-    var switched by remember { mutableStateOf<String?>(null) } // the source changed while a choice waited: its name
+-    var draftText by rememberSaveable { mutableStateOf<String?>(null) }
+-    val book by LookBook.changes.collectAsState()
+-    LaunchedEffect(book) {
+-        try {
+-            val next = withContext(Dispatchers.IO) {
+-                ThemeWallpapers.load(ctx)
+-                LookBook.source(ctx)?.let { LookSource(it, Pins.name(ctx, it).orEmpty(), LookBook.scope(ctx) == null) }
+-            }
+-            unreadable = false
+-            val old = source?.fp
+-            if (old != null && old != next?.fp) {
+-                // the look now comes from another computer ([LookBook] has dropped what the old one waited for)
+-                draftText = null
+-                switched = if (ThemeWallpapers.state.value[old]?.dropped == true) next?.name.orEmpty().ifEmpty { UNNAMED } else null
+-            }
+-            source = next
+-            loaded = true
+-        } catch (e: OmalawnError) {
+-            if (e.code != LookBook.UNREADABLE) throw e
+-            unreadable = true
+-            source = null
+-            loaded = true
+-        }
++    val app = ctx.applicationContext
++    val nav = LocalNavController.current
++    val scope = rememberCoroutineScope()
++    var tick by remember { mutableIntStateOf(0) }
++    DisposableEffect(Unit) {
++        val l: () -> Unit = { tick++ }
++        Pins.onChange(l)
++        onDispose { Pins.removeListener(l) }
+     }
++    val book by LookBook.changes.collectAsState()
++    // the paired computers and the look book, read off the main thread; null until the first read
++    var read by remember { mutableStateOf<StyleRead?>(null) }
++    var switched by remember { mutableStateOf<String?>(null) } // the source changed under a waiting choice: its name
++    var draftText by rememberSaveable { mutableStateOf<String?>(null) } // the picker draft …
++    var draftFor by rememberSaveable { mutableStateOf<String?>(null) } // … and the computer it was made for
++    var scopeDraft by rememberSaveable { mutableStateOf<String?>(null) } // LATEST or a fingerprint; null = no change
++    LaunchedEffect(tick, book) {
++        val next = withContext(Dispatchers.IO) {
++            ThemeWallpapers.load(ctx)
++            StyleRead(Pins.list(ctx), StyleSource.read(ctx))
++        }
++        val old = read?.view?.source
++        val now = next.view?.source
++        if (old != null && old != now) {
++            // the phone follows another computer now ([LookBook] has dropped what the old one waited for)
++            switched = if (ThemeWallpapers.state.value[old]?.dropped == true) {
++                next.computers.firstOrNull { it.fp == now }?.label() ?: UNNAMED
++            } else {
++                null
++            }
++        }
++        read = next
++    }
++    val computers = read?.computers.orEmpty()
++    val view = read?.view
++    val savedScope = view?.scope ?: StyleSource.LATEST
++    val chosen = scopeDraft?.takeIf { d -> d == StyleSource.LATEST || computers.any { it.fp == d } } ?: savedScope
++    val scopeDirty = view != null && chosen != savedScope
++    // the computer whose list the picker shows: the chosen source's
++    val src: String? = if (chosen == StyleSource.LATEST) view?.last else chosen
++    val srcName = computers.firstOrNull { it.fp == src }?.label() ?: UNNAMED
++
+     val all by ThemeWallpapers.state.collectAsState()
+     val st = all[src] ?: ThemeWallpapers.State()
+     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+@@ -195,46 +222,69 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     }
+     // what is applied, or on its way: the draft is compared with this
+     val base: Look = (choice?.look ?: st.look).normal()
+-    val draft: Look = decode(draftText)?.takeIf { d -> d.screens.values.all { st.valid(it) } } ?: base
+-    val dirty = st.differs(draft, base)
+-    // a lambda, not a function reference: it captures the current `base`
++    val draft: Look = decode(draftText)?.takeIf { d -> draftFor == src && d.screens.values.all { st.valid(it) } } ?: base
++    val showPicker = src != null && st.known && st.enabled && st.message == null && st.perScreen &&
++        (st.items.isNotEmpty() || st.gradients.isNotEmpty())
++    val pickerDirty = showPicker && st.differs(draft, base)
++    // a lambda, not a function reference: it captures the current `base` and `src`
+     val edit: (Look) -> Unit = { l ->
+         switched = null
++        draftFor = src
+         draftText = if (l != base) encode(l) else null
+     }
+-    val showPicker = st.known && st.enabled && st.message == null && st.perScreen &&
+-        (st.items.isNotEmpty() || st.gradients.isNotEmpty())
++    var applying by remember { mutableStateOf(false) }
++    var failure by remember { mutableStateOf<String?>(null) }
++    // set while the phone asks "Replace current wallpaper?" before following another source: what Replace does
++    var asking by remember { mutableStateOf<(() -> Unit)?>(null) }
++
++    val applyingText = stringResource(R.string.homar_wallpapers_applying)
+     val status: Pair<ImageVector?, String>? = when {
++        applying -> null to applyingText
++        failure != null -> Icons.Rounded.ErrorOutline to failure!!
+         choice != null && choice.waiting != null -> Icons.Rounded.Lock to choice.waiting
+         choice != null && !choice.received && now - choice.at > ThemeWallpapers.RECEIVE_WAIT_MS ->
+-            Icons.Rounded.CloudOff to stringResource(R.string.homar_wallpapers_unreachable)
+-        choice != null -> null to stringResource(R.string.homar_wallpapers_applying)
++            Icons.Rounded.CloudOff to stringResource(R.string.homar_wallpapers_unreachable, srcName)
++        choice != null -> null to applyingText
+         st.error != null -> Icons.Rounded.ErrorOutline to st.error!!
+         switched != null -> Icons.Rounded.Info to stringResource(R.string.homar_wallpapers_source_changed, switched!!)
+         else -> null
+     }
+ 
+-    // the computer cannot save the current wallpaper first: ask, with no other words (owner's rule);
+-    // Cancel keeps the refused choice as the draft
++    // the computer cannot save the current wallpaper first: the shared question; Cancel keeps the
++    // refused choice as the draft
+     val unsaved = st.unsaved
+-    if (unsaved != null) {
++    if (unsaved != null && src != null) {
+         val cancel: () -> Unit = {
+             edit(unsaved)
+-            src?.let { ThemeWallpapers.dismissUnsaved(it) }
++            ThemeWallpapers.dismissUnsaved(src)
+         }
+-        AlertDialog(
+-            onDismissRequest = cancel,
+-            title = { Text(stringResource(R.string.homar_wallpapers_replace_title)) },
+-            confirmButton = {
+-                TextButton(onClick = {
+-                    if (src?.let { ThemeWallpapers.apply(ctx, it, unsaved, overwrite = true) } != true) cancel()
+-                }) { Text(stringResource(R.string.homar_wallpapers_replace)) }
+-            },
+-            dismissButton = {
+-                TextButton(onClick = cancel) { Text(stringResource(R.string.homar_wallpapers_cancel)) }
+-            },
++        ReplaceWallpaperDialog(
++            onReplace = { if (!ThemeWallpapers.apply(ctx, src, unsaved, overwrite = true)) cancel() },
++            onCancel = cancel,
+         )
+     }
++    asking?.let { replace ->
++        ReplaceWallpaperDialog(onReplace = { asking = null; replace() }, onCancel = { asking = null })
++    }
++
++    // Apply: the source first (it sets the screen from that computer's stored wallpaper & style),
++    // then the picker's choice to that computer
++    fun commit(wantScope: String?, look: Look?, fp: String?) {
++        scope.launch {
++            applying = true
++            failure = null
++            try {
++                if (scopeDirty) withContext(Dispatchers.IO) { StyleSource.applyScope(app, wantScope) }
++                scopeDraft = null
++                if (look != null && fp != null && ThemeWallpapers.apply(ctx, fp, look)) draftText = null
++                switched = null
++            } catch (e: Exception) {
++                failure = StyleSource.plain(e)
++            } finally {
++                applying = false
++            }
++        }
++    }
+ 
+     PreferenceLayout(
+         label = stringResource(R.string.homar_wallpapers_label),
+@@ -242,65 +292,141 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+         modifier = modifier,
+         verticalArrangement = Arrangement.spacedBy(0.dp),
+         bottomBar = {
+-            if (!showPicker && switched == null) {
+-                BottomSpacer()
+-            } else {
++            if (scopeDirty || pickerDirty || status != null) {
+                 ApplyBar(
+-                    dirty = dirty,
++                    dirty = (scopeDirty || pickerDirty) && !applying,
+                     status = status,
+-                    error = choice == null && st.error != null,
+-                    onDiscard = { draftText = null },
++                    error = !applying && (failure != null || (choice == null && st.error != null)),
++                    onDiscard = {
++                        scopeDraft = null
++                        draftText = null
++                        failure = null
++                        switched = null
++                    },
+                     onApply = {
+-                        if (src?.let { ThemeWallpapers.apply(ctx, it, draft) } == true) {
+-                            draftText = null
+-                            switched = null
++                        val wantScope = chosen.takeIf { it != StyleSource.LATEST }
++                        val look = draft.takeIf { pickerDirty }
++                        val fp = src
++                        if (scopeDirty) {
++                            scope.launch {
++                                val ask = withContext(Dispatchers.IO) { StyleSource.wouldReplace(app, wantScope) }
++                                if (ask) asking = { commit(wantScope, look, fp) } else commit(wantScope, look, fp)
++                            }
++                        } else {
++                            commit(wantScope, look, fp)
+                         }
+                     },
+                 )
++            } else {
++                BottomSpacer()
+             }
+         },
+     ) {
+         when {
+-            unreadable -> Notice(Icons.Rounded.ErrorOutline, stringResource(R.string.homar_wallpapers_book_unreadable))
+-            !loaded -> {}
+-            source == null -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_none_sent))
+-            !st.known -> {
+-                SourceLine(source!!)
+-                Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_not_sent, source!!.name.ifEmpty { UNNAMED }))
+-            }
+-            !st.enabled -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_sync_off))
+-            st.message != null -> Notice(Icons.Rounded.Info, st.message!!)
+-            !st.perScreen -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_update_computer))
+-            st.items.isEmpty() && st.gradients.isEmpty() -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_empty))
++            read == null -> {}
++            view == null -> Notice(Icons.Rounded.ErrorOutline, stringResource(R.string.homar_wallpapers_book_unreadable), error = true)
++            computers.isEmpty() -> PairFirst(onOpen = { nav.navigate(HomarComputers) })
+             else -> {
+-                SourceLine(source!!)
+-                ThemeLine(st.theme)
+-                Previews(st = st, base = base, shown = draft)
+-                WallpaperPanel(st, base, draft, LOCK, stringResource(R.string.homar_wallpapers_target_lock), edit = edit)
+-                WallpaperPanel(st, base, draft, HOME, stringResource(R.string.homar_wallpapers_target_home), edit = edit)
+-                Spacer(Modifier.height(8.dp))
++                OnScreen(StyleSource.onScreenLine(view, computers))
++                PreferenceGroup(heading = "Source") {
++                    SourceRow(
++                        title = "Latest change",
++                        description = "Follows the computer whose wallpaper & style changed last",
++                        selected = chosen == StyleSource.LATEST,
++                    ) {
++                        if (chosen != StyleSource.LATEST) {
++                            scopeDraft = StyleSource.LATEST
++                            draftText = null
++                            failure = null
++                            switched = null
++                        }
++                    }
++                    computers.forEach { c ->
++                        SourceRow(
++                            title = c.label(),
++                            // the theme it sent last: with its wallpaper & style, else with its wallpaper list
++                            description = view.entries[c.fp]?.theme?.ifEmpty { null } ?: all[c.fp]?.theme ?: "Nothing received yet",
++                            selected = chosen == c.fp,
++                        ) {
++                            if (chosen != c.fp) {
++                                scopeDraft = c.fp
++                                draftText = null
++                                failure = null
++                                switched = null
++                            }
++                        }
++                    }
++                }
++                when {
++                    // "Latest change" with nothing received from any computer
++                    src == null -> Notice(
++                        Icons.Rounded.Info,
++                        computers.singleOrNull()?.let { stringResource(R.string.homar_wallpapers_not_sent, it.label()) }
++                            ?: stringResource(R.string.homar_wallpapers_none_sent),
++                    )
++                    !st.known -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_not_sent, srcName))
++                    !st.enabled -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_sync_off, srcName))
++                    st.message != null -> Notice(Icons.Rounded.Info, st.message!!)
++                    !st.perScreen -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_update_computer))
++                    st.items.isEmpty() && st.gradients.isEmpty() -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_empty))
++                    else -> {
++                        Spacer(Modifier.height(16.dp))
++                        ThemeLine(st.theme)
++                        Previews(st = st, base = base, shown = draft)
++                        WallpaperPanel(st, base, draft, LOCK, stringResource(R.string.homar_wallpapers_target_lock), edit = edit)
++                        WallpaperPanel(st, base, draft, HOME, stringResource(R.string.homar_wallpapers_target_home), edit = edit)
++                        Spacer(Modifier.height(8.dp))
++                    }
++                }
+             }
+         }
+     }
+ }
+ 
+-/** The computer whose look this screen shows, and whether it is so because it changed last (spec 6.5). */
+ private const val UNNAMED = "Computer"
+ 
+-private data class LookSource(val fp: String, val name: String, val latest: Boolean)
++/** The paired computers and the look book as one read ([StyleRead.view] null: the book cannot be read). */
++private class StyleRead(val computers: List<Computer>, val view: StyleView?)
++
++/** What the screens show now, in plain words. */
++@Composable
++private fun OnScreen(line: String) {
++    PreferenceGroup {
++        PreferenceTemplate(
++            title = { Text(line, style = MaterialTheme.typography.bodyLarge) },
++            startWidget = { StartIcon(Icons.Rounded.Wallpaper) },
++        )
++    }
++}
+ 
+ @Composable
+-private fun SourceLine(source: LookSource) {
+-    val name = source.name.ifEmpty { UNNAMED }
+-    Text(
+-        text = stringResource(R.string.homar_wallpapers_from, name) +
+-            if (source.latest) " " + stringResource(R.string.homar_wallpapers_changed_last) else "",
+-        style = MaterialTheme.typography.labelLarge,
+-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++private fun SourceRow(title: String, description: String, selected: Boolean, onSelect: () -> Unit) {
++    PreferenceTemplate(
++        title = { Text(title) },
++        description = { Text(description) },
++        startWidget = { Box(contentAlignment = Alignment.Center, modifier = Modifier.size(32.dp)) { RadioButton(selected = selected, onClick = null) } },
++        modifier = Modifier.selectable(selected = selected, role = Role.RadioButton, onClick = onSelect),
+     )
+ }
+ 
++/** No computer is paired: the next step, with a way to the Computers screen. */
++@Composable
++private fun PairFirst(onOpen: () -> Unit) {
++    PreferenceGroup {
++        PreferenceTemplate(
++            title = { Text("Pair a computer first") },
++            description = {
++                Column {
++                    Text("Wallpaper & style comes from the Omarchy theme of a paired computer.")
++                    Spacer(Modifier.height(12.dp))
++                    FilledTonalButton(onClick = onOpen) { Text("Open Computers") }
++                }
++            },
++            startWidget = { StartIcon(Icons.Rounded.Info) },
++        )
++    }
++}
++
+ /** The followed theme's name, as a small label over the previews. */
+ @Composable
+ private fun ThemeLine(theme: String?) {
+@@ -499,7 +625,7 @@ private fun LockOverlay() {
+     val time = remember {
+         val d = Date()
+         DateFormat.getTimeFormat(ctx).format(d).replace(Regex("\\s?[AaPp]\\.?[Mm]\\.?$"), "") to
+-            DateFormat.format("EEE, d MMM", d).toString()
++            HomaLawnDates.screenDate(d.time, long = false)
+     }
+     BoxWithConstraints(Modifier.fillMaxSize()) {
+         val w = maxWidth
+@@ -556,7 +682,7 @@ private fun textShadow() = androidx.compose.ui.graphics.Shadow(Color.Black.copy(
+ private fun HomeOverlay() {
+     val ctx = LocalContext.current
+     val icons by produceState<HomeIcons.Set?>(null) { value = HomeIcons.load(ctx) }
+-    val date = remember { DateFormat.format("EEEE, MMM d", Date()).toString() }
++    val date = remember { HomaLawnDates.screenDate(System.currentTimeMillis(), long = true) }
+     BoxWithConstraints(Modifier.fillMaxSize()) {
+         val w = maxWidth
+         val icon = w * 0.165f
+@@ -1114,21 +1240,23 @@ internal fun ApplyBar(
+ private fun Notice(icon: ImageVector, text: String, error: Boolean = false) {
+     PreferenceGroup {
+         PreferenceTemplate(
+-            title = {},
+-            description = {
++            title = {
+                 Text(
+                     text = text,
++                    style = MaterialTheme.typography.bodyLarge,
+                     color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                 )
+             },
+-            startWidget = {
+-                Icon(
+-                    imageVector = icon,
+-                    contentDescription = null,
+-                    tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+-                )
+-            },
++            startWidget = { StartIcon(icon, if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) },
+             modifier = Modifier.fillMaxWidth(),
+         )
+     }
+ }
++
++/** A row's leading icon in the box upstream's settings rows give theirs, so every row's text starts at one inset. */
++@Composable
++private fun StartIcon(icon: ImageVector, tint: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
++    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(32.dp)) {
++        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+index c8be506475..258a2a107e 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+@@ -1,21 +1,29 @@
+ // Adapted from Flux (https://github.com/bjarneo/flux), MIT License, Copyright (c) 2026 Bjarne Oeverli
+ // (android/.../ui/ComputersScreen.kt and ui/ScreenKit.kt): a list of the paired computers with each one's
+ // state and an unpair per computer; "last seen" in the words of Flux's agoText. Differences: Lawnchair's
+-// preference rows instead of Flux's cards, Forget in a details dialog and a confirmation instead of a long press.
++// preference rows instead of Flux's cards, Forget in the computer's one dialog instead of a long press.
+ package app.lawnchair.omalawn.link
+ 
+ import android.content.Intent
+-import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
++import androidx.annotation.DrawableRes
++import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Add
++import androidx.compose.material.icons.rounded.DeleteOutline
+ import androidx.compose.material.icons.rounded.ErrorOutline
+-import androidx.compose.foundation.layout.padding
+ import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Icon
+ import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.RadioButton
++import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
+@@ -27,31 +35,35 @@ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+-import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.res.painterResource
++import androidx.compose.ui.text.SpanStyle
++import androidx.compose.ui.text.buildAnnotatedString
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.withStyle
+ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
+-import app.lawnchair.omalawn.ApplyBar
++import app.lawnchair.omalawn.HomaLawnDates
+ import app.lawnchair.omalawn.LookBook
+-import app.lawnchair.omalawn.OmalawnCommands
+-import app.lawnchair.omalawn.OmalawnError
+-import com.android.launcher3.R
+-import app.lawnchair.ui.preferences.components.layout.BottomSpacer
++import app.lawnchair.omalawn.OnlineDot
++import app.lawnchair.omalawn.ReplaceWallpaperDialog
++import app.lawnchair.omalawn.StyleSource
++import app.lawnchair.omalawn.StyleView
++import app.lawnchair.omalawn.label
++import app.lawnchair.ui.preferences.LocalIsExpandedScreen
+ import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
+ import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
+ import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
++import com.android.launcher3.R
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import kotlinx.serialization.Serializable
+-import java.text.SimpleDateFormat
+-import java.util.Date
+-import java.util.Locale
+ 
+ /** The settings route of the "Computers" screen (patch 0030). */
+ @Serializable
+@@ -63,12 +75,14 @@ fun NavGraphBuilder.homarComputers() {
+ }
+ 
+ /**
+- * Every paired computer with its state, "Pair a computer", and Forget (one, or all) behind a
+- * confirmation. Forgetting closes that computer's connections through [Pins]' removal listener, so
+- * nothing more is done here (a forgotten look source hands the screen to the next look, asking
++ * Only the paired computers (patch 0034): each with its state and "Shown now" on the one whose
++ * wallpaper & style is on the screen; "Pair a computer"; "Forget all computers". Tapping a computer
++ * opens its one dialog (status, paired date, fingerprint under "Details", what forgetting does, and
++ * Forget: one confirmation). Forgetting closes that computer's connections through [Pins]' removal
++ * listener; a forgotten source hands the screen to the next computer's wallpaper & style (asking
+  * first when that would replace a wallpaper something else set). Forgetting all also empties the
+- * look book, which therefore works on a damaged one. "Sync look with" is a draft until Apply
+- * (patch 0031). The list follows [Pins], [LinkServer] and [LookBook] as they change.
++ * look book, which therefore works on a damaged one. Which computer the phone follows is chosen on
++ * the Wallpaper & style screen. The list follows [Pins], [LinkServer] and [LookBook] as they change.
+  */
+ @Composable
+ fun ComputersScreen() {
+@@ -87,114 +101,66 @@ fun ComputersScreen() {
+     val book by LookBook.changes.collectAsState()
+     val computers = remember(tick) { Pins.list(ctx) }
+     val online = remember(tick) { LinkServer.connectedFps() }
+-    // the book is read off the main thread; null until the first read, then the book or LookRead(null) when it cannot be read
+-    var read by remember { mutableStateOf<LookRead?>(null) }
+-    LaunchedEffect(tick, book) { read = LookRead(withContext(Dispatchers.IO) { readLook(ctx) }) }
+-    val look = read?.view
+-    var draft by rememberSaveable(look?.scope) { mutableStateOf(look?.scope ?: LATEST) }
+-    val chosen = draft.takeIf { d -> d == LATEST || computers.any { it.fp == d } } ?: LATEST
+-    val applyingText = stringResource(R.string.homar_wallpapers_applying)
+-    var applying by remember { mutableStateOf(false) }
++    // the book is read off the main thread; null until the first read (or when it cannot be read)
++    var view by remember { mutableStateOf<StyleView?>(null) }
++    LaunchedEffect(tick, book) { view = withContext(Dispatchers.IO) { StyleSource.read(ctx) } }
+     var failure by remember { mutableStateOf<String?>(null) }
+     // set while the phone asks "Replace current wallpaper?": what Replace does
+     var asking by remember { mutableStateOf<(() -> Unit)?>(null) }
+     // only the fingerprint is held: the computer shown is always the live one, and a dialog for a
+     // computer forgotten elsewhere closes
+     var open by remember { mutableStateOf<String?>(null) }
+-    var forgetting by remember { mutableStateOf<String?>(null) }
+     var forgettingAll by remember { mutableStateOf(false) }
+-    // forgetting closes sockets and deletes files: off the main thread
++    val app = ctx.applicationContext
++
++    // forgetting closes sockets, deletes files and may set wallpapers: off the main thread
+     fun inBackground(work: () -> Unit) {
+         scope.launch {
+-            withContext(Dispatchers.IO) { work() }
+-            tick++
+-        }
+-    }
+-
+-    // a look change runs off the main thread (it sets wallpapers); the bar says "Applying…"
+-    fun showing(work: () -> Unit) {
+-        scope.launch {
+-            applying = true
+             failure = null
+             try {
+                 withContext(Dispatchers.IO) { work() }
+             } catch (e: Exception) {
+-                failure = plain(e)
+-            } finally {
+-                applying = false
++                failure = StyleSource.plain(e)
+             }
++            tick++
+         }
+     }
+-    val app = ctx.applicationContext
+-    val dirty = look != null && !applying && chosen != (look.scope ?: LATEST)
+-    val sourceFp = look?.source
+ 
+-    PreferenceLayout(
+-        label = "Computers",
+-        backArrowVisible = true,
+-        bottomBar = {
+-            if (look != null && (dirty || applying || failure != null)) {
+-                ApplyBar(
+-                    dirty = dirty,
+-                    status = when {
+-                        applying -> null to applyingText
+-                        failure != null -> Icons.Rounded.ErrorOutline to failure!!
+-                        else -> null
+-                    },
+-                    error = !applying && failure != null,
+-                    onDiscard = { draft = look.scope ?: LATEST; failure = null },
+-                    onApply = {
+-                        val want = chosen.takeIf { it != LATEST }
+-                        showing {
+-                            if (wouldReplace(app, want)) asking = { showing { applyScope(app, want) } } else applyScope(app, want)
+-                        }
+-                    },
++    PreferenceLayout(label = "Computers", backArrowVisible = !LocalIsExpandedScreen.current) {
++        failure?.let { f ->
++            PreferenceGroup {
++                PreferenceTemplate(
++                    title = { Text(f, color = MaterialTheme.colorScheme.error) },
++                    startWidget = { RowIcon(Icons.Rounded.ErrorOutline, tint = MaterialTheme.colorScheme.error) },
+                 )
+-            } else {
+-                BottomSpacer()
+-            }
+-        },
+-    ) {
+-        if (computers.isNotEmpty() && read != null) {
+-            PreferenceGroup(heading = "Look") {
+-                if (look == null) {
+-                    Text(stringResource(R.string.homar_wallpapers_book_unreadable), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+-                } else {
+-                    Text(onScreenLine(look, computers), Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+-                    if (sourceFp != null && look.entries[sourceFp] == null) {
+-                        Text(
+-                            nameOf(computers, sourceFp) + " has not sent its look yet",
+-                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                        )
+-                    }
+-                    RadioRow("Latest change", "Shows the look of the computer whose look changed last", chosen == LATEST) {
+-                        draft = LATEST; failure = null
+-                    }
+-                    computers.forEach { c ->
+-                        RadioRow(c.name.ifEmpty { "Computer" }, look.entries[c.fp]?.theme?.ifEmpty { null } ?: "No look received yet", chosen == c.fp) {
+-                            draft = c.fp; failure = null
+-                        }
+-                    }
+-                }
+             }
+         }
+-        PreferenceGroup(heading = "Paired computers") {
+-            if (computers.isEmpty()) Text("No computer is paired.", Modifier.padding(16.dp))
+-            computers.forEach { c ->
++        if (computers.isEmpty()) {
++            PreferenceGroup {
+                 PreferenceTemplate(
+-                    title = { Text(c.name.ifEmpty { "Computer" }) },
+-                    description = { Text(statusLine(c, c.fp in online) + " · Paired " + date(c.added)) },
+-                    startWidget = { if (c.fp in online) OnlineDot() },
+-                    endWidget = { if (c.fp == sourceFp) Text("Look", color = MaterialTheme.colorScheme.primary) },
+-                    modifier = Modifier.clickable { open = c.fp },
++                    title = { Text("No computer is paired yet.") },
++                    description = { Text("On your computer open Homa Lawn › Add phone, then tap Pair a computer here.") },
++                    startWidget = { RowIcon(R.drawable.homar_ic_computer) },
+                 )
+             }
++        } else {
++            PreferenceGroup(heading = "Paired computers") {
++                computers.forEach { c ->
++                    PreferenceTemplate(
++                        title = { Text(c.label()) },
++                        description = { StatusLine(c, c.fp in online) },
++                        startWidget = { RowIcon(R.drawable.homar_ic_computer) },
++                        endWidget = { if (view?.applied?.fp == c.fp) ShownNow() },
++                        onClick = { open = c.fp },
++                    )
++                }
++            }
+         }
+         PreferenceGroup {
+             PreferenceTemplate(
+                 title = { Text("Pair a computer") },
+-                modifier = Modifier.clickable {
++                startWidget = { RowIcon(Icons.Rounded.Add) },
++                onClick = {
+                     ctx.startActivity(
+                         Intent(ctx, PairConfirmActivity::class.java)
+                             .setAction(PairConfirmActivity.ACTION_WAIT)
+@@ -205,55 +171,59 @@ fun ComputersScreen() {
+             if (computers.isNotEmpty()) {
+                 PreferenceTemplate(
+                     title = { Text("Forget all computers", color = MaterialTheme.colorScheme.error) },
+-                    modifier = Modifier.clickable { forgettingAll = true },
++                    startWidget = { RowIcon(Icons.Rounded.DeleteOutline, tint = MaterialTheme.colorScheme.error) },
++                    onClick = { forgettingAll = true },
+                 )
+             }
+         }
+     }
+ 
+     open?.let { fp -> computers.firstOrNull { it.fp == fp } }?.let { c ->
++        val name = c.label()
++        val next = view?.takeIf { it.source == c.fp }?.nextSource(c.fp)
+         AlertDialog(
+             onDismissRequest = { open = null },
+-            title = { Text(c.name.ifEmpty { "Computer" }) },
++            title = { Text(name) },
+             text = {
+-                Text(
+-                    statusLine(c, c.fp in online) + "\nPaired " + date(c.added) + "\nFingerprint " + c.fp.take(16),
+-                )
+-            },
+-            confirmButton = {
+-                TextButton({ open = null; forgetting = c.fp }) {
+-                    Text("Forget", color = MaterialTheme.colorScheme.error)
++                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
++                    StatusLine(c, c.fp in online)
++                    Text("Paired " + if (c.added == 0L) "at an unknown time" else HomaLawnDates.day(c.added))
++                    Spacer(Modifier.height(12.dp))
++                    Text("Details", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
++                    Text(
++                        buildAnnotatedString {
++                            append("Fingerprint ")
++                            withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(c.fp.take(16)) }
++                        },
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                    Spacer(Modifier.height(12.dp))
++                    Text(
++                        "If you forget $name, it can no longer reach this phone until it is paired again, and it is told so the next time it connects." +
++                            (next?.let { " The phone will show ${computers.firstOrNull { c2 -> c2.fp == it }?.label() ?: "Computer"}'s wallpaper & style." } ?: ""),
++                    )
+                 }
+             },
+-            dismissButton = { TextButton({ open = null }) { Text("Close") } },
+-        )
+-    }
+-    forgetting?.let { fp -> computers.firstOrNull { it.fp == fp } }?.let { c ->
+-        val name = c.name.ifEmpty { "Computer" }
+-        val next = look?.takeIf { it.source == c.fp }?.nextSource(c.fp)
+-        AlertDialog(
+-            onDismissRequest = { forgetting = null },
+-            title = { Text("Forget $name?") },
+-            text = {
+-                Text(
+-                    "$name can no longer use this phone. It will be told the next time it connects." +
+-                        (next?.let { "\nThe phone will show ${nameOf(computers, it)}'s look." } ?: ""),
+-                )
+-            },
+             confirmButton = {
+                 TextButton({
+-                    forgetting = null
++                    open = null
+                     // the look book hears of the removal itself; when the source was forgotten the screen
+                     // follows the new one (forgetting another computer leaves the screen alone)
+-                    showing {
++                    val wasSource = view?.source == c.fp
++                    inBackground {
+                         Pins.forget(app, c.fp)
+-                        if (look?.source == c.fp) {
+-                            if (wouldReplace(app, LookBook.scope(app))) asking = { showing { showSource(app) } } else showSource(app)
++                        if (wasSource) {
++                            if (StyleSource.wouldReplace(app, LookBook.scope(app))) {
++                                asking = { inBackground { StyleSource.showSource(app) } }
++                            } else {
++                                StyleSource.showSource(app)
++                            }
+                         }
+                     }
+-                }) { Text("Forget") }
++                }) { Text("Forget", color = MaterialTheme.colorScheme.error) }
+             },
+-            dismissButton = { TextButton({ forgetting = null }) { Text("Cancel") } },
++            dismissButton = { TextButton({ open = null }) { Text("Cancel") } },
+         )
+     }
+     if (forgettingAll) {
+@@ -263,8 +233,11 @@ fun ComputersScreen() {
+             text = {
+                 val n = computers.size
+                 Text(
+-                    "${if (n == 1) "The paired computer" else "All $n paired computers"} will no longer reach " +
+-                        "this phone until paired again.",
++                    if (n == 1) {
++                        "The paired computer will no longer reach this phone until it is paired again, and the wallpaper & style it sent is removed from the phone."
++                    } else {
++                        "${if (n == 2) "Both" else "All $n"} paired computers will no longer reach this phone until they are paired again, and the wallpaper & style they sent is removed from the phone."
++                    },
+                 )
+             },
+             confirmButton = {
+@@ -275,125 +248,59 @@ fun ComputersScreen() {
+                         Pins.forgetAll(app)
+                         LookBook.reset(app)
+                     }
+-                }) { Text("Forget") }
++                }) { Text("Forget all", color = MaterialTheme.colorScheme.error) }
+             },
+             dismissButton = { TextButton({ forgettingAll = false }) { Text("Cancel") } },
+         )
+     }
+ 
+-    if (asking != null) {
+-        AlertDialog(
+-            onDismissRequest = { asking = null },
+-            title = { Text("Replace current wallpaper?") },
+-            confirmButton = { TextButton({ asking?.invoke(); asking = null }) { Text("Replace") } },
+-            dismissButton = { TextButton({ asking = null }) { Text("Cancel") } },
++    asking?.let { replace ->
++        ReplaceWallpaperDialog(onReplace = { asking = null; replace() }, onCancel = { asking = null })
++    }
++}
++
++/** "● Online now" / "Last seen 5 min ago" / "Not seen yet". */
++@Composable
++private fun StatusLine(c: Computer, online: Boolean) {
++    Row(verticalAlignment = Alignment.CenterVertically) {
++        if (online) {
++            OnlineDot()
++            Spacer(Modifier.width(6.dp))
++        }
++        Text(
++            when {
++                online -> "Online now"
++                c.seen == 0L -> "Not seen yet"
++                else -> "Last seen " + HomaLawnDates.ago(c.seen)
++            },
+         )
+     }
+ }
+ 
++/** The label on the computer whose wallpaper & style the phone shows. */
+ @Composable
+-private fun RadioRow(title: String, description: String, selected: Boolean, onSelect: () -> Unit) {
+-    PreferenceTemplate(
+-        title = { Text(title) },
+-        description = { Text(description) },
+-        startWidget = { RadioButton(selected = selected, onClick = null) },
+-        modifier = Modifier.clickable(onClick = onSelect),
+-    )
++private fun ShownNow() {
++    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
++        Text(
++            "Shown now",
++            style = MaterialTheme.typography.labelMedium,
++            color = MaterialTheme.colorScheme.onSecondaryContainer,
++            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
++        )
++    }
++}
++
++/** A row's leading icon, sized as upstream's settings rows draw theirs. */
++@Composable
++private fun RowIcon(@DrawableRes res: Int) {
++    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(32.dp)) {
++        Icon(painterResource(res), contentDescription = null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
++    }
+ }
+ 
+ @Composable
+-private fun OnlineDot() {
+-    Box(Modifier.size(10.dp).background(Color(0xFF34A853), CircleShape))
+-}
+-
+-private fun statusLine(c: Computer, online: Boolean): String = when {
+-    online -> "Online now"
+-    c.seen == 0L -> "Not seen yet"
+-    else -> "Last seen " + ago(c.seen)
+-}
+-
+-// English whatever the phone's language is (getRelativeTimeSpanString follows the language)
+-private fun ago(ms: Long): String {
+-    val m = (System.currentTimeMillis() - ms) / 60_000
+-    return when {
+-        m < 1 -> "just now"
+-        m < 60 -> "$m min ago"
+-        m < 1440 -> "${m / 60} h ago"
+-        else -> "${m / 1440} days ago"
+-    }
+-}
+-
+-private fun date(ms: Long): String = if (ms == 0L) {
+-    "?"
+-} else {
+-    java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.ENGLISH).format(java.util.Date(ms))
+-}
+-
+-private const val LATEST = "latest"
+-
+-/** What the look book holds, as the screen needs it; read once per change. */
+-private class LookView(
+-    val scope: String?,
+-    val last: String?,
+-    val source: String?,
+-    val applied: LookBook.Applied?,
+-    val entries: Map<String, LookBook.Entry>,
+-) {
+-    /** Whose look the phone shows once [gone] is forgotten: the last change, else the newest of the others. */
+-    fun nextSource(gone: String): String? =
+-        last?.takeIf { it != gone && it in entries } ?: entries.values.filter { it.fp != gone }.maxByOrNull { it.changedAt }?.fp
+-}
+-
+-/** The book, or null when it cannot be read (the screen says so and "Forget all computers" clears it). */
+-private fun readLook(ctx: android.content.Context): LookView? = try {
+-    val entries = Pins.list(ctx).mapNotNull { c -> LookBook.entry(ctx, c.fp)?.let { c.fp to it } }.toMap()
+-    LookView(LookBook.scope(ctx), LookBook.last(ctx), LookBook.source(ctx), LookBook.applied(ctx), entries)
+-} catch (e: OmalawnError) {
+-    if (e.code != LookBook.UNREADABLE) throw e
+-    null
+-}
+-
+-private class LookRead(val view: LookView?)
+-
+-/** What a person reads of a failure: the message without its machine code ("no_look: …"). */
+-private fun plain(e: Exception): String = (e.message ?: e.javaClass.simpleName).replace(Regex("^[a-z_]+: "), "")
+-
+-private fun nameOf(computers: List<Computer>, fp: String) = computers.firstOrNull { it.fp == fp }?.name?.ifEmpty { null } ?: "Computer"
+-
+-private fun onScreenLine(look: LookView, computers: List<Computer>): String {
+-    val a = look.applied ?: return "On screen: not from a computer"
+-    val name = computers.firstOrNull { it.fp == a.fp }?.name?.ifEmpty { null } ?: "A forgotten computer"
+-    val theme = look.entries[a.fp]?.theme?.ifEmpty { null }
+-    return "On screen: $name's look" + (theme?.let { " ($it)" } ?: "") + ", since " + clock(a.at)
+-}
+-
+-// English whatever the phone's language is
+-private fun clock(ms: Long): String {
+-    val day = java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
+-    return SimpleDateFormat(if (ms >= day) "HH:mm" else "MMM d", Locale.ENGLISH).format(Date(ms))
+-}
+-
+-/** [fp]'s current look is the one on the screen already. */
+-private fun isShown(ctx: android.content.Context, fp: String): Boolean =
+-    LookBook.applied(ctx)?.let { it.fp == fp && it.key == LookBook.entry(ctx, fp)?.key } == true
+-
+-/** Showing the look would replace a picture something else set since the book last showed one. */
+-private fun wouldReplace(ctx: android.content.Context, want: String?): Boolean {
+-    val next = want ?: LookBook.last(ctx) ?: return false
+-    return LookBook.entry(ctx, next) != null && !isShown(ctx, next) && LookBook.needsReplace(ctx, next)
+-}
+-
+-private fun applyScope(ctx: android.content.Context, fp: String?) {
+-    OmalawnCommands.serially {
+-        LookBook.setScope(ctx, fp)
+-        showSource(ctx)
+-    }
+-}
+-
+-/** The source's look goes on the screen unless it is there already; a source with no look leaves the screen alone. */
+-private fun showSource(ctx: android.content.Context) {
+-    OmalawnCommands.serially {
+-        val src = LookBook.source(ctx) ?: return@serially
+-        if (LookBook.entry(ctx, src) != null && !isShown(ctx, src)) LookBook.show(ctx, src)
++private fun RowIcon(icon: ImageVector, tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant) {
++    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(32.dp)) {
++        Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp), tint = tint)
+     }
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index 1cb9d02ea1..ef31948ce0 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -1,33 +1,75 @@
+ package app.lawnchair.omalawn.link
+ 
+-import android.annotation.SuppressLint
+-import android.app.Activity
+ import android.app.KeyguardManager
+ import android.content.Intent
+-import android.graphics.Typeface
+ import android.os.Build
+ import android.os.Bundle
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.SystemClock
+ import android.util.Log
+-import android.view.Gravity
+ import android.view.MotionEvent
+-import android.view.View
+-import android.view.accessibility.AccessibilityNodeInfo
+-import android.widget.Button
+-import android.widget.LinearLayout
+-import android.widget.TextView
++import androidx.activity.ComponentActivity
++import androidx.activity.compose.setContent
++import androidx.activity.enableEdgeToEdge
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.gestures.detectTapGestures
++import androidx.compose.foundation.interaction.MutableInteractionSource
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.safeDrawingPadding
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.material3.AlertDialogDefaults
++import androidx.compose.material3.ButtonDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.ExperimentalComposeUiApi
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.input.pointer.pointerInteropFilter
++import androidx.compose.ui.layout.onSizeChanged
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.semantics.role
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.text.SpanStyle
++import androidx.compose.ui.text.buildAnnotatedString
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.withStyle
++import androidx.compose.ui.unit.IntSize
++import androidx.compose.ui.unit.dp
++import app.lawnchair.ui.theme.LawnchairTheme
+ 
+ /**
+  * Lawnchair's pairing screen, and the only place a pairing can be accepted (final review C2).
+- * Not exported, so only Lawnchair's own PendingIntents reach it. Two ways in:
++ * Not exported, so only Lawnchair's own PendingIntents reach it. Drawn as the settings' own dialog
++ * (Compose, Lawnchair's theme; patch 0034), in this activity's own window: no separate dialog
++ * window, so every check below covers it. Two ways in:
+  *
+  * - "Pair a computer" in Homa Lawn's settings ([ACTION_WAIT]): the screen says "Waiting for a
+  *   computer…" and keeps the pairing window ([PairingGate]) open while it shows, at most
+- *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, screen off) closes the window.
+- *   Tapping "Pair a computer" again only brings this one screen forward (singleTop). When a
+- *   computer's request arrives, the same screen switches in place to its name and four words
++ *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, a tap outside, screen off) closes
++ *   the window. Tapping "Pair a computer" again only brings this one screen forward (singleTop).
++ *   When a computer's request arrives, the same screen switches in place to its name and four words
+  *   with Reject / Accept, and no notification is posted for it. A request still open when the
+  *   screen is left gets its notification after all.
+  * - Review on the "Pair with <name>?" notification, or a request taken while the home screen was
+@@ -35,26 +77,30 @@ import android.widget.TextView
+  *   still open (re)posts its notification (Review / Reject), the same fallback as above.
+  *
+  * Accept pins the computer only on a real tap:
+- * - touches are filtered while another window covers it (`filterTouchesWhenObscured`), a touch
+- *   that Android marks as (partially) obscured is ignored, and other apps' overlays are hidden
+- *   while it shows (Android 12+);
+- * - Accept answers only to a finger lifted on it: an accessibility "click" (or any performClick
+- *   without that touch) does nothing; a finger that went down before the words had been shown
+- *   for [ARM_MS] does nothing either (a tap meant for Cancel cannot land on Accept);
++ * - touches are filtered while another window covers it (`filterTouchesWhenObscured` on the whole
++ *   window), a touch that Android marks as (partially) obscured is ignored, and other apps'
++ *   overlays are hidden while it shows (Android 12+);
++ * - Accept answers only to a finger lifted on it: it has no click action at all (an accessibility
++ *   "click", a key press or any other way without that touch does nothing); a finger that went
++ *   down before the words had been shown for [ARM_MS] does nothing either (a tap meant for Cancel
++ *   cannot land on Accept);
+  * - not shown over the lock screen, and Accept is refused while the phone is locked.
+  *
+  * Reject works any way it is pressed. The request view closes by itself when the request ends
+  * (back to waiting while the window is still open).
+  */
+-class PairConfirmActivity : Activity() {
++class PairConfirmActivity : ComponentActivity() {
+ 
+     private val main = Handler(Looper.getMainLooper())
+     private var token: String? = null // the request on screen, null while waiting
+     private var holding = false // this screen opened the pairing window and keeps it open
+     private var shownAt = 0L // uptimeMillis when the current request's words appeared
+-    private var touchDownAt = 0L // uptimeMillis of the finger-down of the current gesture on Accept
+-    private var touchUpAt = 0L // uptimeMillis of the last unobscured finger-up on Accept
+-    private var status: TextView? = null
++    private var touchDownAt = 0L // downTime of the current unobscured gesture on Accept
++
++    /** What the dialog shows: waiting (request null) or a computer's request. */
++    private class Shown(val request: Pair<String, List<String>>?, val note: String?)
++
++    private var shown by mutableStateOf(Shown(null, null))
+ 
+     private val watch = object : Runnable {
+         override fun run() {
+@@ -68,7 +114,7 @@ class PairConfirmActivity : Activity() {
+                 val next = Pairing.forScreen()
+                 when {
+                     next != null -> showRequest(next)
+-                    !PairingGate.isWindowOpen() -> finish() // the 5 minutes are over
++                    !PairingGate.isWindowOpen() -> finish() // the window's time is over
+                 }
+             }
+             if (!isFinishing) main.postDelayed(this, WATCH_MS)
+@@ -78,6 +124,10 @@ class PairConfirmActivity : Activity() {
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
++        enableEdgeToEdge()
++        setContent { LawnchairTheme { PairDialog() } }
++        // the whole window drops touches that arrive while another window covers it
++        window.decorView.filterTouchesWhenObscured = true
+         handle(intent)
+     }
+ 
+@@ -105,101 +155,21 @@ class PairConfirmActivity : Activity() {
+         }
+     }
+ 
+-    private fun pad() = (24 * resources.displayMetrics.density).toInt()
+-
+     private fun showWaiting(note: String?) {
+         token = null
+-        val pad = pad()
+-        val root = LinearLayout(this).apply {
+-            orientation = LinearLayout.VERTICAL
+-            setPadding(pad, pad, pad, pad)
+-            filterTouchesWhenObscured = true
+-        }
+-        root.addView(TextView(this).apply {
+-            text = "Waiting for a computer…"
+-            textSize = 26f
+-            setTypeface(typeface, Typeface.BOLD)
+-        })
+-        root.addView(TextView(this).apply {
+-            text = "On the computer run: homalawn pair"
+-            textSize = 16f
+-            setPadding(0, pad / 2, 0, 0)
+-        })
+-        status = TextView(this).apply {
+-            text = note ?: ""
+-            setPadding(0, pad / 2, 0, 0)
+-        }
+-        root.addView(status)
+-        val buttons = LinearLayout(this).apply {
+-            orientation = LinearLayout.HORIZONTAL
+-            gravity = Gravity.START // never where Accept will appear
+-        }
+-        buttons.addView(Button(this).apply {
+-            text = "Cancel"
+-            setOnClickListener { finish() }
+-        })
+-        root.addView(buttons)
+-        setContentView(root)
++        shown = Shown(null, note)
+     }
+ 
+-    @SuppressLint("ClickableViewAccessibility")
+     private fun showRequest(t: String) {
+-        val (name, words) = Pairing.pending(t) ?: return
++        val request = Pairing.pending(t) ?: return
+         token = t
+         shownAt = SystemClock.uptimeMillis()
+         touchDownAt = 0L
+-        touchUpAt = 0L
+-        val pad = pad()
+-        val root = LinearLayout(this).apply {
+-            orientation = LinearLayout.VERTICAL
+-            setPadding(pad, pad, pad, pad)
+-            filterTouchesWhenObscured = true
+-        }
+-        root.addView(TextView(this).apply {
+-            text = "Pair with $name?"
+-            textSize = 20f
+-            setTypeface(typeface, Typeface.BOLD)
+-        })
+-        root.addView(TextView(this).apply {
+-            text = words.joinToString(" ")
+-            textSize = 30f
+-            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+-            gravity = Gravity.CENTER
+-            setPadding(0, pad / 2, 0, pad / 2)
+-        })
+-        root.addView(TextView(this).apply {
+-            text = "Accept only if the computer shows the same four words. A paired computer can change this " +
+-                "phone's home screen and, with screen control on, see and operate the screen."
+-        })
+-        status = TextView(this).apply { setPadding(0, pad / 2, 0, 0) }
+-        root.addView(status)
+-        val buttons = LinearLayout(this).apply {
+-            orientation = LinearLayout.HORIZONTAL
+-            gravity = Gravity.END
+-            filterTouchesWhenObscured = true
+-        }
+-        buttons.addView(Button(this).apply {
+-            text = "Reject"
+-            filterTouchesWhenObscured = true
+-            setOnClickListener {
+-                Pairing.decide(applicationContext, token, Pairing.REJECTED)
+-                finish()
+-            }
+-        })
+-        val accept = Button(this).apply {
+-            text = "Accept"
+-            filterTouchesWhenObscured = true
+-            setOnTouchListener { _, e -> onAcceptTouch(e) }
+-            setOnClickListener { onAcceptClick() }
+-            // an accessibility service's "click" is not the user's finger: offer no click action
+-            setAccessibilityDelegate(object : View.AccessibilityDelegate() {
+-                override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean =
+-                    if (action == AccessibilityNodeInfo.ACTION_CLICK) false else super.performAccessibilityAction(host, action, args)
+-            })
+-        }
+-        buttons.addView(accept)
+-        root.addView(buttons)
+-        setContentView(root)
++        shown = Shown(request, null)
++    }
++
++    private fun note(text: String) {
++        shown = Shown(shown.request, text)
+     }
+ 
+     private fun obscured(e: MotionEvent): Boolean {
+@@ -208,37 +178,164 @@ class PairConfirmActivity : Activity() {
+             e.flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0
+     }
+ 
+-    /** Remembers a finger lifted on Accept with nothing covering the screen; never consumes. */
+-    private fun onAcceptTouch(e: MotionEvent): Boolean {
++    /** Every touch on Accept; a finger lifted on it, nothing covering the screen, armed, accepts. */
++    private fun onAcceptTouch(e: MotionEvent, size: IntSize): Boolean {
+         if (obscured(e)) {
+-            touchUpAt = 0L
+-            status?.text = "Another app is covering this screen; close it, then tap Accept."
++            touchDownAt = 0L
++            note("Another app is covering this screen; close it, then tap Accept.")
+             Log.w(TAG, "pairing Accept ignored: the touch was obscured")
+-            return true // swallowed: no click either
++            return true
+         }
+         when (e.actionMasked) {
+             MotionEvent.ACTION_DOWN -> touchDownAt = e.downTime
+-            MotionEvent.ACTION_UP -> touchUpAt = if (touchDownAt >= shownAt + ARM_MS) SystemClock.uptimeMillis() else 0L
++            MotionEvent.ACTION_UP -> {
++                val inside = e.x >= 0 && e.y >= 0 && e.x <= size.width && e.y <= size.height
++                val armed = touchDownAt != 0L && touchDownAt == e.downTime && touchDownAt >= shownAt + ARM_MS
++                touchDownAt = 0L
++                if (!inside) return true
++                if (!armed) {
++                    Log.w(TAG, "pairing Accept ignored: too soon after the words appeared")
++                    return true
++                }
++                accept()
++            }
++            MotionEvent.ACTION_CANCEL -> touchDownAt = 0L
+         }
+-        return false
++        return true
+     }
+ 
+-    private fun onAcceptClick() {
+-        val real = touchUpAt != 0L && SystemClock.uptimeMillis() - touchUpAt < TOUCH_TO_CLICK_MS
+-        touchUpAt = 0L
+-        if (!real) {
+-            Log.w(TAG, "pairing Accept ignored: not a finger on the screen, or too soon after the words appeared")
+-            return
+-        }
++    private fun accept() {
+         if (getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true) {
+-            status?.text = "Unlock the phone first."
++            note("Unlock the phone first.")
+             return
+         }
+         val t = token ?: return finish()
+-        if (!Pairing.acceptFromScreen(applicationContext, t)) status?.text = "This request has ended."
++        if (!Pairing.acceptFromScreen(applicationContext, t)) note("This request has ended.")
+         finish()
+     }
+ 
++    private fun reject() {
++        Pairing.decide(applicationContext, token, Pairing.REJECTED)
++        finish()
++    }
++
++    @Composable
++    private fun PairDialog() {
++        val s = shown
++        // the scrim: a tap outside the dialog leaves the screen, as a dialog's does
++        Box(
++            contentAlignment = Alignment.Center,
++            modifier = Modifier
++                .fillMaxSize()
++                .background(Color.Black.copy(alpha = 0.6f)) // as dark as Android dims behind the settings' dialogs
++                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { finish() }
++                .safeDrawingPadding(),
++        ) {
++            Surface(
++                shape = AlertDialogDefaults.shape,
++                color = AlertDialogDefaults.containerColor,
++                tonalElevation = AlertDialogDefaults.TonalElevation,
++                modifier = Modifier
++                    // as wide as the settings' own dialogs (Android's dialog width on a phone)
++                    .fillMaxWidth(0.78f)
++                    .widthIn(min = 280.dp, max = 560.dp)
++                    // taps on the dialog stay in it
++                    .pointerInput(Unit) { detectTapGestures { } },
++            ) {
++                Column(Modifier.padding(24.dp)) {
++                    if (s.request == null) Waiting(s.note) else Request(s.request.first, s.request.second, s.note)
++                }
++            }
++        }
++    }
++
++    @Composable
++    private fun Waiting(note: String?) {
++        val minutes = PairingGate.SCREEN_WINDOW_MS / 60_000
++        Text(WAITING, style = MaterialTheme.typography.headlineSmall, color = AlertDialogDefaults.titleContentColor)
++        Spacer(Modifier.padding(top = 16.dp))
++        Text(
++            buildAnnotatedString {
++                append("On your computer open Homa Lawn › Add phone, or run ")
++                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append("homalawn pair") }
++                append(".")
++            },
++            style = MaterialTheme.typography.bodyMedium,
++            color = AlertDialogDefaults.textContentColor,
++        )
++        Spacer(Modifier.padding(top = 8.dp))
++        Text(
++            "This screen waits $minutes minute${if (minutes == 1L) "" else "s"}.",
++            style = MaterialTheme.typography.bodyMedium,
++            color = AlertDialogDefaults.textContentColor,
++        )
++        Note(note)
++        Spacer(Modifier.padding(top = 24.dp))
++        // never where Accept will appear
++        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
++            TextButton(onClick = { finish() }) { Text("Cancel") }
++        }
++    }
++
++    @OptIn(ExperimentalComposeUiApi::class)
++    @Composable
++    private fun Request(name: String, words: List<String>, note: String?) {
++        Text("Pair with $name?", style = MaterialTheme.typography.headlineSmall, color = AlertDialogDefaults.titleContentColor)
++        Spacer(Modifier.padding(top = 16.dp))
++        Surface(
++            shape = MaterialTheme.shapes.large,
++            color = MaterialTheme.colorScheme.surfaceContainerHighest,
++            modifier = Modifier.fillMaxWidth(),
++        ) {
++            Text(
++                words.joinToString(" "),
++                style = MaterialTheme.typography.headlineMedium,
++                fontWeight = FontWeight.Bold,
++                textAlign = TextAlign.Center,
++                color = MaterialTheme.colorScheme.onSurface,
++                modifier = Modifier.padding(horizontal = 16.dp, vertical = 20.dp),
++            )
++        }
++        Spacer(Modifier.padding(top = 16.dp))
++        Text(
++            "Accept only if the computer shows the same four words. A paired computer can change this " +
++                "phone's home screen and, with Screen control on, see and operate the screen.",
++            style = MaterialTheme.typography.bodyMedium,
++            color = AlertDialogDefaults.textContentColor,
++        )
++        Note(note)
++        Spacer(Modifier.padding(top = 24.dp))
++        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
++            TextButton(onClick = { reject() }) { Text("Reject") }
++            // not a Button: a button's click can be performed without a finger
++            var size by remember { mutableStateOf(IntSize.Zero) }
++            var pressed by remember { mutableStateOf(false) }
++            Box(
++                contentAlignment = Alignment.Center,
++                modifier = Modifier
++                    .heightIn(min = ButtonDefaults.MinHeight)
++                    .clip(ButtonDefaults.textShape)
++                    .background(if (pressed) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface.copy(alpha = 0f))
++                    .onSizeChanged { size = it }
++                    .pointerInteropFilter { e ->
++                        pressed = e.actionMasked == MotionEvent.ACTION_DOWN || (pressed && e.actionMasked == MotionEvent.ACTION_MOVE)
++                        onAcceptTouch(e, size)
++                    }
++                    .semantics { role = Role.Button }
++                    .padding(ButtonDefaults.TextButtonContentPadding),
++            ) {
++                Text("Accept", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
++            }
++        }
++    }
++
++    @Composable
++    private fun Note(note: String?) {
++        if (note.isNullOrEmpty()) return
++        Spacer(Modifier.padding(top = 12.dp))
++        Text(note, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
++    }
++
+     override fun onResume() {
+         super.onResume()
+         main.post(watch)
+@@ -281,9 +378,9 @@ class PairConfirmActivity : Activity() {
+     companion object {
+         private const val TAG = "OmalawnLink"
+         private const val WATCH_MS = 500L
+-        private const val TOUCH_TO_CLICK_MS = 1000L
+         /** Accept ignores a finger that went down sooner than this after the words appeared. */
+         private const val ARM_MS = 1000L
++        private const val WAITING = "Waiting for a computer…"
+         /** "Pair a computer": open pairing and wait on this screen. */
+         const val ACTION_WAIT = "app.lawnchair.omalawn.link.PAIR_WAIT"
+     }

@@ -1,0 +1,376 @@
+From b7762e7a1f4c5c9cae2adeb6595440d32570e47f Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 23:08:06 +0200
+Subject: [PATCH] homalawn label gap: the visible gap from the icon's shape to
+ the label
+
+homar_label_gap_dp now means one thing: the visible distance, in dp,
+from the bottom of the icon's visible shape to the top of the label's
+capitals. 0 (also unset) = the capitals touch the shape, never overlap.
+
+Before, on the fixed grid the setting added dp to upstream's padding
+and then clamped the result to the room left in the cell, so gap 0 was
+upstream's -14 px on a 4x8 grid (label inside the icon's picture),
+every positive gap hit the clamp (2 dp == 4 dp) and nothing between was
+reachable. The added dp also fed upstream's fit-to-height pass, which
+shrinks the grid and applies the label size factor a second time, so
+the label's size could change with the gap.
+
+The label padding is now round(gap * density) - shape margin - cap
+inset: the shape margin is the transparent band below the visible shape
+(upstream's 0.92 visible-area model), the cap inset how far the label's
+capitals start below the top of its text line, measured with the
+label's own font (Lawnchair's workspace font as FontManager applies it)
+at its own size. It is fitted on the fixed grid once the cell's final
+height is known (after the workspace and cell layout paddings), after
+upstream sized and fitted everything with its own padding, so the gap
+moves the label and nothing else. The gap is held at the most the cell
+has room for (the icon at the cell's top, the label line ending at its
+bottom); the block the cell centres uses the same padding and line,
+never taller than the cell, so every gap from 0 up to that maximum
+lands exactly. Responsive and scalable grids keep upstream's padding. A
+workspace font change, or a provider font arriving, reloads the grid so
+the metrics follow it.
+
+launcher.device_profile reports icon.label_gap {dp, max_dp,
+shape_margin, cap_inset, line_height, icon_block} so the desktop offers
+only reachable gaps and draws any gap as the phone would; the debug
+build's debug_home_views reads the label's padding, line and cap inset
+back from the view.
+---
+ .../app/lawnchair/omalawn/DeviceGeometry.kt   |  30 ++-
+ .../app/lawnchair/omalawn/HomarLabelGap.kt    | 181 ++++++++++++++----
+ src/com/android/launcher3/DeviceProfile.java  |  27 ++-
+ 3 files changed, 198 insertions(+), 40 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+index 5548c8a7fb..aa0b29b3c4 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+@@ -115,7 +115,7 @@ object DeviceGeometry {
+                 "icon",
+                 JSONObject().put("size", dp.iconSizePx).put("text_size", dp.iconTextSizePx)
+                     .put("drawable_padding", dp.iconDrawablePaddingPx).put("top", iconTop)
+-                    .put("labels", dp.iconTextSizePx > 0),
++                    .put("labels", dp.iconTextSizePx > 0).put("label_gap", labelGap(dp)),
+             )
+             .put(
+                 "hotseat",
+@@ -144,7 +144,17 @@ object DeviceGeometry {
+         fun iconOf(v: BubbleTextView?): JSONObject? = v?.let {
+             val b = Rect()
+             it.getIconBounds(b)
++            // the label as the view lays it out: its padding below the icon, its line, where its
++            // capitals start (the same measure HomarLabelGap.label takes, on the view's own paint)
++            val cap = Rect()
++            it.paint.getTextBounds("H", 0, 1, cap)
++            val line = it.layout
+             JSONObject().put("size", it.iconSize).put("top", b.top).put("cell", box(it))
++                .put("drawable_padding", it.compoundDrawablePadding)
++                .put("text_top", it.extendedPaddingTop)
++                .put("line_height", line?.let { l -> l.getLineBottom(0) - l.getLineTop(0) } ?: -1)
++                .put("cap_inset", line?.let { l -> l.getLineBaseline(0) - l.getLineTop(0) + cap.top } ?: -1)
++                .put("text", it.text?.toString() ?: "")
+         }
+         JSONObject()
+             .put("workspace", cells(page)).put("icon", iconOf(firstIcon(page)))
+@@ -161,6 +171,24 @@ object DeviceGeometry {
+         return JSONObject().put("x", p[0]).put("y", p[1]).put("w", v.width).put("h", v.height)
+     }
+ 
++    /**
++     * The label gap as the fixed grid lays it out (patch 0025), null on other grids: `dp` the
++     * visible gap drawn (the setting, held at the maximum), `max_dp` the most the cell has room
++     * for, and the parts of the sum, in px: `shape_margin` (transparent band below the icon's
++     * shape inside its drawable), `cap_inset` (the label line's top to its capitals' top),
++     * `line_height` (the label line), `icon_block` (the icon height the cell centres with the
++     * padding and the label line). With them the desktop computes any gap's padding and icon top:
++     * padding = round(gap * density) - shape_margin - cap_inset, top = (cell_h - min(cell_h,
++     * icon_block + padding + line_height)) / 2.
++     */
++    private fun labelGap(dp: DeviceProfile): JSONObject? {
++        val fit = dp.homarLabelFit ?: return null
++        return JSONObject().put("dp", fit.gapDp.toDouble()).put("max_dp", fit.maxDp)
++            .put("shape_margin", fit.shapeMarginPx).put("cap_inset", fit.label.capInsetPx)
++            .put("line_height", fit.label.lineHeightPx)
++            .put("icon_block", fit.iconBlockPx)
++    }
++
+     private fun rect(r: Rect): JSONObject =
+         JSONObject().put("left", r.left).put("top", r.top).put("right", r.right).put("bottom", r.bottom)
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt b/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
+index 5fedc5f740..2433b9ed74 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
+@@ -1,29 +1,55 @@
+ package app.lawnchair.omalawn
+ 
+ import android.content.Context
+-import android.content.res.Resources
++import android.graphics.Paint
++import android.graphics.Rect
++import android.graphics.Typeface
++import android.text.TextPaint
+ import android.util.DisplayMetrics
+ import androidx.datastore.preferences.core.floatPreferencesKey
++import app.lawnchair.LawnchairApp
++import app.lawnchair.font.FontCache
++import app.lawnchair.preferences.PreferenceManager
+ import app.lawnchair.preferences2.PreferenceManager2
+ import app.lawnchair.preferences2.ReloadHelper
+-import com.android.launcher3.testing.shared.ResourceUtils
++import com.android.launcher3.icons.IconNormalizer.ICON_VISIBLE_AREA_FACTOR
+ import com.patrykmichalik.opto.core.PreferenceImpl
+ import com.patrykmichalik.opto.core.firstBlocking
++import kotlin.math.floor
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.roundToInt
++import kotlinx.coroutines.MainScope
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
+ 
+ /**
+- * Space between a home-screen icon and its label, in dp, on top of upstream's gap.
++ * The label gap of home-screen icons (patches 0014, 0025): `homar_label_gap_dp` is the VISIBLE
++ * distance, in dp, from the bottom of the icon's visible shape to the top of the label's capital
++ * letters. 0 (also when unset) = the capitals touch the shape, never overlap it.
+  *
+- * Upstream subtracts the icon's invisible margin from the label padding, so larger icons
+- * (home_icon_size_factor > 1) push the label against the icon. 0 keeps upstream's layout; a
+- * negative gap (down to [MIN_DP]) pulls the label that much closer, for small icons or tall labels.
+- * DeviceProfile adds [extraPx] to the workspace padding before it fits the cell, so a short cell
+- * gives the space back from border spacing / cell padding rather than cutting the label; on the
+- * fixed grid [fixedCellPadding] keeps the label off the icon when the cell is short.
+- * Set from the desktop with `homalawn prefs set homar_label_gap_dp 6`.
++ * The phone turns it into the label view's padding below the icon drawable:
++ * `padding = round(gap * density) - shapeMargin - capInset`, where `shapeMargin` is the
++ * transparent band below the visible shape inside the icon drawable (upstream's model of an icon:
++ * the shape is [ICON_VISIBLE_AREA_FACTOR] of the drawable, centred) and `capInset` is how far the
++ * label's capitals start below the top of its text line, measured with the label's own font at
++ * its own size, the way its one-line TextView lays it out (font padding included).
++ *
++ * It applies to the fixed (non-scalable) grid, the one Homa Lawn's phones use: DeviceProfile
++ * fits it once the cell's final height is known, after upstream sized and fitted everything with
++ * its own padding, so the gap moves the label and nothing else. Every gap from 0 up to
++ * [Fit.maxDp] gives exactly that distance: the most a cell can give is the label line ending at
++ * the cell's bottom with the icon at its top. Beyond that the gap is held at the maximum, which the
++ * phone reports (`launcher.device_profile`, `icon.label_gap`) so the desktop never offers more.
++ * Responsive and scalable grids keep upstream's padding (no `label_gap` reported).
+  */
+ object HomarLabelGap {
+-    private const val MIN_DP = -8f
+-    private const val MAX_DP = 32f
++    /** The setting's bounds; the phone's real maximum is [Fit.maxDp], usually much lower. */
++    const val MIN_DP = 0f
++    const val MAX_DP = 32f
++
++    /** "H": its top is the capitals' top, where the gap ends. */
++    private const val CAP = "H"
+ 
+     // a literal, so scripts/gen-prefs-catalog.py lists it for `homalawn prefs set`
+     private val key = floatPreferencesKey(name = "homar_label_gap_dp")
+@@ -38,34 +64,121 @@ object HomarLabelGap {
+         )
+     }
+ 
+-    private fun gapDp(prefs2: PreferenceManager2): Float =
++    /** The stored gap in dp, within the setting's bounds (0 when unset). */
++    @JvmStatic
++    fun gapDp(prefs2: PreferenceManager2): Float =
+         prefs2.preference(key = key, defaultValue = 0f).firstBlocking().coerceIn(MIN_DP, MAX_DP)
+ 
+-    /** Extra label padding in px for DeviceProfile (0 when unset, negative for a negative gap). */
+-    @JvmStatic
+-    fun extraPx(prefs2: PreferenceManager2, metrics: DisplayMetrics): Int =
+-        px(gapDp(prefs2), metrics)
+-
+-    /** pxFromDp answers -1 (an invalid resource) for any negative size; negate around it. */
+-    private fun px(dp: Float, metrics: DisplayMetrics): Int =
+-        if (dp < 0f) -ResourceUtils.pxFromDp(-dp, metrics) else ResourceUtils.pxFromDp(dp, metrics)
++    /** The label's one text line: its height and where its capitals start below its top, in px. */
++    class Label(val lineHeightPx: Int, val capInsetPx: Int)
+ 
+     /**
+-     * Label padding for upstream's fixed (non-scalable) grid. Upstream clamps the padding to half
+-     * the cell's free height, which goes negative when the cell is shorter than icon + label
+-     * (4x8 with larger icons), pulling the label up into the icon by far more than the cell
+-     * needs. With a gap set: the [wanted] padding (gap included), shrunk to the [roomPx] the cell
+-     * really has below the icon and label (negative when even padding 0 would cut the label's
+-     * descenders), never below upstream's own value. Gap 0 keeps upstream's value; a negative gap
+-     * takes its dp off upstream's value.
++     * The label line as BubbleTextView draws it: its font (Lawnchair's workspace font, as
++     * FontManager applies it) at [textSizePx]. One line with font padding: the line runs from the
++     * font's top to its bottom, the baseline sits `-top` below the line's top.
+      */
+     @JvmStatic
+-    fun fixedCellPadding(prefs2: PreferenceManager2, upstream: Int, wanted: Int, roomPx: Int): Int {
+-        val gap = gapDp(prefs2)
+-        return when {
+-            gap == 0f -> upstream
+-            gap < 0f -> upstream + px(gap, Resources.getSystem().displayMetrics)
+-            else -> maxOf(upstream, minOf(wanted, roomPx))
++    fun label(textSizePx: Float): Label {
++        val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
++        paint.typeface = labelTypeface()
++        paint.textSize = textSizePx
++        val fm = paint.fontMetricsInt
++        val cap = Rect()
++        paint.getTextBounds(CAP, 0, CAP.length, cap)
++        return Label(fm.bottom - fm.top, -fm.top + cap.top)
++    }
++
++    /** The transparent band below the icon's visible shape inside its drawable, in px. */
++    @JvmStatic
++    fun shapeMarginPx(iconSizePx: Int): Int =
++        (iconSizePx - (ICON_VISIBLE_AREA_FACTOR * iconSizePx).roundToInt()) / 2
++
++    /** The label padding (below the icon drawable) that makes the visible gap [gapDp]. */
++    private fun paddingPx(gapDp: Float, metrics: DisplayMetrics, iconSizePx: Int, label: Label): Int =
++        (gapDp * metrics.density).roundToInt() - shapeMarginPx(iconSizePx) - label.capInsetPx
++
++    /**
++     * The fixed grid's icon + label in a cell of [cellHeightPx]: the stored gap, held at the most
++     * the cell gives ([maxDp]: the icon at the cell's top, the label line ending at its bottom).
++     * [paddingPx] is the label view's padding below the icon, [contentHeightPx] the block the cell
++     * centres: [iconBlockPx] (upstream's icon height with its folder overlap), the padding and the
++     * label line, never more than the cell. Where the overlap would make the block taller than the
++     * cell the icon sits at the cell's top either way; held at the cell, the block never tells
++     * DeviceProfile that the grid does not fit (which would shrink the grid, apply the label size
++     * factor a second time, and so change the label's size with the gap).
++     */
++    class Fit(
++        val gapDp: Float,
++        val maxDp: Int,
++        val paddingPx: Int,
++        val contentHeightPx: Int,
++        val iconBlockPx: Int,
++        val label: Label,
++        val shapeMarginPx: Int,
++    )
++
++    @JvmStatic
++    fun fitFixedCell(
++        prefs2: PreferenceManager2,
++        metrics: DisplayMetrics,
++        iconSizePx: Int,
++        iconWithOverlapPx: Int,
++        textSizePx: Float,
++        cellHeightPx: Int,
++    ): Fit {
++        val label = label(textSizePx)
++        val margin = shapeMarginPx(iconSizePx)
++        val roomPx = cellHeightPx - iconSizePx - label.lineHeightPx
++        val maxDp = max(0, floor((roomPx + margin + label.capInsetPx) / metrics.density).toInt())
++        val gap = min(gapDp(prefs2), maxDp.toFloat())
++        val padding = paddingPx(gap, metrics, iconSizePx, label)
++        val content = min(cellHeightPx, iconWithOverlapPx + padding + label.lineHeightPx)
++        return Fit(gap, maxDp, padding, content, iconWithOverlapPx, label, margin)
++    }
++
++    /**
++     * The typeface workspace labels are drawn with: FontManager's font for `font_base_icon` (the
++     * workspace font setting) once FontCache has it, else its fallback, exactly as
++     * FontManager.applyFont sets it on the label. Fonts held in the app (resource, file, system)
++     * load at once; a Google font loads through the font provider, and when it arrives the grid is
++     * reloaded so the label metrics follow it. A change of the workspace font reloads the grid
++     * too (the setting itself only recreates the activity, which keeps the device profile).
++     */
++    private fun labelTypeface(): Typeface {
++        val app = LawnchairApp.instance
++        val prefs = PreferenceManager.getInstance(app)
++        watchFont(app, prefs)
++        val font = prefs.fontWorkspace.get()
++        val cache = FontCache.INSTANCE.get(app)
++        cache.getLoadedFont(font)?.let { return it.typeface }
++        if (font is FontCache.TypefaceFont) return runBlocking { font.load() } ?: Typeface.SANS_SERIF
++        synchronized(this) {
++            arrived[font]?.let { return it }
++            if (loading.add(font)) {
++                MainScope().launch {
++                    val typeface = cache.getTypeface(font) ?: Typeface.SANS_SERIF
++                    synchronized(this@HomarLabelGap) { arrived[font] = typeface }
++                    ReloadHelper(app).reloadGrid()
++                }
++            }
++        }
++        // until the provider answers the label shows no workspace font yet; the reload follows
++        return Typeface.SANS_SERIF
++    }
++
++    /** Provider fonts asked for here, and what they came back as (FontManager's fallback if none). */
++    private val loading = mutableSetOf<FontCache.Font>()
++    private val arrived = mutableMapOf<FontCache.Font, Typeface>()
++
++    @Volatile
++    private var watching = false
++
++    private fun watchFont(app: Context, prefs: PreferenceManager) {
++        if (watching) return
++        synchronized(this) {
++            if (watching) return
++            watching = true
++            prefs.fontWorkspace.addListener { ReloadHelper(app).reloadGrid() }
+         }
+     }
+ }
+diff --git a/src/com/android/launcher3/DeviceProfile.java b/src/com/android/launcher3/DeviceProfile.java
+index 8cbf59f827..eb949340be 100644
+--- a/src/com/android/launcher3/DeviceProfile.java
++++ b/src/com/android/launcher3/DeviceProfile.java
+@@ -183,6 +183,8 @@ public class DeviceProfile {
+     public int iconSizePx;
+     public int iconTextSizePx;
+     public int iconDrawablePaddingPx;
++    /** Homa Lawn: the fixed grid's label gap as laid out (patch 0025); null on other grids. */
++    public HomarLabelGap.Fit homarLabelFit;
+     private int mIconDrawablePaddingOriginalPx;
+     public boolean iconCenterVertically;
+     public int maxIconTextLineCount;
+@@ -701,6 +703,7 @@ public class DeviceProfile {
+         cellLayoutPaddingPx = new Rect(cellLayoutPadding, cellLayoutPadding, cellLayoutPadding,
+                 cellLayoutPadding);
+         updateWorkspacePadding();
++        fitHomarLabelGap(); // Homa Lawn: the label gap setting, in the final cell (patch 0025)
+ 
+         // Folder scaling requires correct workspace paddings
+         updateAvailableFolderCellDimensions(res);
+@@ -1211,8 +1214,25 @@ public class DeviceProfile {
+     }
+ 
+     private int getNormalizedIconDrawablePadding() {
+-        return getNormalizedIconDrawablePadding(iconSizePx, mIconDrawablePaddingOriginalPx)
+-                + HomarLabelGap.extraPx(preferenceManager2, mMetrics); // Homa Lawn: label gap setting
++        return getNormalizedIconDrawablePadding(iconSizePx, mIconDrawablePaddingOriginalPx);
++    }
++
++    /**
++     * Homa Lawn (patch 0025): the label gap setting on the fixed grid, once the cell's final
++     * height is known (the workspace and cell layout paddings are set). The visible gap from the
++     * icon's shape to the label's capitals, held at what the cell has room for; the block the
++     * cell centres follows it. Upstream's sizing and fitting ran before with upstream's padding,
++     * so the gap changes nothing else.
++     */
++    private void fitHomarLabelGap() {
++        if (mIsResponsiveGrid || mIsScalableGrid || isVerticalBarLayout()
++                || mDeviceProperties.isMultiWindowMode() || preferenceManager2 == null) {
++            return;
++        }
++        homarLabelFit = HomarLabelGap.fitFixedCell(preferenceManager2, mMetrics, iconSizePx,
++                getIconSizeWithOverlap(iconSizePx), iconTextSizePx, getCellSize().y);
++        iconDrawablePaddingPx = homarLabelFit.getPaddingPx();
++        cellHeightPx = homarLabelFit.getContentHeightPx();
+     }
+ 
+     private int getNormalizedFolderChildDrawablePaddingPx(int textHeight) {
+@@ -1358,9 +1378,6 @@ public class DeviceProfile {
+                 cellHeightPx -= (iconDrawablePaddingPx - cellPaddingY);
+                 iconDrawablePaddingPx = cellPaddingY;
+             }
+-            iconDrawablePaddingPx = HomarLabelGap.fixedCellPadding(preferenceManager2, // Homa Lawn
+-                    iconDrawablePaddingPx, (int) (getNormalizedIconDrawablePadding() * iconScale),
+-                    getCellSize().y - iconSizePx - Utilities.calculateTextHeight(iconTextSizePx));
+         }
+ 
+         // All apps

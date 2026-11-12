@@ -1,0 +1,562 @@
+From 2b8bebaa1946fa765ddc2b58e0eba5da81900c14 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Tue, 13 Oct 2026 14:22:03 +0200
+Subject: [PATCH] omalawn update: app updates over the link, like Flux
+
+launcher.update_offer {name, sha256, size, offset} + one blob of at most
+8 MiB receives this app's APK in order into files/omalawn-update/ (a gap or
+an overlap is refused with bad_offset and
+error.expected; another sha256
+discards a partial file; sizes over 256 MiB are too_large). With the last
+byte in, the file must match sha256 (bad_hash), be this app's own package
+(not_ours), carry only signing certificates the installed app has
+(wrong_key) and a versionCode no lower than the installed one (older); then
+a notification "Homa Lawn update from <computer>" opens UpdateInstallActivity:
+Android's installer through a dedicated FileProvider (ACTION_VIEW,
+application/vnd.android.package-archive), or first the "Install unknown
+apps" page for this app. Declares REQUEST_INSTALL_PACKAGES.
+launcher.app_info reports package, versionCode, versionName and the sha256
+of the installed base APK. Link error objects may carry
+extra fields next to code and message. The offered
+file and its notification go when the app is replaced (and with the debug
+hook debug_update_reset).
+The update notification has its own group key, so Android (and Samsung
+One UI) does not fold it together with the link's notification, where a
+tap opens the launcher instead; one tap opens the installer (or the
+"Install unknown apps" page). Every tap starts afresh (a left-behind
+settings page is not brought back). Its text asks to allow installing
+apps only while that is not allowed, and is refreshed (quietly) when the
+tap finds it allowed.
+---
+ lawnchair/AndroidManifest.xml                 |  21 ++
+ lawnchair/res/xml/omalawn_update_paths.xml    |   5 +
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   4 +-
+ .../omalawn/OmalawnControlProvider.kt         |   3 +
+ .../app/lawnchair/omalawn/OmalawnUpdate.kt    | 338 ++++++++++++++++++
+ .../lawnchair/omalawn/link/BootReceiver.kt    |   1 +
+ .../src/app/lawnchair/omalawn/link/Frames.kt  |  12 +-
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  13 +-
+ 8 files changed, 391 insertions(+), 6 deletions(-)
+ create mode 100644 lawnchair/res/xml/omalawn_update_paths.xml
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index c423901c5f..377564a999 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -30,6 +30,8 @@
+     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+     <!-- the pairing confirmation screen hides other apps' overlays while it shows (12+) -->
+     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
++    <!-- Homa Lawn updates: opens Android's installer for an update the paired computer sent -->
++    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+     <uses-permission android:name="com.google.android.apps.nexuslauncher.permission.QSB" />
+     <uses-permission android:name="com.kieronquinn.app.smartspacer.permission.ACCESS_SMARTSPACER"/>
+     <uses-permission android:name="android.permission.READ_CONTACTS" />
+@@ -172,6 +174,25 @@
+                 android:resource="@xml/provider_paths" />
+         </provider>
+ 
++        <!-- Homa Lawn updates: serves only files/omalawn-update/ to Android's installer -->
++        <provider
++            android:name="app.lawnchair.omalawn.OmalawnUpdateFileProvider"
++            android:authorities="${applicationId}.omalawn.update"
++            android:exported="false"
++            android:grantUriPermissions="true">
++            <meta-data
++                android:name="android.support.FILE_PROVIDER_PATHS"
++                android:resource="@xml/omalawn_update_paths" />
++        </provider>
++
++        <!-- Homa Lawn updates: what the update notification opens (installer, or "Install unknown apps" first) -->
++        <activity
++            android:name="app.lawnchair.omalawn.UpdateInstallActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
++
+         <provider
+             android:name="app.lawnchair.omalawn.OmalawnControlProvider"
+             android:authorities="${applicationId}.omalawn"
+diff --git a/lawnchair/res/xml/omalawn_update_paths.xml b/lawnchair/res/xml/omalawn_update_paths.xml
+new file mode 100644
+index 0000000000..bb8056ccd5
+--- /dev/null
++++ b/lawnchair/res/xml/omalawn_update_paths.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Homa Lawn updates: the checked APK waiting for its notification tap, nothing else -->
++<paths>
++    <files-path name="update" path="omalawn-update/" />
++</paths>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 52139ad8cc..94ce123d64 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -34,7 +34,8 @@ import org.json.JSONArray
+ import org.json.JSONObject
+ 
+ /** A command failure with a stable machine code; [message] is what the caller shows. */
+-class OmalawnError(val code: String, message: String) : Exception(message)
++/** [data]'s fields travel next to code and message in the link's error object (e.g. `bad_offset`'s `expected`). */
++class OmalawnError(val code: String, message: String, val data: JSONObject? = null) : Exception(message)
+ 
+ /** A result made of bytes plus metadata; only the link can carry it (as one blob frame). */
+ class Blob(val bytes: ByteArray, val meta: JSONObject)
+@@ -110,6 +111,7 @@ object OmalawnCommands {
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             "launcher.request_media_permission" -> MediaPermission.request(ctx)
++            "launcher.app_info" -> OmalawnUpdate.appInfo(ctx)
+             else -> if (method.startsWith("screen.")) ScreenCommands.dispatch(ctx, method, params) else throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 9235207917..cef2977539 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -71,6 +71,8 @@ class OmalawnControlProvider : ContentProvider() {
+      * the process); `debug_crash_link_left` reads what is left; `debug_crash_budget_reset` forgets
+      * CrashExit's armed restart alarms and its restart marker. `debug_media_prompt` posts the
+      * photo-access notification of `launcher.request_media_permission` unconditionally.
++     * `debug_update_reset` deletes an offered update (and any partial one) and its notification,
++     * as installing the update does.
+      */
+     private fun debug(ctx: Context, method: String, arg: String?, extras: Bundle?): Bundle {
+         if (!BuildConfig.DEBUG) return fail("unknown method $method")
+@@ -97,6 +99,7 @@ class OmalawnControlProvider : ContentProvider() {
+                     return ok(linkState(ctx))
+                 }
+                 "debug_link_state" -> return ok(linkState(ctx))
++                "debug_update_reset" -> OmalawnUpdate.afterUpdate(ctx)
+                 "debug_pair_legacy_accept" -> {
+                     val token = Pairing.currentToken() ?: return ok(JSONObject().put("sent", false))
+                     ctx.startService(
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+new file mode 100644
+index 0000000000..ce33b0a735
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+@@ -0,0 +1,338 @@
++package app.lawnchair.omalawn
++
++import android.app.Activity
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Bundle
++import android.provider.Settings
++import android.system.Os
++import android.util.Log
++import android.widget.Toast
++import androidx.core.app.NotificationCompat
++import androidx.core.content.FileProvider
++import com.android.launcher3.R
++import java.io.File
++import java.io.FileOutputStream
++import java.security.MessageDigest
++import org.json.JSONObject
++
++/**
++ * App updates over the link, the way Flux does it (spec U1). A paired computer sends this app's
++ * APK in chunks with `launcher.update_offer {name, sha256, size, offset}` + one blob each; the
++ * chunks are appended to files/omalawn-update/<sha256>.part. When the last byte is in, the file
++ * must have that sha256, be this app's own package, be signed only with certificates the installed
++ * app has, and have a versionCode no lower than the installed one; then a notification
++ * "Homa Lawn update from <computer>" opens [UpdateInstallActivity], which opens Android's installer
++ * (first asking for "Install unknown apps" when that is not allowed yet). Anything else is refused
++ * with a code and the file is deleted.
++ */
++object OmalawnUpdate {
++    const val NOT_OURS = "not_ours"
++    const val WRONG_KEY = "wrong_key"
++    const val OLDER = "older"
++    const val BAD_HASH = "bad_hash"
++    const val BAD_OFFSET = "bad_offset"
++    const val TOO_LARGE = "too_large"
++    const val MAX_SIZE = 256L shl 20 // the whole APK
++    const val MAX_CHUNK = 8 shl 20 // one blob
++
++    const val APK_MIME = "application/vnd.android.package-archive"
++    private const val CHANNEL = "omalawn_update"
++    private const val NOTIFICATION_TAG = "omalawn-update"
++    private const val NOTIFICATION_ID = 47110
++    // Its own group: without one, Android (and Samsung One UI) folds it together with the link's
++    // ongoing notification, and a tap on the folded group opens the launcher instead of this.
++    private const val GROUP = "app.lawnchair.omalawn.update"
++    private const val TAG = "OmalawnUpdate"
++    private val SHA = Regex("[0-9a-f]{64}")
++    private const val PREFIX = "update-" // a checked APK waiting for its notification tap
++
++    private val lock = Any()
++
++    fun authority(ctx: Context) = "${ctx.packageName}.omalawn.update"
++
++    private fun dir(ctx: Context): File {
++        val d = File(ctx.filesDir, "omalawn-update")
++        d.mkdirs()
++        Os.chmod(d.absolutePath, 0b111_000_000) // 0700
++        return d
++    }
++
++    /** One chunk of an offer. [computer] is the paired computer's name, for the notification. */
++    fun offer(ctx: Context, params: JSONObject, chunk: ByteArray, computer: String): JSONObject {
++        val sha = text(params, "sha256")?.lowercase()
++        if (sha == null || !SHA.matches(sha)) throw OmalawnError("bad_params", "sha256 must be 64 hex characters")
++        val size = number(params, "size") ?: throw OmalawnError("bad_params", "size required")
++        val offset = number(params, "offset") ?: throw OmalawnError("bad_params", "offset required")
++        val name = (text(params, "name") ?: "").replace(Regex("[\\p{Cc}\\p{Cf}]"), "").take(128)
++        if (size > MAX_SIZE) throw OmalawnError(TOO_LARGE, "$TOO_LARGE: an update may be at most ${MAX_SIZE shr 20} MiB")
++        if (size < 1) throw OmalawnError("bad_params", "size must be positive")
++        if (chunk.isEmpty()) throw OmalawnError("bad_params", "empty chunk")
++        if (chunk.size > MAX_CHUNK) throw OmalawnError(TOO_LARGE, "$TOO_LARGE: a chunk may be at most ${MAX_CHUNK shr 20} MiB")
++        if (offset < 0 || offset + chunk.size > size) {
++            throw OmalawnError("bad_params", "chunk at $offset of ${chunk.size} bytes does not fit in $size")
++        }
++        synchronized(lock) {
++            val d = dir(ctx)
++            val part = File(d, "$sha.part")
++            // a transfer of another file discards any partial one
++            d.listFiles()?.filter { it.name.endsWith(".part") && it != part }?.forEach { it.delete() }
++            val have = if (part.exists()) part.length() else 0L
++            if (have > size) part.delete()
++            val expected = if (part.exists()) part.length() else 0L
++            if (offset != expected) {
++                throw OmalawnError(
++                    BAD_OFFSET,
++                    "$BAD_OFFSET: the phone has $expected bytes of this update; send from offset $expected",
++                    JSONObject().put("expected", expected),
++                )
++            }
++            FileOutputStream(part, true).use { it.write(chunk) }
++            Os.chmod(part.absolutePath, 0b110_000_000) // 0600
++            val received = part.length()
++            if (received < size) return JSONObject().put("received", received)
++            return finish(ctx, part, sha, size, name, computer)
++        }
++    }
++
++    private fun finish(ctx: Context, part: File, sha: String, size: Long, name: String, computer: String): JSONObject {
++        val apk = File(part.parentFile, "$PREFIX$sha.apk")
++        try {
++            if (sha256(part) != sha) throw OmalawnError(BAD_HASH, "$BAD_HASH: the file that arrived does not have the sha256 that was sent")
++            if (!part.renameTo(apk)) error("cannot keep the update")
++            val info = check(ctx, apk)
++            // only the newest checked update stays
++            apk.parentFile?.listFiles()?.filter { it.name.startsWith(PREFIX) && it != apk }?.forEach { it.delete() }
++            val canInstall = ctx.packageManager.canRequestPackageInstalls()
++            val notified = notify(ctx, sha, info.second, computer, canInstall)
++            Log.i(TAG, "update offered: ${info.second} (${info.first}) $name from $computer")
++            return JSONObject()
++                .put("received", size)
++                .put("offered", true)
++                .put("package", ctx.packageName)
++                .put("versionCode", info.first)
++                .put("versionName", info.second)
++                .put("can_install", canInstall)
++                .put("notified", notified)
++        } catch (e: Throwable) {
++            part.delete()
++            apk.delete()
++            throw e
++        }
++    }
++
++    /** (versionCode, versionName) of [apk] when it may replace this app; refuses otherwise. */
++    private fun check(ctx: Context, apk: File): Pair<Long, String> {
++        val pm = ctx.packageManager
++        @Suppress("DEPRECATION")
++        val flags = PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
++        val archive = pm.getPackageArchiveInfo(apk.path, flags)
++        if (archive == null || archive.packageName != ctx.packageName) {
++            throw OmalawnError(NOT_OURS, "$NOT_OURS: this is not a Homa Lawn (${ctx.packageName}) APK")
++        }
++        @Suppress("DEPRECATION")
++        val signers = (archive.signingInfo?.apkContentsSigners ?: archive.signatures)?.map { it.toByteArray() }.orEmpty()
++        if (signers.isEmpty() || !signers.all { pm.hasSigningCertificate(ctx.packageName, it, PackageManager.CERT_INPUT_RAW_X509) }) {
++            throw OmalawnError(WRONG_KEY, "$WRONG_KEY: this APK is signed with another key than the installed Homa Lawn")
++        }
++        val installed = pm.getPackageInfo(ctx.packageName, 0).longVersionCode
++        if (archive.longVersionCode < installed) {
++            throw OmalawnError(OLDER, "$OLDER: this APK (${archive.longVersionCode}) is older than the installed one ($installed)")
++        }
++        return archive.longVersionCode to (archive.versionName ?: "")
++    }
++
++    /** The checked update waiting for its tap, or null. */
++    fun pending(ctx: Context, sha: String?): File? {
++        val files = dir(ctx).listFiles()?.filter { it.name.startsWith(PREFIX) && it.name.endsWith(".apk") }.orEmpty()
++        return files.firstOrNull { sha == null || it.name == "$PREFIX$sha.apk" }
++    }
++
++    /**
++     * The notification again with the text for now: after "Install unknown apps" was allowed it no
++     * longer asks for it. Quiet (no second heads-up).
++     */
++    fun refresh(ctx: Context, sha: String, version: String, computer: String) {
++        if (pending(ctx, sha) == null) return
++        notify(ctx, sha, version, computer, ctx.packageManager.canRequestPackageInstalls(), alert = false)
++    }
++
++    private fun notify(
++        ctx: Context,
++        sha: String,
++        version: String,
++        computer: String,
++        canInstall: Boolean,
++        alert: Boolean = true,
++    ): Boolean {
++        val nm = ctx.getSystemService(NotificationManager::class.java)!!
++        nm.createNotificationChannel(
++            NotificationChannel(CHANNEL, "Homa Lawn updates", NotificationManager.IMPORTANCE_HIGH).apply {
++                description = "A new Homa Lawn sent from your paired computer, ready to install"
++                setShowBadge(false)
++            },
++        )
++        val tap = PendingIntent.getActivity(
++            ctx,
++            NOTIFICATION_ID,
++            Intent(ctx, UpdateInstallActivity::class.java)
++                .putExtra(UpdateInstallActivity.EXTRA_SHA, sha)
++                .putExtra(UpdateInstallActivity.EXTRA_VERSION, version)
++                .putExtra(UpdateInstallActivity.EXTRA_COMPUTER, computer)
++                // every tap starts afresh: a left-behind "Install unknown apps" page is not brought back
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++        val text = notificationText(version, canInstall)
++        val n = NotificationCompat.Builder(ctx, CHANNEL)
++            .setSmallIcon(R.drawable.ic_home_screen)
++            .setContentTitle("Homa Lawn update from ${computer.ifEmpty { "your computer" }}")
++            .setContentText(text)
++            .setPriority(NotificationCompat.PRIORITY_HIGH)
++            .setContentIntent(tap)
++            .setGroup(GROUP)
++            .setAutoCancel(false) // stays until the update is installed or replaced
++            .setOnlyAlertOnce(!alert)
++            .setSilent(!alert)
++            .build()
++        return try {
++            nm.notify(NOTIFICATION_TAG, NOTIFICATION_ID, n)
++            nm.areNotificationsEnabled()
++        } catch (e: SecurityException) {
++            false
++        }
++    }
++
++    fun notificationText(version: String, canInstall: Boolean) = if (canInstall) {
++        "Version $version. Tap, then Update."
++    } else {
++        "Version $version. Tap, allow installing apps (once), then Update."
++    }
++
++    /** After this app was replaced: the offered file and its notification are done. */
++    fun afterUpdate(ctx: Context) {
++        runCatching {
++            synchronized(lock) { dir(ctx).listFiles()?.forEach { it.delete() } }
++            ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_TAG, NOTIFICATION_ID)
++        }
++    }
++
++    /** `launcher.app_info`: what is installed, with the sha256 of the installed base APK. */
++    fun appInfo(ctx: Context): JSONObject {
++        val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
++        return JSONObject()
++            .put("package", ctx.packageName)
++            .put("versionCode", pi.longVersionCode)
++            .put("versionName", pi.versionName ?: "")
++            .put("sha256", baseSha(File(ctx.applicationInfo.sourceDir)))
++    }
++
++    private var cached: Triple<String, Long, String>? = null // path+size, mtime, sha
++
++    private fun baseSha(f: File): String = synchronized(lock) {
++        val key = "${f.path}:${f.length()}"
++        cached?.let { if (it.first == key && it.second == f.lastModified()) return it.third }
++        sha256(f).also { cached = Triple(key, f.lastModified(), it) }
++    }
++
++    private fun sha256(f: File): String {
++        val md = MessageDigest.getInstance("SHA-256")
++        f.inputStream().use { i ->
++            val buf = ByteArray(1 shl 16)
++            while (true) {
++                val n = i.read(buf)
++                if (n < 0) break
++                md.update(buf, 0, n)
++            }
++        }
++        return md.digest().joinToString("") { "%02x".format(it) }
++    }
++
++    private fun text(p: JSONObject, k: String): String? = if (p.isNull(k)) null else p.get(k).toString()
++
++    private fun number(p: JSONObject, k: String): Long? {
++        if (p.isNull(k)) return null
++        val v = p.get(k)
++        if (v !is Int && v !is Long) throw OmalawnError("bad_params", "$k must be a whole number")
++        return (v as Number).toLong()
++    }
++}
++
++/** Files of the offered update only (files/omalawn-update/), for Android's installer. */
++class OmalawnUpdateFileProvider : FileProvider()
++
++/**
++ * What the update notification opens (not exported): Android's installer for the offered APK, or
++ * first the "Install unknown apps" page for this app when that is not allowed yet, and the
++ * installer when the user comes back with it allowed.
++ */
++class UpdateInstallActivity : Activity() {
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        if (savedInstanceState != null) return // back from the settings page: onActivityResult continues
++        if (packageManager.canRequestPackageInstalls()) {
++            refreshNotification()
++            install()
++        } else {
++            @Suppress("DEPRECATION")
++            startActivityForResult(
++                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
++                REQ_SOURCES,
++            )
++        }
++    }
++
++    @Deprecated("startActivityForResult is enough for one settings round trip")
++    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
++        @Suppress("DEPRECATION")
++        super.onActivityResult(requestCode, resultCode, data)
++        if (requestCode != REQ_SOURCES) return
++        if (packageManager.canRequestPackageInstalls()) {
++            refreshNotification() // no longer "allow installing apps"
++            install()
++        } else {
++            Toast.makeText(this, "Homa Lawn needs \"Install unknown apps\" to update itself", Toast.LENGTH_LONG).show()
++            finish()
++        }
++    }
++
++    private fun refreshNotification() {
++        val sha = intent.getStringExtra(EXTRA_SHA) ?: return
++        runCatching {
++            OmalawnUpdate.refresh(
++                this,
++                sha,
++                intent.getStringExtra(EXTRA_VERSION) ?: "",
++                intent.getStringExtra(EXTRA_COMPUTER) ?: "",
++            )
++        }
++    }
++
++    private fun install() {
++        val apk = OmalawnUpdate.pending(this, intent.getStringExtra(EXTRA_SHA))
++        if (apk == null) {
++            Toast.makeText(this, "This Homa Lawn update is no longer on the phone; send it again", Toast.LENGTH_LONG).show()
++            finish()
++            return
++        }
++        val uri = FileProvider.getUriForFile(this, OmalawnUpdate.authority(this), apk)
++        startActivity(
++            Intent(Intent.ACTION_VIEW)
++                .setDataAndType(uri, OmalawnUpdate.APK_MIME)
++                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
++        )
++        finish()
++    }
++
++    companion object {
++        const val EXTRA_SHA = "sha256"
++        const val EXTRA_VERSION = "version"
++        const val EXTRA_COMPUTER = "computer"
++        private const val REQ_SOURCES = 1
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+index cd5b4ebc6b..63e41982f1 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+@@ -17,6 +17,7 @@ class BootReceiver : BroadcastReceiver() {
+                 if (intent.action == ACTION_RESTART && intent.getBooleanExtra(CrashExit.EXTRA_FROM_CRASH, false)) {
+                     CrashExit.onRestartAlarm(context)
+                 }
++                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) app.lawnchair.omalawn.OmalawnUpdate.afterUpdate(context)
+                 Log.i("OmalawnLink", "link start from ${intent.action}")
+                 LinkService.start(context)
+             }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt b/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
+index 2bac522ecd..36ff09aca6 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
+@@ -85,9 +85,17 @@ class FrameWriter(output: OutputStream) {
+ 
+     fun result(id: Any?, r: Any) = json(JSONObject().put("id", id ?: JSONObject.NULL).put("result", r))
+ 
+-    fun error(id: Any?, code: String, message: String) = json(
++    fun error(id: Any?, code: String, message: String, data: JSONObject? = null) = json(
+         JSONObject().put("id", id ?: JSONObject.NULL)
+-            .put("error", JSONObject().put("code", code).put("message", message)),
++            .put(
++                "error",
++                JSONObject().apply {
++                    // extra fields sit next to code and message (e.g. bad_offset's expected)
++                    data?.keys()?.forEach { k -> put(k, data.get(k)) }
++                    put("code", code)
++                    put("message", message)
++                },
++            ),
+     )
+ 
+     @Synchronized
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index c5d49de3ad..925aedaecd 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -63,7 +63,7 @@ object LinkServer {
+     /** Methods an unpinned computer may call. */
+     private val OPEN = setOf("link.hello", "link.pair_request", "link.pair_reveal", "link.pair_wait")
+ 
+-    private enum class Kind { PLAIN, BLOB_OUT, BLOB_IN, STAGE }
++    private enum class Kind { PLAIN, BLOB_OUT, BLOB_IN, STAGE, UPDATE }
+ 
+     /** Method → (accepted params, how bytes travel). Unknown methods and params are refused. */
+     private class Spec(val params: Set<String>, val kind: Kind = Kind.PLAIN)
+@@ -90,6 +90,9 @@ object LinkServer {
+         "launcher.layout_import" to Spec(setOf("db"), Kind.BLOB_IN),
+         "launcher.stage_file" to Spec(setOf("name"), Kind.STAGE),
+         "launcher.request_media_permission" to Spec(emptySet()),
++        // app updates (patch 0005): the APK in chunks of at most 8 MiB, see OmalawnUpdate
++        "launcher.update_offer" to Spec(setOf("name", "sha256", "size", "offset"), Kind.UPDATE),
++        "launcher.app_info" to Spec(emptySet()),
+         // screen control (patch 0004): pinned computers only, like everything above but OPEN
+         "screen.status" to Spec(emptySet()),
+         "screen.tree" to Spec(emptySet()),
+@@ -385,7 +388,7 @@ object LinkServer {
+             writer.error(id, OmalawnCommands.UNKNOWN_METHOD, "unknown method $method")
+             return true
+         }
+-        val needsBlob = spec.kind == Kind.BLOB_IN || spec.kind == Kind.STAGE
++        val needsBlob = spec.kind == Kind.BLOB_IN || spec.kind == Kind.STAGE || spec.kind == Kind.UPDATE
+         // a paired computer's blob is read even when the request is then refused, so its
+         // connection stays in step
+         val blob = if (needsBlob) reader.readBlob(id) else null
+@@ -448,9 +451,13 @@ object LinkServer {
+                     val f = OmalawnCommands.stageFile(ctx, name, blob!!)
+                     writer.result(id, JSONObject().put("path", f.absolutePath))
+                 }
++                Kind.UPDATE -> writer.result(
++                    id,
++                    app.lawnchair.omalawn.OmalawnUpdate.offer(ctx, params, blob!!, Pins.name(ctx, fp) ?: ""),
++                )
+             }
+         } catch (e: OmalawnError) {
+-            writer.error(id, e.code, e.message ?: e.code)
++            writer.error(id, e.code, e.message ?: e.code, e.data)
+         } catch (e: Exception) {
+             writer.error(id, "failed", "${e.javaClass.simpleName}: ${e.message}")
+         }

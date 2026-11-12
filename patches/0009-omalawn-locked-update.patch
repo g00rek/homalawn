@@ -1,0 +1,531 @@
+From 196291efafa727cf5a4f1948e2350dca769e3173 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Fri, 16 Oct 2026 13:07:45 +0200
+Subject: [PATCH] omalawn locked update: update status, and a locked phone
+ installs at its next unlock
+
+New command launcher.update_status reports the last update's outcome
+(installed, pending_user_action, deferred, failed with a reason), kept in
+the omalawn_update_status preferences. A silent update offered while the
+phone is locked is not committed at once (seen on a locked Samsung S23:
+the session may never finish); its session is kept and committed the next
+time the phone is unlocked, from the link service's ACTION_USER_PRESENT /
+ACTION_SCREEN_ON receiver, and the answer says deferred_until_unlock: true.
+A deferred update lost to a restart is installed again from the kept file
+with a new session, or recorded as failed when the file is gone.
+---
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   1 +
+ .../omalawn/OmalawnControlProvider.kt         |   8 +-
+ .../app/lawnchair/omalawn/OmalawnUpdate.kt    | 175 +++++++++++++++++-
+ .../lawnchair/omalawn/link/BootReceiver.kt    |   5 +-
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |   1 +
+ .../app/lawnchair/omalawn/link/LinkService.kt |  34 +++-
+ .../omalawn/link/PairConfirmActivity.kt       |  27 ++-
+ 7 files changed, 242 insertions(+), 9 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 748618324d..296d489667 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -117,6 +117,7 @@ object OmalawnCommands {
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             "launcher.request_media_permission" -> MediaPermission.request(ctx)
+             "launcher.app_info" -> OmalawnUpdate.appInfo(ctx)
++            "launcher.update_status" -> OmalawnUpdate.status(ctx)
+             else -> if (method.startsWith("screen.")) ScreenCommands.dispatch(ctx, method, params) else throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index e0646bb2dd..3280ed7d31 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -72,7 +72,8 @@ class OmalawnControlProvider : ContentProvider() {
+      * CrashExit's armed restart alarms and its restart marker. `debug_media_prompt` posts the
+      * photo-access notification of `launcher.request_media_permission` unconditionally.
+      * `debug_update_reset` deletes an offered update (and any partial one) and its notification,
+-     * as installing the update does (and abandons this app's install sessions).
++     * as installing the update does (and abandons this app's install sessions), and forgets the
++     * last outcome `launcher.update_status` reports.
+      * `debug_update_require_user_action` "1" makes the next self-installs ask for the user
+      * (USER_ACTION_REQUIRED), "0" puts the silent path back; in memory only.
+      */
+@@ -101,7 +102,10 @@ class OmalawnControlProvider : ContentProvider() {
+                     return ok(linkState(ctx))
+                 }
+                 "debug_link_state" -> return ok(linkState(ctx))
+-                "debug_update_reset" -> OmalawnUpdate.afterUpdate(ctx)
++                "debug_update_reset" -> {
++                    OmalawnUpdate.afterUpdate(ctx)
++                    OmalawnUpdate.clearStatus(ctx)
++                }
+                 "debug_update_require_user_action" -> {
+                     OmalawnUpdate.forceUserAction = arg == "1"
+                     return ok(JSONObject().put("require_user_action", OmalawnUpdate.forceUserAction))
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+index c074e6b14c..b9d88c88d6 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+@@ -1,6 +1,7 @@
+ package app.lawnchair.omalawn
+ 
+ import android.app.Activity
++import android.app.KeyguardManager
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
+@@ -14,6 +15,7 @@ import android.os.Build
+ import android.os.Bundle
+ import android.os.Handler
+ import android.os.Looper
++import android.os.PowerManager
+ import android.provider.Settings
+ import android.system.Os
+ import android.util.Log
+@@ -44,6 +46,13 @@ import org.json.JSONObject
+  * Android). When Android still wants the user (STATUS_PENDING_USER_ACTION) the notification comes
+  * up and its tap opens Android's confirmation for that session; a failed install gets a
+  * notification with the reason whose tap opens the installer the old way.
++ *
++ * A locked phone (keyguard showing, or the screen off): the checked session is kept and committed
++ * the next time the phone is unlocked ([onUnlock], from the link service's ACTION_USER_PRESENT /
++ * ACTION_SCREEN_ON receiver); the answer says `deferred_until_unlock: true`. On a Samsung S23
++ * (Android 16) a silent install committed while locked did not complete within a minute, twice.
++ * The 45 s watchdog starts at the commit. The last outcome of all this (`installing`, `installed`,
++ * `pending_user_action`, `deferred`, `failed` + reason) is kept for `launcher.update_status`.
+  */
+ object OmalawnUpdate {
+     const val NOT_OURS = "not_ours"
+@@ -78,6 +87,7 @@ object OmalawnUpdate {
+         val version: String,
+         val computer: String,
+         val predictedSilent: Boolean,
++        var deferred: Boolean = false, // waits for the next unlock (see [onUnlock])
+     )
+     private var pendingCommit: PendingCommit? = null
+ 
+@@ -91,6 +101,14 @@ object OmalawnUpdate {
+     private val decided = mutableSetOf<Int>() // sessions Android answered (any status): never stuck
+     const val EXTRA_PREDICTED_SILENT = "predicted_silent"
+ 
++    // launcher.update_status outcomes
++    const val INSTALLING = "installing"
++    const val INSTALLED = "installed"
++    const val PENDING_USER_ACTION = "pending_user_action"
++    const val DEFERRED = "deferred"
++    const val FAILED = "failed"
++    private const val STATUS_PREFS = "omalawn_update_status"
++
+     /** What [check] found in the offered APK. */
+     private class Checked(val versionCode: Long, val versionName: String, val targetSdk: Int)
+ 
+@@ -148,9 +166,11 @@ object OmalawnUpdate {
+             val info = check(ctx, apk)
+             // only the newest checked update stays
+             apk.parentFile?.listFiles()?.filter { it.name.startsWith(PREFIX) && it != apk }?.forEach { it.delete() }
++            clearDeferred(ctx) // an older offer waiting for the unlock is replaced by this one
+             val canInstall = ctx.packageManager.canRequestPackageInstalls()
+             var silent = false
+             var session = false
++            var deferred = false
+             if (canInstall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                 try {
+                     silent = prepareSession(ctx, apk, sha, info, computer)
+@@ -159,9 +179,25 @@ object OmalawnUpdate {
+                     Log.w(TAG, "install session failed, falling back to the notification", e)
+                 }
+             }
++            if (session && silent && locked(ctx)) {
++                // committed now it may never finish (seen on a locked S23): wait for the unlock
++                pendingCommit?.deferred = true
++                deferred = true
++                saveDeferred(ctx, sha, info.versionName, computer)
++                record(ctx, DEFERRED, info.versionName, sha, "the phone is locked")
++            }
+             // with a session, a notification comes only if Android asks for the user (or it fails)
+             val notified = if (session) false else notify(ctx, sha, info.versionName, computer, canInstall)
+-            Log.i(TAG, "update offered: ${info.versionName} (${info.versionCode}) $name from $computer, silent=$silent")
++            if (!session) {
++                record(
++                    ctx,
++                    PENDING_USER_ACTION,
++                    info.versionName,
++                    sha,
++                    if (canInstall) "the update notification waits for a tap" else "\"Install unknown apps\" is not allowed for Homa Lawn",
++                )
++            }
++            Log.i(TAG, "update offered: ${info.versionName} (${info.versionCode}) $name from $computer, silent=$silent deferred=$deferred")
+             return JSONObject()
+                 .put("received", size)
+                 .put("offered", true)
+@@ -171,12 +207,14 @@ object OmalawnUpdate {
+                 .put("can_install", canInstall)
+                 .put("notified", notified)
+                 .put("silent", silent)
++                .put("deferred_until_unlock", deferred)
+         } catch (e: Throwable) {
+             // a session prepared above must never be committed by a later chunk's commitPending
+             pendingCommit?.let { stale ->
+                 pendingCommit = null
+                 runCatching { ctx.packageManager.packageInstaller.abandonSession(stale.id) }
+             }
++            runCatching { clearDeferred(ctx) }
+             part.delete()
+             apk.delete()
+             throw e
+@@ -261,7 +299,19 @@ object OmalawnUpdate {
+      * process). Its outcome arrives at [UpdateResultReceiver].
+      */
+     fun commitPending(ctx: Context) {
+-        val p = synchronized(lock) { pendingCommit.also { pendingCommit = null } } ?: return
++        val p = synchronized(lock) {
++            val p = pendingCommit ?: return
++            if (p.deferred) {
++                Log.i(TAG, "install session ${p.id} kept until the phone is unlocked (${p.version})")
++                return
++            }
++            pendingCommit = null
++            p
++        }
++        commit(ctx, p)
++    }
++
++    private fun commit(ctx: Context, p: PendingCommit) {
+         val installer = ctx.packageManager.packageInstaller
+         try {
+             val result = PendingIntent.getBroadcast(
+@@ -277,6 +327,7 @@ object OmalawnUpdate {
+             )
+             installer.openSession(p.id).use { it.commit(result.intentSender) }
+             Log.i(TAG, "install session ${p.id} committed (${p.version})")
++            record(ctx, INSTALLING, p.version, p.sha, null)
+             Handler(Looper.getMainLooper()).postDelayed({ giveUpIfStuck(ctx, p) }, STUCK_MS)
+         } catch (e: Exception) {
+             Log.w(TAG, "install session ${p.id} could not be committed", e)
+@@ -285,6 +336,118 @@ object OmalawnUpdate {
+         }
+     }
+ 
++    /** The keyguard shows or the screen is off: a silent install now may not finish. */
++    fun locked(ctx: Context): Boolean {
++        val km = ctx.getSystemService(KeyguardManager::class.java)
++        val pm = ctx.getSystemService(PowerManager::class.java)
++        return km?.isKeyguardLocked == true || pm?.isInteractive == false
++    }
++
++    /**
++     * The phone was unlocked (or its screen came on without a keyguard): commits a deferred
++     * session. After a restart of this process the session is gone from memory; then the kept
++     * checked APK is checked again and goes into a new session. Off the main thread.
++     */
++    fun onUnlock(ctx: Context) {
++        val app = ctx.applicationContext
++        if (locked(app)) return
++        // taken under the lock, so a second unlock signal (USER_PRESENT after SCREEN_ON) finds nothing
++        val (p, saved) = synchronized(lock) {
++            val p = pendingCommit?.takeIf { it.deferred }?.also { pendingCommit = null }
++            val saved = deferredRecord(app)
++            if (p == null && saved == null) return
++            clearDeferred(app)
++            p to saved
++        }
++        Thread({
++            try {
++                if (p != null) {
++                    p.deferred = false
++                    Log.i(TAG, "phone unlocked: committing install session ${p.id} (${p.version})")
++                    commit(app, p)
++                    return@Thread
++                }
++                val (sha, version, computer) = saved!!
++                val apk = pending(app, sha)
++                if (apk == null) {
++                    Log.w(TAG, "phone unlocked: the deferred update $version is no longer on the phone")
++                    record(app, FAILED, version, sha, "the update waiting for the unlock was lost; send it again")
++                    return@Thread
++                }
++                Log.i(TAG, "phone unlocked: installing the deferred update $version again (new session)")
++                val info = check(app, apk)
++                prepareSession(app, apk, sha, info, computer)
++                commitPending(app)
++            } catch (e: Throwable) {
++                Log.w(TAG, "the deferred update could not be installed", e)
++                val (sha, version, computer) = saved ?: Triple(p!!.sha, p.version, p.computer)
++                failed(app, sha, version, computer, "${e.javaClass.simpleName}: ${e.message}")
++            }
++        }, "omalawn-update-unlock").start()
++    }
++
++    private fun statusPrefs(ctx: Context) = ctx.getSharedPreferences(STATUS_PREFS, Context.MODE_PRIVATE)
++
++    private fun saveDeferred(ctx: Context, sha: String, version: String, computer: String) {
++        statusPrefs(ctx).edit().putString("deferred_sha", sha).putString("deferred_version", version)
++            .putString("deferred_computer", computer).commit()
++    }
++
++    private fun clearDeferred(ctx: Context) {
++        statusPrefs(ctx).edit().remove("deferred_sha").remove("deferred_version").remove("deferred_computer").commit()
++    }
++
++    private fun deferredRecord(ctx: Context): Triple<String, String, String>? {
++        val p = statusPrefs(ctx)
++        val sha = p.getString("deferred_sha", null) ?: return null
++        return Triple(sha, p.getString("deferred_version", "") ?: "", p.getString("deferred_computer", "") ?: "")
++    }
++
++    /** Keeps the newest outcome of an offered update for `launcher.update_status`. */
++    fun record(ctx: Context, outcome: String, version: String, sha: String, reason: String?) {
++        runCatching {
++            statusPrefs(ctx).edit()
++                .putString("outcome", outcome)
++                .putString("version", version)
++                .putString("sha256", sha)
++                .putString("reason", reason)
++                .putLong("at", System.currentTimeMillis())
++                .commit()
++        }
++    }
++
++    /** This app was replaced: a session that was installing (its status may never arrive) installed. */
++    fun replaced(ctx: Context) {
++        val p = statusPrefs(ctx)
++        if (p.getString("outcome", null) == INSTALLING) {
++            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
++            record(ctx, INSTALLED, pi.versionName ?: "", p.getString("sha256", "") ?: "", null)
++        }
++        clearDeferred(ctx)
++    }
++
++    /** Debug hook: forgets the last outcome. */
++    fun clearStatus(ctx: Context) {
++        statusPrefs(ctx).edit().clear().commit()
++    }
++
++    /**
++     * `launcher.update_status`: the last outcome of an offered update — `none`, `deferred` (waits
++     * for the unlock), `installing` (committed, Android has not answered), `installed`,
++     * `pending_user_action` (the notification waits for a tap) or `failed` with a reason.
++     */
++    fun status(ctx: Context): JSONObject {
++        val p = statusPrefs(ctx)
++        val o = JSONObject()
++            .put("outcome", p.getString("outcome", null) ?: "none")
++            .put("version", p.getString("version", "") ?: "")
++            .put("sha256", p.getString("sha256", "") ?: "")
++            .put("at", p.getLong("at", 0L))
++            .put("locked", locked(ctx))
++        p.getString("reason", null)?.let { o.put("reason", it) }
++        return o
++    }
++
+     private fun giveUpIfStuck(ctx: Context, p: PendingCommit) {
+         val installer = ctx.packageManager.packageInstaller
+         // Android answered (a pending user action included: that session waits for the tap)
+@@ -307,12 +470,14 @@ object OmalawnUpdate {
+ 
+     /** Android wants the user for the session: the notification, whose tap opens [confirm]. */
+     fun needsUser(ctx: Context, sha: String, version: String, computer: String, confirm: Intent?) {
++        record(ctx, PENDING_USER_ACTION, version, sha, "Android asks for a tap on the update notification")
+         if (pending(ctx, sha) == null) return
+         notify(ctx, sha, version, computer, ctx.packageManager.canRequestPackageInstalls(), confirm = confirm)
+     }
+ 
+     /** The session failed: a notification with the reason; its tap opens the installer the old way. */
+     fun failed(ctx: Context, sha: String, version: String, computer: String, reason: String) {
++        record(ctx, FAILED, version, sha, reason.take(200))
+         if (pending(ctx, sha) == null) return
+         Log.w(TAG, "update $version not installed: $reason")
+         notify(
+@@ -406,6 +571,7 @@ object OmalawnUpdate {
+                 pendingCommit = null
+                 dir(ctx).listFiles()?.forEach { it.delete() }
+             }
++            clearDeferred(ctx)
+             val installer = ctx.packageManager.packageInstaller
+             installer.mySessions.forEach { runCatching { installer.abandonSession(it.sessionId) } }
+             ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_TAG, NOTIFICATION_ID)
+@@ -574,7 +740,10 @@ class UpdateResultReceiver : BroadcastReceiver() {
+                 }
+                 OmalawnUpdate.needsUser(ctx, sha, version, computer, confirm)
+             }
+-            PackageInstaller.STATUS_SUCCESS -> OmalawnUpdate.afterUpdate(ctx)
++            PackageInstaller.STATUS_SUCCESS -> {
++                OmalawnUpdate.record(ctx, OmalawnUpdate.INSTALLED, version, sha, null)
++                OmalawnUpdate.afterUpdate(ctx)
++            }
+             else -> OmalawnUpdate.failed(
+                 ctx,
+                 sha,
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+index 63e41982f1..ebf6570eb6 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+@@ -17,7 +17,10 @@ class BootReceiver : BroadcastReceiver() {
+                 if (intent.action == ACTION_RESTART && intent.getBooleanExtra(CrashExit.EXTRA_FROM_CRASH, false)) {
+                     CrashExit.onRestartAlarm(context)
+                 }
+-                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) app.lawnchair.omalawn.OmalawnUpdate.afterUpdate(context)
++                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
++                    app.lawnchair.omalawn.OmalawnUpdate.replaced(context)
++                    app.lawnchair.omalawn.OmalawnUpdate.afterUpdate(context)
++                }
+                 Log.i("OmalawnLink", "link start from ${intent.action}")
+                 LinkService.start(context)
+             }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 7df26dbd34..7a3c1cfd4c 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -94,6 +94,7 @@ object LinkServer {
+         // app updates (patch 0005): the APK in chunks of at most 8 MiB, see OmalawnUpdate
+         "launcher.update_offer" to Spec(setOf("name", "sha256", "size", "offset"), Kind.UPDATE),
+         "launcher.app_info" to Spec(emptySet()),
++        "launcher.update_status" to Spec(emptySet()), // the last offered update's outcome
+         // screen control (patch 0004): pinned computers only, like everything above but OPEN
+         "screen.status" to Spec(emptySet()),
+         "screen.tree" to Spec(emptySet()),
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+index f4cf60c3d8..e48089436c 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+@@ -8,8 +8,10 @@ import android.app.NotificationManager
+ import android.app.PendingIntent
+ import android.app.ForegroundServiceStartNotAllowedException
+ import android.app.Service
++import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
++import android.content.IntentFilter
+ import android.content.pm.ServiceInfo
+ import android.net.Uri
+ import android.os.Build
+@@ -21,8 +23,10 @@ import android.os.SystemClock
+ import android.provider.Settings
+ import android.util.Log
+ import androidx.core.app.NotificationCompat
++import androidx.core.content.ContextCompat
+ import app.lawnchair.omalawn.HomeRole
+ import app.lawnchair.omalawn.LayoutIo
++import app.lawnchair.omalawn.OmalawnUpdate
+ import com.android.launcher3.BuildConfig
+ import com.android.launcher3.R
+ 
+@@ -50,6 +54,22 @@ class LinkService : Service() {
+     }
+     private var refused = false // Android would not let this instance run in the foreground
+ 
++    /**
++     * The phone unlocked (USER_PRESENT), or its screen came on without a keyguard (SCREEN_ON):
++     * a silent update kept while it was locked is committed now. Both are only delivered to a
++     * receiver registered at runtime (not one in the manifest), so this long-running service
++     * holds it. Exported on purpose: USER_PRESENT comes from System UI (its own app uid, not the
++     * system's), which a not-exported receiver never gets (seen on the AVD); both actions are
++     * protected broadcasts, so no app can fake them.
++     */
++    private val unlock = object : BroadcastReceiver() {
++        override fun onReceive(context: Context, intent: Intent) {
++            runCatching { OmalawnUpdate.onUnlock(context) }
++                .onFailure { Log.w(TAG, "deferred update on unlock failed", it) }
++        }
++    }
++    private var unlockRegistered = false
++
+     override fun onCreate() {
+         super.onCreate()
+         createdAt = SystemClock.elapsedRealtime() // CrashExit: a crash soon after this is backed off by Android
+@@ -67,6 +87,13 @@ class LinkService : Service() {
+             return
+         }
+         Pairing.cancelLeftovers(this)
++        runCatching {
++            val filter = IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_ON) }
++            ContextCompat.registerReceiver(this, unlock, filter, ContextCompat.RECEIVER_EXPORTED)
++            unlockRegistered = true
++        }.onFailure { Log.w(TAG, "unlock receiver not registered", it) }
++        // a deferred update from before this process (killed while locked) goes in now if unlocked
++        runCatching { OmalawnUpdate.onUnlock(this) }
+         Pins.onChange(changed)
+         LinkServer.onChange(changed)
+         PairingGate.onChange(changed)
+@@ -124,6 +151,8 @@ class LinkService : Service() {
+ 
+     override fun onDestroy() {
+         main.removeCallbacksAndMessages(null)
++        if (unlockRegistered) runCatching { unregisterReceiver(unlock) }
++        unlockRegistered = false
+         Pins.removeListener(changed)
+         LinkServer.removeListener(changed)
+         PairingGate.removeListener(changed)
+@@ -208,7 +237,8 @@ class LinkService : Service() {
+         )
+         b.addAction(0, "Pair a computer", open)
+         // Android shows three actions at most: "Forget all computers" goes last, so it is the one
+-        // left out while both setup actions still show
++        // left out while both setup actions still show; it is always on the pairing screen
++        // ("Pair a computer"), so it stays reachable
+         if (HomeRole.missing(this)) {
+             val home = PendingIntent.getActivity(
+                 this,
+@@ -216,7 +246,7 @@ class LinkService : Service() {
+                 HomeRole.requestIntent(this),
+                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+             )
+-            b.addAction(0, "Make Homa Lawn your home screen", home)
++            b.addAction(0, "Set as home", home) // short: a longer label is cut in the 3-action row
+             lines.add("Homa Lawn is not your home screen yet")
+         }
+         val pm = getSystemService(PowerManager::class.java)!!
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index ce31d9d71b..8141324bab 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -2,6 +2,7 @@ package app.lawnchair.omalawn.link
+ 
+ import android.annotation.SuppressLint
+ import android.app.Activity
++import android.app.AlertDialog
+ import android.app.KeyguardManager
+ import android.content.Intent
+ import android.graphics.Typeface
+@@ -24,7 +25,7 @@ import android.widget.TextView
+  * Not exported, so only Lawnchair's own PendingIntents reach it. Two ways in:
+  *
+  * - "Pair a computer" in the Homa Lawn notification ([ACTION_WAIT]): the screen says "Waiting for a
+- *   computer…" and keeps the pairing window ([PairingGate]) open while it shows, at most
++ *   computer…" (with "Forget all computers" while any is paired) and keeps the pairing window ([PairingGate]) open while it shows, at most
+  *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, screen off) closes the window.
+  *   Tapping "Pair a computer" again only brings this one screen forward (singleTop). When a
+  *   computer's request arrives, the same screen switches in place to its name and four words
+@@ -139,9 +140,33 @@ class PairConfirmActivity : Activity() {
+             setOnClickListener { finish() }
+         })
+         root.addView(buttons)
++        // the link notification has room for three actions only: here it is always reachable
++        val paired = Pins.count(this)
++        if (paired > 0) {
++            root.addView(Button(this).apply {
++                text = "Forget all computers"
++                setOnClickListener { confirmForgetAll(paired) }
++            })
++        }
+         setContentView(root)
+     }
+ 
++    private fun confirmForgetAll(paired: Int) {
++        AlertDialog.Builder(this)
++            .setTitle("Forget all computers?")
++            .setMessage(
++                "${if (paired == 1) "The paired computer" else "All $paired paired computers"} will no longer reach " +
++                    "this phone until paired again.",
++            )
++            .setNegativeButton("Cancel", null)
++            .setPositiveButton("Forget") { _, _ ->
++                Pins.clear(applicationContext)
++                Log.i(TAG, "all computers forgotten from the pairing screen")
++                if (token == null) showWaiting("All computers forgotten.")
++            }
++            .show()
++    }
++
+     @SuppressLint("ClickableViewAccessibility")
+     private fun showRequest(t: String) {
+         val (name, words) = Pairing.pending(t) ?: return

@@ -1,0 +1,595 @@
+From 0fc2bdd6347bb75ef71d4ea62deff037bfcfa8e6 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Mon, 19 Oct 2026 17:07:20 +0200
+Subject: [PATCH] homalawn page reorder: edit-mode page reorder moves pages,
+ with page thumbnails
+
+Dragging a page in the edit-mode page strip (#6809) did two swaps that
+cancelled out: movePageGroup swapped the page order (mScreenOrder,
+saved as workspace_screen_order) and then also swapped the items'
+screen ids in the database (moveWorkspaceScreensInDatabase), whose
+bindItemsUpdated moved every item back to its old page. Only what is
+bound to a page itself travelled: the search/date bar of screen 0 and
+the default-home mark. The id swap could also put top-row items into
+screen 0, where the loader reserves row 0 for the search bar and
+deletes them as overlapping.
+
+Now only the order changes: every CellLayout keeps its screen id, so a
+page moves with all its items, screen 0 keeps the date bar (which
+travels with its page), the default home page follows its page, and
+the saved order puts it back after a restart. The item remap, its
+strip-deferral flag and its two swap-map tests are removed.
+
+The page strip: each chip shows a picture of its page (the page's
+items recorded into a Picture and rendered by the GPU, so widgets with
+hardware bitmaps draw too), made when the strip opens and after each
+drag, with the home-page button in its corner; chips are keyed by
+screen id; a move no longer rebinds the chip being dragged (which
+ended the drag after one step); the strip is centred and fits five
+pages on a 411 dp wide screen instead of truncated "Def..."/"Pag..."
+labels with the fourth chip half off screen.
+---
+ .../color/edit_mode_page_strip_home_tint.xml  |  4 +-
+ .../drawable/bg_edit_mode_page_strip_home.xml | 15 ++++
+ .../res/layout/edit_mode_page_strip_item.xml  | 50 +++++++----
+ lawnchair/res/layout/launcher.xml             |  4 +-
+ lawnchair/res/values/dimens.xml               |  4 +-
+ .../app/lawnchair/views/EditModePageStrip.kt  | 83 +++++++++++++++--
+ src/com/android/launcher3/Workspace.java      | 45 ++--------
+ .../android/launcher3/model/ModelWriter.java  | 89 -------------------
+ .../launcher3/WorkspacePageReorderTest.kt     | 27 ------
+ 9 files changed, 135 insertions(+), 186 deletions(-)
+ create mode 100644 lawnchair/res/drawable/bg_edit_mode_page_strip_home.xml
+
+diff --git a/lawnchair/res/color/edit_mode_page_strip_home_tint.xml b/lawnchair/res/color/edit_mode_page_strip_home_tint.xml
+index 39e73dacfb..03a8dbc4cb 100644
+--- a/lawnchair/res/color/edit_mode_page_strip_home_tint.xml
++++ b/lawnchair/res/color/edit_mode_page_strip_home_tint.xml
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <selector xmlns:android="http://schemas.android.com/apk/res/android">
+     <item
+-        android:color="@color/materialColorPrimary"
++        android:color="@color/materialColorOnPrimary"
+         android:state_selected="true" />
+-    <item android:color="?android:attr/textColorSecondary" />
++    <item android:color="#D9FFFFFF" />
+ </selector>
+diff --git a/lawnchair/res/drawable/bg_edit_mode_page_strip_home.xml b/lawnchair/res/drawable/bg_edit_mode_page_strip_home.xml
+new file mode 100644
+index 0000000000..f01ee99d58
+--- /dev/null
++++ b/lawnchair/res/drawable/bg_edit_mode_page_strip_home.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Behind the page strip's home button: filled with the accent on the home page, a dark disc
++     elsewhere, so it reads on any page picture. -->
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_selected="true">
++        <shape android:shape="oval">
++            <solid android:color="@color/materialColorPrimary" />
++        </shape>
++    </item>
++    <item>
++        <shape android:shape="oval">
++            <solid android:color="#99000000" />
++        </shape>
++    </item>
++</selector>
+diff --git a/lawnchair/res/layout/edit_mode_page_strip_item.xml b/lawnchair/res/layout/edit_mode_page_strip_item.xml
+index f190e0607d..38d178f681 100644
+--- a/lawnchair/res/layout/edit_mode_page_strip_item.xml
++++ b/lawnchair/res/layout/edit_mode_page_strip_item.xml
+@@ -1,36 +1,48 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:layout_width="112dp"
+-    android:layout_height="72dp"
+-    android:layout_marginStart="6dp"
+-    android:layout_marginEnd="6dp"
++<!-- One page in the edit-mode page strip: a picture of the page, and its "home page" button. -->
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="wrap_content"
++    android:layout_height="wrap_content"
++    android:layout_gravity="center_vertical"
++    android:layout_marginStart="4dp"
++    android:layout_marginEnd="4dp"
+     android:background="@drawable/bg_edit_mode_page_strip_item"
+-    android:gravity="center_vertical"
+-    android:orientation="horizontal"
+-    android:paddingHorizontal="12dp">
++    android:minWidth="@dimen/edit_mode_page_strip_chip_min_width"
++    android:padding="4dp">
++
++    <ImageView
++        android:id="@+id/page_strip_thumbnail"
++        android:layout_width="wrap_content"
++        android:layout_height="@dimen/edit_mode_page_strip_thumb_height"
++        android:layout_gravity="center"
++        android:adjustViewBounds="true"
++        android:importantForAccessibility="no"
++        android:scaleType="fitCenter" />
+ 
+     <TextView
+         android:id="@+id/page_strip_title"
+-        android:layout_width="0dp"
++        android:layout_width="wrap_content"
+         android:layout_height="wrap_content"
+-        android:layout_weight="1"
++        android:layout_gravity="top|center_horizontal"
++        android:layout_marginTop="8dp"
+         android:duplicateParentState="true"
+-        android:ellipsize="end"
++        android:importantForAccessibility="no"
+         android:maxLines="1"
+         android:textColor="?android:attr/textColorPrimary"
+-        android:textSize="14sp" />
++        android:textSize="14sp"
++        android:visibility="gone" />
+ 
+     <ImageButton
+         android:id="@+id/page_strip_home_button"
+-        android:layout_width="48dp"
+-        android:layout_height="48dp"
+-        android:minWidth="48dp"
+-        android:minHeight="48dp"
+-        android:background="@android:color/transparent"
++        android:layout_width="32dp"
++        android:layout_height="32dp"
++        android:layout_gravity="bottom|end"
++        android:background="@drawable/bg_edit_mode_page_strip_home"
+         android:contentDescription="@string/edit_mode_page_strip_set_home"
+         android:duplicateParentState="true"
+-        android:padding="10dp"
++        android:padding="6dp"
++        android:scaleType="fitCenter"
+         android:src="@drawable/ic_home_pin"
+         android:tint="@color/edit_mode_page_strip_home_tint" />
+ 
+-</LinearLayout>
++</FrameLayout>
+diff --git a/lawnchair/res/layout/launcher.xml b/lawnchair/res/layout/launcher.xml
+index db1bebcc0e..a42cad6007 100644
+--- a/lawnchair/res/layout/launcher.xml
++++ b/lawnchair/res/layout/launcher.xml
+@@ -61,9 +61,9 @@
+ 
+         <app.lawnchair.views.EditModePageStrip
+             android:id="@+id/edit_mode_page_strip"
+-            android:layout_width="match_parent"
++            android:layout_width="wrap_content"
+             android:layout_height="@dimen/edit_mode_page_strip_height"
+-            android:layout_gravity="bottom"
++            android:layout_gravity="bottom|center_horizontal"
+             android:clipToPadding="false"
+             android:paddingStart="12dp"
+             android:paddingEnd="12dp"
+diff --git a/lawnchair/res/values/dimens.xml b/lawnchair/res/values/dimens.xml
+index 32e3bbba57..d20c72391f 100644
+--- a/lawnchair/res/values/dimens.xml
++++ b/lawnchair/res/values/dimens.xml
+@@ -29,7 +29,9 @@
+     <dimen name="lawnchair_dialog_corner_radius">24dp</dimen>
+ 
+     <!-- Edit Mode page strip (bottom of DragLayer) -->
+-    <dimen name="edit_mode_page_strip_height">88dp</dimen>
++    <dimen name="edit_mode_page_strip_height">112dp</dimen>
++    <dimen name="edit_mode_page_strip_thumb_height">88dp</dimen>
++    <dimen name="edit_mode_page_strip_chip_min_width">56dp</dimen>
+     <dimen name="edit_mode_workspace_bottom_gap">8dp</dimen>
+     <dimen name="edit_mode_page_strip_tip_margin">8dp</dimen>
+ 
+diff --git a/lawnchair/src/app/lawnchair/views/EditModePageStrip.kt b/lawnchair/src/app/lawnchair/views/EditModePageStrip.kt
+index 2a1f23ff1e..b883cb951a 100644
+--- a/lawnchair/src/app/lawnchair/views/EditModePageStrip.kt
++++ b/lawnchair/src/app/lawnchair/views/EditModePageStrip.kt
+@@ -1,6 +1,9 @@
+ package app.lawnchair.views
+ 
+ import android.content.Context
++import android.graphics.Bitmap
++import android.graphics.Picture
++import android.os.Build
+ import android.util.AttributeSet
+ import android.view.LayoutInflater
+ import android.view.View
+@@ -8,6 +11,7 @@ import android.view.View.GONE
+ import android.view.View.VISIBLE
+ import android.view.ViewGroup
+ import android.widget.ImageButton
++import android.widget.ImageView
+ import android.widget.TextView
+ import androidx.recyclerview.widget.DefaultItemAnimator
+ import androidx.recyclerview.widget.ItemTouchHelper
+@@ -42,6 +46,7 @@ class EditModePageStrip @JvmOverloads constructor(
+             changeDuration = 150
+             supportsChangeAnimations = true
+         }
++        pageStripAdapter.setHasStableIds(true)
+         adapter = pageStripAdapter
+         ItemTouchHelper(DragCallback()).attachToRecyclerView(this)
+     }
+@@ -156,11 +161,58 @@ class EditModePageStrip @JvmOverloads constructor(
+         val starts = ws.reorderablePageGroupStarts
+         val defaultGroupIndex = ws.defaultPageGroupIndex
+         val items = (0 until starts.size()).map { i ->
+-            PageItem(isDefault = i == defaultGroupIndex)
++            val screenId = ws.getScreenIdForPageIndex(starts[i])
++            PageItem(
++                screenId = screenId,
++                isDefault = i == defaultGroupIndex,
++                thumbnail = renderThumbnail(ws, starts[i]),
++            )
+         }
+         pageStripAdapter.setItems(items)
+     }
+ 
++    /** Redraws every chip's picture of its page (the pages themselves stay in place). */
++    private fun refreshThumbnails() {
++        val ws = workspace ?: return
++        val starts = ws.reorderablePageGroupStarts
++        pageStripAdapter.updateThumbnails { screenId ->
++            (0 until starts.size()).firstOrNull { ws.getScreenIdForPageIndex(starts[it]) == screenId }
++                ?.let { renderThumbnail(ws, starts[it]) }
++        }
++    }
++
++    /**
++     * A small picture of the page group starting at [groupStart]: what its CellLayouts hold, side
++     * by side for two panels. Recorded into a [Picture] and rendered by the GPU, so widgets with
++     * hardware bitmaps draw too.
++     */
++    private fun renderThumbnail(ws: Workspace<*>, groupStart: Int): Bitmap? {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
++        val panels = (0 until ws.panelCount).mapNotNull { offset ->
++            ws.getScreenWithId(ws.getScreenIdForPageIndex(groupStart + offset))
++        }
++        val first = panels.firstOrNull() ?: return null
++        val pageWidth = first.width
++        val pageHeight = first.height
++        if (pageWidth <= 0 || pageHeight <= 0) return null
++        val targetHeight = resources.getDimensionPixelSize(R.dimen.edit_mode_page_strip_thumb_height)
++        val scale = targetHeight.toFloat() / pageHeight
++        val width = maxOf(1, (pageWidth * panels.size * scale).toInt())
++        val height = maxOf(1, (pageHeight * scale).toInt())
++        val picture = Picture()
++        val canvas = picture.beginRecording(width, height)
++        canvas.scale(scale, scale)
++        panels.forEachIndexed { index, cellLayout ->
++            val content = cellLayout.shortcutsAndWidgets
++            canvas.save()
++            canvas.translate((index * pageWidth + content.left).toFloat(), content.top.toFloat())
++            content.draw(canvas)
++            canvas.restore()
++        }
++        picture.endRecording()
++        return Bitmap.createBitmap(picture, width, height, Bitmap.Config.HARDWARE)
++    }
++
+     private fun moveGroup(from: Int, to: Int): Boolean {
+         val ws = workspace ?: return false
+         if (!ws.moveReorderablePageGroup(from, to)) {
+@@ -235,6 +287,7 @@ class EditModePageStrip @JvmOverloads constructor(
+         override fun clearView(recyclerView: RecyclerView, viewHolder: ViewHolder) {
+             super.clearView(recyclerView, viewHolder)
+             resetDragView(viewHolder.itemView)
++            refreshThumbnails()
+         }
+     }
+ 
+@@ -253,13 +306,23 @@ class EditModePageStrip @JvmOverloads constructor(
+             }
+             val item = items.removeAt(from)
+             items.add(to, item)
++            // Only a move while the finger is down: a change notification would rebind the chip
++            // being dragged and end the drag. Positions in the chips' descriptions are refreshed
++            // when the drag ends (clearView).
+             notifyItemMoved(from, to)
+-            val start = minOf(from, to)
+-            notifyItemRangeChanged(start, maxOf(from, to) - start + 1)
+         }
+ 
+         fun indexOfDefault(): Int = items.indexOfFirst { it.isDefault }
+ 
++        fun updateThumbnails(render: (Int) -> Bitmap?) {
++            items.indices.forEach { i ->
++                items[i] = items[i].copy(thumbnail = render(items[i].screenId))
++            }
++            notifyItemRangeChanged(0, items.size)
++        }
++
++        override fun getItemId(position: Int): Long = items[position].screenId.toLong()
++
+         fun updateDefaultHome(oldIndex: Int, newIndex: Int) {
+             if (oldIndex in items.indices) {
+                 items[oldIndex] = items[oldIndex].copy(isDefault = false)
+@@ -280,11 +343,15 @@ class EditModePageStrip @JvmOverloads constructor(
+         override fun onBindViewHolder(holder: PageStripViewHolder, position: Int) {
+             val item = items[position]
+             holder.itemView.isSelected = item.isDefault
+-            holder.title.text = if (item.isDefault) {
+-                resources.getString(R.string.edit_mode_page_strip_default)
++            val pageName = resources.getString(R.string.edit_mode_page_strip_page, position + 1)
++            holder.itemView.contentDescription = if (item.isDefault) {
++                pageName + ", " + resources.getString(R.string.edit_mode_page_strip_home_selected)
+             } else {
+-                resources.getString(R.string.edit_mode_page_strip_page, position + 1)
++                pageName
+             }
++            holder.thumbnail.setImageBitmap(item.thumbnail)
++            holder.title.visibility = if (item.thumbnail == null) VISIBLE else GONE
++            holder.title.text = (position + 1).toString()
+             holder.homeButton.isSelected = item.isDefault
+             holder.homeButton.contentDescription = if (item.isDefault) {
+                 resources.getString(R.string.edit_mode_page_strip_home_selected)
+@@ -311,11 +378,15 @@ class EditModePageStrip @JvmOverloads constructor(
+     }
+ 
+     private class PageStripViewHolder(itemView: View) : ViewHolder(itemView) {
++        val thumbnail: ImageView = itemView.findViewById(R.id.page_strip_thumbnail)
+         val title: TextView = itemView.findViewById(R.id.page_strip_title)
+         val homeButton: ImageButton = itemView.findViewById(R.id.page_strip_home_button)
+     }
+ 
++    /** One chip: a page group, known by the screen id of its first page (not by its position). */
+     private data class PageItem(
++        val screenId: Int,
+         val isDefault: Boolean,
++        val thumbnail: Bitmap?,
+     )
+ }
+diff --git a/src/com/android/launcher3/Workspace.java b/src/com/android/launcher3/Workspace.java
+index 816ea455d8..6533e7bde1 100644
+--- a/src/com/android/launcher3/Workspace.java
++++ b/src/com/android/launcher3/Workspace.java
+@@ -62,7 +62,6 @@ import android.os.Parcelable;
+ import android.util.AttributeSet;
+ import android.util.Log;
+ import android.util.SparseArray;
+-import android.util.SparseIntArray;
+ import android.view.HapticFeedbackConstants;
+ import android.view.Gravity;
+ import android.view.LayoutInflater;
+@@ -257,7 +256,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+ 
+     private boolean mStripScreensOnPageStopMoving = false;
+ 
+-    private boolean mDeferStripEmptyScreensForScreenRemap = false;
+     public boolean mHasOnLayoutBeenCalled = false;
+ 
+     private boolean mWorkspaceFadeInAdjacentScreens;
+@@ -1095,10 +1093,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+             return;
+         }
+ 
+-        if (mDeferStripEmptyScreensForScreenRemap) {
+-            return;
+-        }
+-
+         if (mLauncher.isInState(EDIT_MODE)) {
+             return;
+         }
+@@ -3413,15 +3407,10 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+         }
+         int defaultPage = getDefaultPage();
+         int defaultScreenId = getScreenIdForPageIndex(defaultPage);
+-        IntArray screenOrderSnapshot = new IntArray();
+-        for (int i = 0; i < mScreenOrder.size(); i++) {
+-            screenOrderSnapshot.add(mScreenOrder.get(i));
+-        }
+-        SparseIntArray screenSwapMap =
+-                createPageGroupSwapMap(screenOrderSnapshot, fromStart, targetStart, panelCount);
+-        if (screenSwapMap.size() == 0) {
+-            return false;
+-        }
++        // Only the page ORDER changes: each CellLayout keeps its screen id, so a page moves with
++        // everything on it (and screen 0 keeps the search bar). Item screen ids are never
++        // rewritten; swapping them as well would move the items back and could push items into
++        // screen 0's reserved top row, where the loader deletes them.
+         for (int i = 0; i < panelCount; i++) {
+             int fromIndex = fromStart + i;
+             int targetIndex = targetStart + i;
+@@ -3431,12 +3420,7 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+             mScreenOrder.set(targetIndex, fromScreenId);
+         }
+         applyScreenOrderToChildViews();
+-        if (screenSwapMap.size() > 0) {
+-            mLauncher.getModelWriter().persistWorkspaceScreenOrderSync(getPersistableScreenOrder());
+-            mDeferStripEmptyScreensForScreenRemap = true;
+-            mLauncher.getModelWriter().moveWorkspaceScreensInDatabase(
+-                    screenSwapMap, this::onWorkspaceScreenRemapFinished);
+-        }
++        mLauncher.getModelWriter().persistWorkspaceScreenOrderSync(getPersistableScreenOrder());
+         int remappedDefaultPage = mScreenOrder.indexOf(defaultScreenId);
+         if (remappedDefaultPage >= 0 && remappedDefaultPage != defaultPage) {
+             setDefaultPage(remappedDefaultPage);
+@@ -3553,10 +3537,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+         return persistedScreenIds.contains(screenId) && !isExtraEmptyScreen;
+     }
+ 
+-    private void onWorkspaceScreenRemapFinished() {
+-        mDeferStripEmptyScreensForScreenRemap = false;
+-    }
+-
+     private void persistCurrentScreenOrderSync() {
+         if (mLauncher.isWorkspaceLoading()) {
+             return;
+@@ -3601,21 +3581,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+         applyScreenOrderToChildViews();
+     }
+ 
+-    @VisibleForTesting
+-    static SparseIntArray createPageGroupSwapMap(
+-            IntArray screenOrder, int fromStart, int targetStart, int panelCount) {
+-        SparseIntArray swapMap = new SparseIntArray(panelCount * 2);
+-        for (int i = 0; i < panelCount; i++) {
+-            int fromScreen = screenOrder.get(fromStart + i);
+-            int targetScreen = screenOrder.get(targetStart + i);
+-            if (fromScreen != targetScreen) {
+-                swapMap.put(fromScreen, targetScreen);
+-                swapMap.put(targetScreen, fromScreen);
+-            }
+-        }
+-        return swapMap;
+-    }
+-
+     /**
+      * Called at the end of a drag which originated on the workspace.
+      */
+diff --git a/src/com/android/launcher3/model/ModelWriter.java b/src/com/android/launcher3/model/ModelWriter.java
+index c9c8967944..19d8fdc94e 100644
+--- a/src/com/android/launcher3/model/ModelWriter.java
++++ b/src/com/android/launcher3/model/ModelWriter.java
+@@ -24,7 +24,6 @@ import android.content.ContentValues;
+ import android.content.Context;
+ import android.text.TextUtils;
+ import android.util.Log;
+-import android.util.SparseIntArray;
+ 
+ import androidx.annotation.NonNull;
+ import androidx.annotation.Nullable;
+@@ -221,94 +220,6 @@ public class ModelWriter {
+         enqueueDeleteRunnable(new UpdateItemsRunnable(items, contentValues));
+     }
+ 
+-    /**
+-     * Remaps workspace screen ids for all desktop items using the provided mapping.
+-     */
+-    public void moveWorkspaceScreensInDatabase(SparseIntArray screenIdMap) {
+-        moveWorkspaceScreensInDatabase(screenIdMap, null);
+-    }
+-
+-    /**
+-     * Remaps workspace screen ids for all desktop items using the provided mapping.
+-     *
+-     * @param onComplete optional runnable executed on the main thread after item callbacks are
+-     *                   dispatched (always runs, including when there are no item updates).
+-     */
+-    public void moveWorkspaceScreensInDatabase(SparseIntArray screenIdMap, Runnable onComplete) {
+-        if (screenIdMap == null || screenIdMap.size() == 0) {
+-            if (onComplete != null) {
+-                mUiExecutor.execute(onComplete);
+-            }
+-            return;
+-        }
+-        ModelVerifier verifier = new ModelVerifier();
+-        enqueueDeleteRunnable(newModelTask(() -> {
+-            try (SQLiteTransaction t = mModel.getModelDbController().newTransaction()) {
+-                // First pass to temporary ids to avoid collisions in cycles.
+-                for (int i = 0; i < screenIdMap.size(); i++) {
+-                    int fromScreenId = screenIdMap.keyAt(i);
+-                    int tempScreenId = Integer.MIN_VALUE + i;
+-                    ContentValues tempValues = new ContentValues();
+-                    tempValues.put(Favorites.SCREEN, tempScreenId);
+-                    mModel.getModelDbController().update(
+-                            tempValues,
+-                            Favorites.CONTAINER + "=" + Favorites.CONTAINER_DESKTOP + " AND "
+-                                    + Favorites.SCREEN + "=" + fromScreenId,
+-                            null);
+-                }
+-                // Second pass to final ids.
+-                for (int i = 0; i < screenIdMap.size(); i++) {
+-                    int toScreenId = screenIdMap.valueAt(i);
+-                    int tempScreenId = Integer.MIN_VALUE + i;
+-                    ContentValues finalValues = new ContentValues();
+-                    finalValues.put(Favorites.SCREEN, toScreenId);
+-                    mModel.getModelDbController().update(
+-                            finalValues,
+-                            Favorites.CONTAINER + "=" + Favorites.CONTAINER_DESKTOP + " AND "
+-                                    + Favorites.SCREEN + "=" + tempScreenId,
+-                            null);
+-                }
+-                t.commit();
+-            } catch (Exception e) {
+-                Log.e(TAG, "Failed to remap workspace screens", e);
+-                if (onComplete != null) {
+-                    mUiExecutor.execute(onComplete);
+-                }
+-                return;
+-            }
+-
+-            ArrayList<ItemInfo> updatedItems = new ArrayList<>();
+-            synchronized (mBgDataModel) {
+-                for (ItemInfo item : mBgDataModel.itemsIdMap) {
+-                    if (item.container != Favorites.CONTAINER_DESKTOP) {
+-                        continue;
+-                    }
+-                    int newScreenId = screenIdMap.get(item.screenId, item.screenId);
+-                    if (newScreenId != item.screenId) {
+-                        item.screenId = newScreenId;
+-                        updatedItems.add(item);
+-                    }
+-                }
+-                if (!updatedItems.isEmpty()) {
+-                    mBgDataModel.updateItems(updatedItems, mOwner);
+-                }
+-                verifier.verifyModel();
+-            }
+-            final HashSet<ItemInfo> updates = new HashSet<>(updatedItems);
+-            mUiExecutor.execute(() -> {
+-                if (!updates.isEmpty()) {
+-                    if (mOwner != null) {
+-                        mOwner.bindItemsUpdated(updates);
+-                    }
+-                    notifyOtherCallbacks(c -> c.bindItemsUpdated(updates));
+-                }
+-                if (onComplete != null) {
+-                    onComplete.run();
+-                }
+-            });
+-        }));
+-    }
+-
+     /**
+      * Persists explicit workspace screen order synchronously.
+      */
+diff --git a/tests/multivalentTests/src/com/android/launcher3/WorkspacePageReorderTest.kt b/tests/multivalentTests/src/com/android/launcher3/WorkspacePageReorderTest.kt
+index f20ec16770..57a51713e2 100644
+--- a/tests/multivalentTests/src/com/android/launcher3/WorkspacePageReorderTest.kt
++++ b/tests/multivalentTests/src/com/android/launcher3/WorkspacePageReorderTest.kt
+@@ -15,7 +15,6 @@
+  */
+ package com.android.launcher3
+ 
+-import android.util.SparseIntArray
+ import androidx.test.ext.junit.runners.AndroidJUnit4
+ import androidx.test.filters.SmallTest
+ import com.android.launcher3.util.IntArray
+@@ -28,28 +27,6 @@ import org.junit.runner.RunWith
+ @RunWith(AndroidJUnit4::class)
+ class WorkspacePageReorderTest {
+ 
+-    @Test
+-    fun createPageGroupSwapMap_singlePanel_swapsBothScreens() {
+-        val screenOrder = IntArray.wrap(0, 1, 2, 3)
+-
+-        val swapMap = Workspace.createPageGroupSwapMap(screenOrder, 1, 2, 1)
+-
+-        assertSwap(swapMap, 1, 2)
+-        assertSwap(swapMap, 2, 1)
+-    }
+-
+-    @Test
+-    fun createPageGroupSwapMap_twoPanel_swapsPagePairs() {
+-        val screenOrder = IntArray.wrap(0, 1, 2, 3, 4, 5)
+-
+-        val swapMap = Workspace.createPageGroupSwapMap(screenOrder, 2, 4, 2)
+-
+-        assertSwap(swapMap, 2, 4)
+-        assertSwap(swapMap, 3, 5)
+-        assertSwap(swapMap, 4, 2)
+-        assertSwap(swapMap, 5, 3)
+-    }
+-
+     @Test
+     fun getPageGroupStarts_singlePanel_returnsEveryPageStart() {
+         val starts = Workspace.getPageGroupStarts(IntArray.wrap(0, 1, 2, 3), 1)
+@@ -92,8 +69,4 @@ class WorkspacePageReorderTest {
+         ).isFalse()
+     }
+ 
+-    private fun assertSwap(map: SparseIntArray, from: Int, to: Int) {
+-        assertThat(map.indexOfKey(from)).isAtLeast(0)
+-        assertThat(map.get(from)).isEqualTo(to)
+-    }
+ }

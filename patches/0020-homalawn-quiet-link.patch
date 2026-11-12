@@ -1,0 +1,837 @@
+From fb8585e8d96724142b6dacbdf88d0c23414bf344 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 14:23:04 +0200
+Subject: [PATCH] homalawn quiet link: no status notification, no foreground
+ service
+
+The link (TLS server, mDNS, unlock receiver) runs in the launcher's process from its start
+(LinkService.ensureLink, once per process), not inside a foreground service. Nothing stays in the
+notification shade: the owner wants notifications only when he has to do something.
+
+What keeps the link reachable: Homa Lawn is the default home app, so Android keeps its process at
+home-app priority behind other apps (never cached or frozen); with "Keep connected" (the battery
+optimisation exemption) it also has network in Doze and its plain, sticky LinkService is not
+stopped when the app goes idle. A process started without the home screen (crash alarm, boot,
+update) starts the link the same way.
+
+What the status notification did moves:
+- "Set as home" and "Keep connected": LinkAsks posts one notification only while one of them is
+  missing, each need once (dismissed, it stays away until that need comes back); removed when
+  nothing is missing. Checked at link start and every time the home screen comes to the front.
+- "Pair a computer": a "Pair a computer" row in Homa Lawn's settings opens the pairing screen
+  (waiting for a computer, Forget all computers).
+- "Connected" and "Screen control in use": no longer shown.
+
+The old "omalawn_link" channel is deleted; the connectedDevice service type and its permission go,
+and with them the debug_refuse_foreground hook. debug_link_state reports what LinkAsks would ask.
+---
+ lawnchair/AndroidManifest.xml                 |   7 +-
+ lawnchair/res/drawable/homar_ic_computer.xml  |   8 +
+ lawnchair/res/values/homar_strings.xml        |   3 +
+ lawnchair/src/app/lawnchair/LawnchairApp.kt   |   6 +-
+ .../src/app/lawnchair/LawnchairLauncher.kt    |   4 +-
+ .../src/app/lawnchair/omalawn/HomeRole.kt     |   3 +-
+ .../omalawn/OmalawnControlProvider.kt         |  14 +-
+ .../lawnchair/omalawn/link/BootReceiver.kt    |   4 +
+ .../lawnchair/omalawn/link/ComputersEntry.kt  |  31 ++
+ .../app/lawnchair/omalawn/link/LinkAsks.kt    | 112 +++++++
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |   8 +-
+ .../app/lawnchair/omalawn/link/LinkService.kt | 316 ++++++------------
+ .../omalawn/link/PairConfirmActivity.kt       |   4 +-
+ .../src/app/lawnchair/omalawn/link/Pairing.kt |   2 +-
+ .../app/lawnchair/omalawn/link/PairingGate.kt |   2 +-
+ .../destinations/PreferencesDashboard.kt      |   1 +
+ 16 files changed, 276 insertions(+), 249 deletions(-)
+ create mode 100644 lawnchair/res/drawable/homar_ic_computer.xml
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index 41cafb5088..9629b3c253 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -23,9 +23,7 @@
+     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+-    <!-- Homa Lawn link: FGS type connectedDevice needs this plus one network permission
+-         (developer.android.com/develop/background-work/services/fgs/service-types#connected-device) -->
+-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
++    <!-- Homa Lawn link: mDNS advert -->
+     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+     <!-- the pairing confirmation screen hides other apps' overlays while it shows (12+) -->
+@@ -220,8 +218,7 @@
+ 
+         <service
+             android:name="app.lawnchair.omalawn.link.LinkService"
+-            android:exported="false"
+-            android:foregroundServiceType="connectedDevice" />
++            android:exported="false" />
+ 
+         <!-- Homa Lawn: opened only by its own "needs access to photos" notification -->
+         <activity
+diff --git a/lawnchair/res/drawable/homar_ic_computer.xml b/lawnchair/res/drawable/homar_ic_computer.xml
+new file mode 100644
+index 0000000000..a9325b588e
+--- /dev/null
++++ b/lawnchair/res/drawable/homar_ic_computer.xml
+@@ -0,0 +1,8 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:height="24dp" android:tint="#000000" android:viewportHeight="24" android:viewportWidth="24" android:width="24dp">
++
++    <!-- Material "computer" icon (Apache 2.0) -->
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M20,18c1.1,0 1.99,-0.9 1.99,-2L22,6c0,-1.1 -0.9,-2 -2,-2H4c-1.1,0 -2,0.9 -2,2v10c0,1.1 0.9,2 2,2H0v2h24v-2h-4zM4,6h16v10H4V6z" />
++
++</vector>
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index 315c8cc12f..8651aeb789 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -2,6 +2,9 @@
+ <resources>
+     <!-- gesture option: app search screen with the keyboard at once, without the app drawer first -->
+     <string name="homar_gesture_search">Search (instant)</string>
++    <!-- settings: the pairing screen, the way in when the home screen cannot be showing -->
++    <string name="homar_computers_label">Pair a computer</string>
++    <string name="homar_computers_description">Let a computer with Homa Lawn reach this phone, or forget the paired ones</string>
+     <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017) -->
+     <string name="homar_wallpapers_label">Wallpaper from Omarchy</string>
+     <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
+diff --git a/lawnchair/src/app/lawnchair/LawnchairApp.kt b/lawnchair/src/app/lawnchair/LawnchairApp.kt
+index 0977b01bb7..d62c675c51 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairApp.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairApp.kt
+@@ -79,9 +79,9 @@ class LawnchairApp : LauncherApplication() {
+         QuickStepContract.sRecentsDisabled = !recentsEnabled
+         Flowerpot.Manager.getInstance(this)
+         registerActivityLifecycleCallbacks(activityHandler)
+-        // Homa Lawn link: main process only (the :bugReport process runs this too). Android may
+-        // refuse the start while the launcher is in the background; LawnchairLauncher.onResume,
+-        // the boot receiver and START_STICKY cover that.
++        // Homa Lawn link: main process only (the :bugReport process runs this too). The link runs in
++        // the process from here on; Android may refuse the service start while the launcher is in
++        // the background, which only costs the process its service priority (patch 0020).
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || android.app.Application.getProcessName() == packageName) app.lawnchair.omalawn.link.LinkService.start(this)
+     }
+ 
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index 4d4fa2b9b4..70f36dc061 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -484,9 +484,11 @@ class LawnchairLauncher : QuickstepLauncher() {
+         omalawnHomeAsked = false
+         val askingHome = app.lawnchair.omalawn.HomeRole.maybeAsk(this, explicitHome)
+         // visible, so Android always allows the start; a no-op when the link already runs. Then
+-        // make sure its notification can be seen (asks at most once per version).
++        // make sure its prompts can be seen (asks at most once per version), and say what is
++        // still missing for the link (patch 0020: Set as home, Keep connected), once.
+         if (app.lawnchair.omalawn.link.LinkService.start(this) && !askingHome) {
+             app.lawnchair.omalawn.link.NotifyPermission.maybeAsk(this)
++            app.lawnchair.omalawn.link.LinkAsks.refresh(this)
+         }
+ 
+         dragLayer.viewTreeObserver.addOnDrawListener(
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+index 3a466ca193..6f325e303c 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+@@ -13,7 +13,8 @@ import com.android.launcher3.util.ApiWrapper
+  * First run as the default home screen. On a fresh install the launcher shows Android's own
+  * "set as default home app" dialog once (upstream's [ApiWrapper.assignDefaultHomeRole], which
+  * also toasts where to change it if the person declines). After that it asks again only when the
+- * person taps "Set as home" in the link notification, which opens the launcher
++ * person taps "Set as home" in the notification LinkAsks posts while Homa Lawn is not the home
++ * app, which opens the launcher
+  * with [ACTION_REQUEST_HOME].
+  */
+ object HomeRole {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index bded9d3d80..9b21863bd7 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -8,6 +8,7 @@ import android.net.Uri
+ import android.os.Binder
+ import android.os.Bundle
+ import android.os.Process
++import app.lawnchair.omalawn.link.LinkAsks
+ import app.lawnchair.omalawn.link.LinkService
+ import app.lawnchair.omalawn.link.LinkServer
+ import app.lawnchair.omalawn.link.Pairing
+@@ -57,11 +58,10 @@ class OmalawnControlProvider : ContentProvider() {
+      * Pairing gate: `debug_allow_local_pairing on|off` (pair requests from loopback, i.e. `adb
+      * forward`, until off or reboot; also lifts the handshake limit for loopback),
+      * `debug_open_pairing` / `debug_close_pairing` (the window "Pair a computer" opens),
+-     * `debug_link_state` (window, home screen showing, toggle, connected computers, screen-in-use).
++     * `debug_link_state` (window, home screen showing, toggle, connected computers, screen-in-use,
++     * what LinkAsks would ask for).
+      * `debug_pair_legacy_accept` sends the old notification Accept (a service intent) for the
+      * pending request, as an app with notification access could; it must pin nothing.
+-     * `debug_refuse_foreground <n>` makes the next n foreground starts of the link service fail
+-     * the way Android refuses them.
+      * `debug_pin <fp> [name=…]` and `debug_unpin <fp>` add/remove a link pin without pairing;
+      * `debug_pair_reset` forgets the pairing rate window and cool-down; `debug_pair_fire_stale` fires
+      * the Review action of the last ended pairing (must be dead), `debug_pair_fire_current` the
+@@ -118,12 +118,6 @@ class OmalawnControlProvider : ContentProvider() {
+                     )
+                     return ok(JSONObject().put("sent", true))
+                 }
+-                "debug_refuse_foreground" -> {
+-                    val n = arg?.toIntOrNull() ?: return fail("count required")
+-                    ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).edit()
+-                        .putInt(LinkService.KEY_REFUSE_FOREGROUND, n).commit()
+-                    return ok(JSONObject().put("refuse_foreground", n))
+-                }
+                 "debug_crash_link_start" -> {
+                     val n = arg?.toIntOrNull() ?: return fail("count required")
+                     ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).edit()
+@@ -163,7 +157,7 @@ class OmalawnControlProvider : ContentProvider() {
+         .put("local_pairing", PairingGate.localAllowed(ctx))
+         .put("connected", org.json.JSONArray(LinkServer.connectedNames(ctx)))
+         .put("screen_in_use_ms", LinkServer.screenShownLeftMs(LinkService.SCREEN_SHOWN_MS))
+-        .put("refuse_foreground", ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).getInt(LinkService.KEY_REFUSE_FOREGROUND, 0))
++        .put("asks", org.json.JSONArray(LinkAsks.needs(ctx)))
+ 
+     /** The provider's positional `arg` gets the name each command reads it under. */
+     private fun params(method: String, arg: String?, extras: Bundle?): JSONObject {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+index ebf6570eb6..2e45fcae90 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+@@ -23,6 +23,10 @@ class BootReceiver : BroadcastReceiver() {
+                 }
+                 Log.i("OmalawnLink", "link start from ${intent.action}")
+                 LinkService.start(context)
++                // after an update or a crash the home screen may not come up by itself; after a
++                // boot it does, and Android 15 also sends BOOT_COMPLETED to a force-stopped app on
++                // its next start (a provider call must leave the home screen unloaded)
++                if (intent.action != Intent.ACTION_BOOT_COMPLETED) LinkService.kickLoad(context)
+             }
+         }
+     }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+new file mode 100644
+index 0000000000..0d9bc2aa29
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+@@ -0,0 +1,31 @@
++package app.lawnchair.omalawn.link
++
++import android.content.Intent
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
++import com.android.launcher3.R
++
++/**
++ * "Computers" in Homa Lawn's settings: opens the pairing screen ([PairConfirmActivity.ACTION_WAIT]:
++ * "Waiting for a computer…", pairing open while it shows, and "Forget all computers"). The way in
++ * when the home screen cannot be showing; it was the status notification's "Pair a computer"
++ * until that notification went (2026-10-17).
++ */
++@Composable
++fun HomarComputersEntry() {
++    val ctx = LocalContext.current
++    PreferenceCategory(
++        label = stringResource(R.string.homar_computers_label),
++        description = stringResource(R.string.homar_computers_description),
++        iconResource = R.drawable.homar_ic_computer,
++        onNavigate = {
++            ctx.startActivity(
++                Intent(ctx, PairConfirmActivity::class.java)
++                    .setAction(PairConfirmActivity.ACTION_WAIT)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
++            )
++        },
++    )
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+new file mode 100644
+index 0000000000..16bcff4087
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+@@ -0,0 +1,112 @@
++package app.lawnchair.omalawn.link
++
++import android.annotation.SuppressLint
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.PowerManager
++import android.provider.Settings
++import android.util.Log
++import androidx.core.app.NotificationCompat
++import app.lawnchair.omalawn.HomeRole
++import com.android.launcher3.R
++
++/**
++ * What the person has to do so computers can reach the phone, as one notification that only
++ * exists while something is missing (there is no status notification):
++ * - **Set as home**: Homa Lawn is not the default home app, so Android does not keep its process
++ *   (and the link in it) at home-app priority;
++ * - **Keep connected**: Homa Lawn is under battery optimisation, so the link has no network while
++ *   the phone sleeps (Doze) and Android stops its service once the app is idle.
++ *
++ * Each need is asked once: dismissed, it stays away until that need goes and comes back (or a
++ * new one appears). When nothing is missing any more the notification is removed. Checked when
++ * the link starts in a process and every time the home screen comes to the front.
++ */
++object LinkAsks {
++    private const val TAG = "OmalawnLink"
++    private const val CHANNEL = "omalawn_requests" // the channel of MediaPermission's requests
++    private const val NOTIFICATION_ID = 47103
++    private const val PREFS = "omalawn_link"
++    private const val KEY_ASKED = "asks_posted"
++    const val HOME = "home"
++    const val KEEP = "keep_connected"
++
++    /** The needs right now, in the order they are shown. */
++    fun needs(ctx: Context): List<String> = buildList {
++        if (HomeRole.missing(ctx)) add(HOME)
++        val pm = ctx.getSystemService(PowerManager::class.java)
++        if (pm != null && !pm.isIgnoringBatteryOptimizations(ctx.packageName)) add(KEEP)
++    }
++
++    fun refresh(ctx: Context) {
++        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
++        val needs = needs(ctx)
++        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        val asked = prefs.getStringSet(KEY_ASKED, emptySet()).orEmpty()
++        if (needs.isEmpty()) {
++            nm.cancel(NOTIFICATION_ID)
++            if (asked.isNotEmpty()) prefs.edit().remove(KEY_ASKED).apply()
++            return
++        }
++        // a need that went away may be asked again when it comes back
++        val still = asked.intersect(needs.toSet())
++        if (still != asked) prefs.edit().putStringSet(KEY_ASKED, still).apply()
++        if (still.containsAll(needs)) return // asked already (shown, or dismissed by the person)
++        if (NotifyPermission.missing(ctx) || !nm.areNotificationsEnabled()) return // asked once it can show
++        nm.createNotificationChannel(
++            NotificationChannel(CHANNEL, "Homa Lawn requests", NotificationManager.IMPORTANCE_DEFAULT).apply {
++                description = "Permissions Homa Lawn on your computer needs from you"
++            },
++        )
++        nm.notify(NOTIFICATION_ID, build(ctx, needs))
++        prefs.edit().putStringSet(KEY_ASKED, needs.toSet()).apply()
++        Log.i(TAG, "asked for: ${needs.joinToString()}")
++    }
++
++    private fun build(ctx: Context, needs: List<String>): android.app.Notification {
++        val lines = needs.map {
++            when (it) {
++                HOME -> "Make Homa Lawn your home screen: your computer reaches the phone through it."
++                else -> "Let Homa Lawn run in the background, so your computer can reach the phone while it sleeps."
++            }
++        }
++        val title = if (needs.size > 1) {
++            "Homa Lawn needs two settings"
++        } else if (needs[0] == HOME) {
++            "Make Homa Lawn your home screen"
++        } else {
++            "Keep Homa Lawn connected"
++        }
++        val intents = needs.map { intentFor(ctx, it) }
++        val b = NotificationCompat.Builder(ctx, CHANNEL)
++            .setSmallIcon(R.drawable.ic_home_screen)
++            .setContentTitle(title)
++            .setContentText(lines.first())
++            .setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
++            .setContentIntent(intents.first())
++            .setAutoCancel(true)
++            .setOnlyAlertOnce(true)
++        needs.forEachIndexed { i, need ->
++            b.addAction(0, if (need == HOME) "Set as home" else "Keep connected", intents[i])
++        }
++        return b.build()
++    }
++
++    private fun intentFor(ctx: Context, need: String): PendingIntent = when (need) {
++        HOME -> PendingIntent.getActivity(
++            ctx,
++            4,
++            HomeRole.requestIntent(ctx),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++        else -> {
++            @SuppressLint("BatteryLife") // sideloaded build; the link must survive Doze
++            val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}"))
++            PendingIntent.getActivity(ctx, 2, ask, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 6607e03854..a36bfc0c78 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -41,8 +41,8 @@ import org.json.JSONObject
+  * dismissal or timeout it is closed after answering `link.pair_wait`).
+  *
+  * Before the TLS handshake every new socket passes [PairingGate.admitHandshake] (a per-address
+- * limit; a paired computer's attempt is given back). The status notification reads
+- * [connectedNames] and [screenShownLeftMs]; [onChange] tells it when they change.
++ * limit; a paired computer's attempt is given back). The debug provider reads [connectedNames]
++ * and [screenShownLeftMs]; [onChange] tells listeners when they change.
+  */
+ object LinkServer {
+     const val PORT = 47100
+@@ -421,8 +421,8 @@ object LinkServer {
+             writer.error(id, BAD_PATH, "$BAD_PATH: over the link the wallpaper must be a file staged with launcher.stage_file")
+             return true
+         }
+-        // the phone's notification says "Screen control in use" for a while after every read or
+-        // action while screen control is on
++        // remembered for a while after every read or action while screen control is on
++        // (screenShownLeftMs; there is no notification for it since 2026-10-17)
+         if (method.startsWith("screen.") && method != "screen.status" &&
+             app.lawnchair.LawnchairAccessibilityService.current != null
+         ) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+index e48089436c..e3a04e64a0 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+@@ -1,130 +1,55 @@
+ package app.lawnchair.omalawn.link
+ 
+-import android.annotation.SuppressLint
+ import android.app.KeyguardManager
+-import android.app.Notification
+-import android.app.NotificationChannel
+ import android.app.NotificationManager
+-import android.app.PendingIntent
+-import android.app.ForegroundServiceStartNotAllowedException
+ import android.app.Service
+ import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
+ import android.content.IntentFilter
+-import android.content.pm.ServiceInfo
+-import android.net.Uri
+-import android.os.Build
+ import android.os.Handler
+ import android.os.IBinder
+ import android.os.Looper
+-import android.os.PowerManager
+ import android.os.SystemClock
+-import android.provider.Settings
+ import android.util.Log
+-import androidx.core.app.NotificationCompat
+ import androidx.core.content.ContextCompat
+-import app.lawnchair.omalawn.HomeRole
+ import app.lawnchair.omalawn.LayoutIo
+ import app.lawnchair.omalawn.OmalawnUpdate
+ import com.android.launcher3.BuildConfig
+-import com.android.launcher3.R
+ 
+ /**
+- * Foreground service (type connectedDevice) that owns the link server and the mDNS advert. Its
+- * foreground state is what keeps the launcher's network open behind other apps and in Doze.
++ * The link's home in the launcher's process: the link server, the mDNS advert and the unlock
++ * receiver run for as long as the process lives ([ensureLink], idempotent), whichever way it was
++ * started: the home screen ([app.lawnchair.LawnchairApp]), a boot or an update, a crash-restart
++ * alarm ([BootReceiver]).
+  *
+- * It shares the launcher's process, so nothing may throw out of its lifecycle: when Android
+- * refuses the foreground start (e.g. ForegroundServiceStartNotAllowedException for a sticky
+- * restart while another app is in front), the service logs it and stops itself; the next start
+- * (home screen shown, boot, update, crash alarm) tries again.
++ * No foreground service and no notification (the owner, 2026-10-17: nothing stays in the shade;
++ * notifications only when he has to do something). What keeps the link reachable instead:
++ * - Homa Lawn is the default home app, so Android keeps its process at home-app priority while
++ *   another app is in front: not cached, never frozen;
++ * - "Keep connected" (the battery-optimisation exemption, asked by [LinkAsks]): Android lets an
++ *   exempt app use the network in Doze, and does not stop this service when the app goes idle.
+  *
+- * Its notification is also the phone's view of the link: how many computers are paired, which
+- * one is connected right now, whether screen control was used in the last [SCREEN_SHOWN_MS],
+- * and "Pair a computer", which opens Lawnchair's pairing screen ([PairConfirmActivity]); the
+- * screen keeps the pairing window ([PairingGate]) open while it shows.
++ * This class is a plain started service ([START_STICKY]): it answers the pairing prompt's Reject /
++ * dismissal, and while it runs it keeps the process above the cached ones, also when the process
++ * was started without the home screen (after a crash, a boot, an update). Android may refuse to
++ * start it, or stop it once the app is idle without the exemption; the link does not depend on it
++ * and keeps running in the process.
++ *
++ * It shares the launcher's process, so nothing may throw out of its lifecycle.
+  */
+ class LinkService : Service() {
+ 
+-    private val main = Handler(Looper.getMainLooper())
+-    private val refresh = Runnable { notifyStatus() }
+-    private val changed: () -> Unit = {
+-        main.removeCallbacks(refresh)
+-        main.post(refresh)
+-    }
+-    private var refused = false // Android would not let this instance run in the foreground
+-
+-    /**
+-     * The phone unlocked (USER_PRESENT), or its screen came on without a keyguard (SCREEN_ON):
+-     * a silent update kept while it was locked is committed now. Both are only delivered to a
+-     * receiver registered at runtime (not one in the manifest), so this long-running service
+-     * holds it. Exported on purpose: USER_PRESENT comes from System UI (its own app uid, not the
+-     * system's), which a not-exported receiver never gets (seen on the AVD); both actions are
+-     * protected broadcasts, so no app can fake them.
+-     */
+-    private val unlock = object : BroadcastReceiver() {
+-        override fun onReceive(context: Context, intent: Intent) {
+-            runCatching { OmalawnUpdate.onUnlock(context) }
+-                .onFailure { Log.w(TAG, "deferred update on unlock failed", it) }
+-        }
+-    }
+-    private var unlockRegistered = false
+-
+     override fun onCreate() {
+         super.onCreate()
+         createdAt = SystemClock.elapsedRealtime() // CrashExit: a crash soon after this is backed off by Android
+         if (BuildConfig.DEBUG) debugCrashHook()
+-        val nm = getSystemService(NotificationManager::class.java)!!
+-        nm.createNotificationChannel(
+-            NotificationChannel(CHANNEL, "Homa Lawn link", NotificationManager.IMPORTANCE_LOW).apply {
+-                description = "Shows that computers can reach this phone over the Homa Lawn link"
+-                setShowBadge(false)
+-            },
+-        )
+-        if (!goForeground()) {
+-            refused = true
+-            stopSelf()
+-            return
+-        }
+-        Pairing.cancelLeftovers(this)
+-        runCatching {
+-            val filter = IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_ON) }
+-            ContextCompat.registerReceiver(this, unlock, filter, ContextCompat.RECEIVER_EXPORTED)
+-            unlockRegistered = true
+-        }.onFailure { Log.w(TAG, "unlock receiver not registered", it) }
+-        // a deferred update from before this process (killed while locked) goes in now if unlocked
+-        runCatching { OmalawnUpdate.onUnlock(this) }
+-        Pins.onChange(changed)
+-        LinkServer.onChange(changed)
+-        PairingGate.onChange(changed)
+-        // a process started for this service (after a crash, an update, a boot without the home
+-        // activity) would never load the home screen; give the launcher activity time to come first
+-        main.postDelayed({ LayoutIo.kickLoad(this) }, LOAD_KICK_DELAY_MS)
+-        Thread({
+-            try {
+-                Identity.ensure()
+-                LinkServer.start(this)
+-                Nsd.register(this, LinkServer.PORT)
+-            } catch (e: Exception) {
+-                Log.e(TAG, "link start failed", e)
+-            }
+-        }, "omalawn-link-start").start()
++        ensureLink(this)
+     }
+ 
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+-        if (refused) { // onCreate could not go foreground: this instance is on its way out
+-            stopSelf()
+-            return START_NOT_STICKY
+-        }
++        if (intent == null) kickLoad(this) // Android restarted this sticky service (the process had died)
+         when (intent?.action) {
+-            ACTION_FORGET_ALL -> {
+-                Pins.clear(this)
+-                Log.i(TAG, "all computers forgotten")
+-            }
+-            ACTION_OPEN_PAIRING -> { // the notification's action before the pairing screen; kept for old ones
+-                PairingGate.openWindow()
+-                Log.i(TAG, "pairing opened for ${PairingGate.WINDOW_MS / 1000} s")
+-            }
+             Pairing.ACTION_REJECT -> {
+                 val token = intent.getStringExtra(Pairing.EXTRA_TOKEN)
+                 // on every Android version: no answer from a locked phone (12+ also asks for the
+@@ -140,26 +65,13 @@ class LinkService : Service() {
+             Pairing.LEGACY_ACCEPT -> Log.w(TAG, "a pairing Accept sent to the service was ignored")
+             Pairing.ACTION_DISMISS -> Pairing.decide(this, intent.getStringExtra(Pairing.EXTRA_TOKEN), Pairing.DISMISSED)
+         }
+-        // every startForegroundService() must be answered with startForeground(), even when the
+-        // service already runs; it also refreshes "Keep connected" after the user granted it
+-        if (!goForeground()) {
+-            stopSelf()
+-            return START_NOT_STICKY
+-        }
+         return START_STICKY
+     }
+ 
+     override fun onDestroy() {
+-        main.removeCallbacksAndMessages(null)
+-        if (unlockRegistered) runCatching { unregisterReceiver(unlock) }
+-        unlockRegistered = false
+-        Pins.removeListener(changed)
+-        LinkServer.removeListener(changed)
+-        PairingGate.removeListener(changed)
+-        if (!refused) {
+-            Nsd.unregister(this)
+-            LinkServer.stop()
+-        }
++        // the link stays: it belongs to the process, not to this service (Android stops an idle
++        // app's services; the home screen keeps the process)
++        Log.i(TAG, "link service stopped; the link keeps running in the process")
+         super.onDestroy()
+     }
+ 
+@@ -175,126 +87,88 @@ class LinkService : Service() {
+         }
+     }
+ 
+-    /** startForeground, or false (logged) when Android refuses it; never throws. */
+-    private fun goForeground(): Boolean = try {
+-        if (BuildConfig.DEBUG) debugRefuseHook()
+-        val n = notification()
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+-        } else {
+-            startForeground(NOTIFICATION_ID, n)
+-        }
+-        true
+-    } catch (e: Exception) { // ForegroundServiceStartNotAllowedException, SecurityException, ...
+-        Log.w(TAG, "foreground start refused, stopping the link service: ${e.javaClass.simpleName}: ${e.message}")
+-        false
+-    }
+-
+-    /** Debug build: provider `debug_refuse_foreground <n>` makes the next n foreground starts fail as Android's would. */
+-    private fun debugRefuseHook() {
+-        val p = getSharedPreferences(DEBUG_PREFS, MODE_PRIVATE)
+-        val n = p.getInt(KEY_REFUSE_FOREGROUND, 0)
+-        if (n <= 0) return
+-        p.edit().putInt(KEY_REFUSE_FOREGROUND, n - 1).commit()
+-        val msg = "debug_refuse_foreground: deliberate refusal (${n - 1} left)"
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) throw ForegroundServiceStartNotAllowedException(msg)
+-        throw IllegalStateException(msg)
+-    }
+-
+-    private fun notifyStatus() {
+-        if (refused) return
+-        runCatching { getSystemService(NotificationManager::class.java)!!.notify(NOTIFICATION_ID, notification()) }
+-        // the "in use" line and the pairing window end on their own: look again when they do
+-        val next = listOf(LinkServer.screenShownLeftMs(SCREEN_SHOWN_MS), PairingGate.windowLeftMs()).filter { it > 0 }.minOrNull()
+-        main.removeCallbacks(refresh)
+-        if (next != null) main.postDelayed(refresh, next + 200)
+-    }
+-
+-    private fun notification(): Notification {
+-        val n = Pins.count(this)
+-        val lines = mutableListOf<String>()
+-        val connected = LinkServer.connectedNames(this)
+-        if (connected.isNotEmpty()) lines.add("Connected: ${connected.joinToString(", ")}")
+-        if (LinkServer.screenShownLeftMs(SCREEN_SHOWN_MS) > 0) lines.add("Screen control in use")
+-        val window = PairingGate.windowLeftMs()
+-        if (window > 0) lines.add("Pairing open for ${(window + 999) / 1000} s: run homalawn pair on the computer")
+-        val b = NotificationCompat.Builder(this, CHANNEL)
+-            .setSmallIcon(R.drawable.ic_home_screen)
+-            .setContentTitle("Homa Lawn link · $n ${if (n == 1) "computer" else "computers"} paired")
+-            .setOngoing(true)
+-            .setShowWhen(false)
+-            .setPriority(NotificationCompat.PRIORITY_LOW)
+-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+-        // opens Lawnchair's pairing screen, which keeps pairing open while it shows; tapped again,
+-        // it brings the same screen forward
+-        val open = PendingIntent.getActivity(
+-            this,
+-            3,
+-            Intent(this, PairConfirmActivity::class.java)
+-                .setAction(PairConfirmActivity.ACTION_WAIT)
+-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+-        )
+-        b.addAction(0, "Pair a computer", open)
+-        // Android shows three actions at most: "Forget all computers" goes last, so it is the one
+-        // left out while both setup actions still show; it is always on the pairing screen
+-        // ("Pair a computer"), so it stays reachable
+-        if (HomeRole.missing(this)) {
+-            val home = PendingIntent.getActivity(
+-                this,
+-                4,
+-                HomeRole.requestIntent(this),
+-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+-            )
+-            b.addAction(0, "Set as home", home) // short: a longer label is cut in the 3-action row
+-            lines.add("Homa Lawn is not your home screen yet")
+-        }
+-        val pm = getSystemService(PowerManager::class.java)!!
+-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+-            @SuppressLint("BatteryLife") // sideloaded build; the link must survive Doze
+-            val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+-            val keep = PendingIntent.getActivity(this, 2, ask, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+-            b.addAction(0, "Keep connected", keep)
+-            lines.add("Tap \"Keep connected\" so the phone stays reachable while asleep")
+-        }
+-        if (n > 0) {
+-            val forget = PendingIntent.getService(
+-                this,
+-                1,
+-                Intent(this, LinkService::class.java).setAction(ACTION_FORGET_ALL),
+-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+-            )
+-            b.addAction(0, "Forget all computers", forget)
+-        }
+-        if (lines.isNotEmpty()) {
+-            b.setContentText(lines.first())
+-            b.setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
+-        }
+-        return b.build()
+-    }
+-
+     companion object {
+         private const val TAG = "OmalawnLink"
+-        private const val CHANNEL = "omalawn_link"
+-        private const val NOTIFICATION_ID = 47100
+-        const val ACTION_FORGET_ALL = "app.lawnchair.omalawn.link.FORGET_ALL"
+-        const val ACTION_OPEN_PAIRING = "app.lawnchair.omalawn.link.OPEN_PAIRING"
+-        /** How long "Screen control in use" stays after the last screen.* call. */
++        /** The status notification's channel until 2026-10-17; deleted so no setting is left behind. */
++        private const val OLD_CHANNEL = "omalawn_link"
++        /** How long "screen in use" counts after the last screen.* call (debug_link_state). */
+         const val SCREEN_SHOWN_MS = 30_000L
+         private const val LOAD_KICK_DELAY_MS = 5000L
+         /** elapsedRealtime of this process's LinkService.onCreate, 0 if none yet. */
+         @Volatile var createdAt = 0L
+         const val DEBUG_PREFS = "omalawn_debug"
+         const val KEY_CRASH_STARTS = "crash_link_start"
+-        const val KEY_REFUSE_FOREGROUND = "refuse_foreground"
+ 
+-        /** Starts (or pokes) the link service; false when Android refuses a start right now. */
+-        fun start(ctx: Context): Boolean = try {
+-            ctx.startForegroundService(Intent(ctx, LinkService::class.java))
+-            true
+-        } catch (e: Exception) { // ForegroundServiceStartNotAllowedException / IllegalStateException
+-            Log.w(TAG, "link service not started now: ${e.javaClass.simpleName}: ${e.message}")
+-            false
++        private val main = Handler(Looper.getMainLooper())
++        private var linkUp = false
++
++        /**
++         * The phone unlocked (USER_PRESENT), or its screen came on without a keyguard (SCREEN_ON):
++         * a silent update kept while it was locked is committed now. Both are only delivered to a
++         * receiver registered at runtime (not one in the manifest), so the process holds it.
++         * Exported on purpose: USER_PRESENT comes from System UI (its own app uid, not the
++         * system's), which a not-exported receiver never gets (seen on the AVD); both actions are
++         * protected broadcasts, so no app can fake them.
++         */
++        private val unlock = object : BroadcastReceiver() {
++            override fun onReceive(context: Context, intent: Intent) {
++                runCatching { OmalawnUpdate.onUnlock(context) }
++                    .onFailure { Log.w(TAG, "deferred update on unlock failed", it) }
++            }
++        }
++
++        /**
++         * A process started without the home activity (Android restarting this service after the
++         * process died, a boot, an update, the crash-restart alarm) would never load the home
++         * screen; give the launcher activity time to come first, then load it. Not for a process
++         * started for anything else (a provider call): that one stays unloaded, so
++         * launcher.ping is pure.
++         */
++        fun kickLoad(ctx: Context) {
++            val app = ctx.applicationContext
++            main.postDelayed({ runCatching { LayoutIo.kickLoad(app) } }, LOAD_KICK_DELAY_MS)
++        }
++
++        /** Starts the link in this process once; later calls do nothing. Never throws. */
++        @Synchronized
++        fun ensureLink(context: Context) {
++            if (linkUp) return
++            linkUp = true
++            val ctx = context.applicationContext
++            runCatching { ctx.getSystemService(NotificationManager::class.java)?.deleteNotificationChannel(OLD_CHANNEL) }
++            runCatching { Pairing.cancelLeftovers(ctx) }
++            runCatching {
++                val filter = IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_ON) }
++                ContextCompat.registerReceiver(ctx, unlock, filter, ContextCompat.RECEIVER_EXPORTED)
++            }.onFailure { Log.w(TAG, "unlock receiver not registered", it) }
++            // a deferred update from before this process (killed while locked) goes in now if unlocked
++            runCatching { OmalawnUpdate.onUnlock(ctx) }
++            Thread({
++                try {
++                    Identity.ensure()
++                    LinkServer.start(ctx)
++                    Nsd.register(ctx, LinkServer.PORT)
++                } catch (e: Exception) {
++                    Log.e(TAG, "link start failed", e)
++                }
++            }, "omalawn-link-start").start()
++            runCatching { LinkAsks.refresh(ctx) }
++            Log.i(TAG, "link started in the process")
++        }
++
++        /**
++         * Makes sure the link runs ([ensureLink]) and asks Android to start (or poke) the service.
++         * False when Android refuses the service right now (the link runs anyway).
++         */
++        fun start(ctx: Context): Boolean {
++            ensureLink(ctx)
++            return try {
++                ctx.startService(Intent(ctx, LinkService::class.java))
++                true
++            } catch (e: Exception) { // IllegalStateException: background start not allowed
++                Log.w(TAG, "link service not started now (the link runs in the process): ${e.javaClass.simpleName}: ${e.message}")
++                false
++            }
+         }
+     }
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index 8141324bab..6431cea1d0 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -24,7 +24,7 @@ import android.widget.TextView
+  * Lawnchair's pairing screen, and the only place a pairing can be accepted (final review C2).
+  * Not exported, so only Lawnchair's own PendingIntents reach it. Two ways in:
+  *
+- * - "Pair a computer" in the Homa Lawn notification ([ACTION_WAIT]): the screen says "Waiting for a
++ * - "Pair a computer" in Homa Lawn's settings ([ACTION_WAIT]): the screen says "Waiting for a
+  *   computer…" (with "Forget all computers" while any is paired) and keeps the pairing window ([PairingGate]) open while it shows, at most
+  *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, screen off) closes the window.
+  *   Tapping "Pair a computer" again only brings this one screen forward (singleTop). When a
+@@ -140,7 +140,7 @@ class PairConfirmActivity : Activity() {
+             setOnClickListener { finish() }
+         })
+         root.addView(buttons)
+-        // the link notification has room for three actions only: here it is always reachable
++        // the one place on the phone to forget every paired computer
+         val paired = Pins.count(this)
+         if (paired > 0) {
+             root.addView(Button(this).apply {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+index 4a45036ebd..3e9ebad280 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+@@ -179,7 +179,7 @@ object Pairing {
+             Log.i(TAG, "pair request refused: the home screen is not showing and pairing is not open")
+             throw OmalawnError(
+                 PairingGate.PAIRING_CLOSED,
+-                "pairing is closed; open the home screen on the phone (or Pair a computer)",
++                "pairing is closed; open the home screen on the phone (or Pair a computer in Homa Lawn's settings)",
+             )
+         }
+         if (PairingGate.isLocal(conn.inetAddress) && !PairingGate.localAllowed(ctx)) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
+index 113529b66a..7ff0e398bc 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
+@@ -15,7 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList
+  * - **When**: `link.pair_request` is refused (`pairing_closed`) unless the home screen is showing
+  *   ([homeShowing]: Lawnchair's launcher activity resumed and the phone not locked; the Flux model,
+  *   spec N5 of new-phone setup) or the user opened the **pairing window**. "Pair a computer" in
+- *   the Homa Lawn notification opens the pairing screen ([PairConfirmActivity]), which keeps the
++ *   Homa Lawn's settings opens the pairing screen ([PairConfirmActivity]), which keeps the
+  *   window open while it shows, at most [SCREEN_WINDOW_MS], and closes it when it is left; the
+  *   debug hook opens it for [WINDOW_MS]. A successful pairing closes it again.
+  * - **Local requests** (loopback, or one of the phone's own addresses: an app on this phone) are
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+index 2e4ea77af8..df9a5e626a 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+@@ -149,6 +149,7 @@ fun PreferencesDashboard(
+             )
+ 
+             HomarWallpapersEntry() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
++            app.lawnchair.omalawn.link.HomarComputersEntry() // Homa Lawn: Pair a computer (patch 0020)
+ 
+             val isSmartspaceEnabled = prefs2.enableSmartspace.firstCached()
+             PreferenceCategory(

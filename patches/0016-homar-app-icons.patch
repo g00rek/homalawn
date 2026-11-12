@@ -1,0 +1,318 @@
+From b6f362adad19544ca4525978a842ac2e6f04f5b5 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Thu, 15 Oct 2026 14:05:38 +0200
+Subject: [PATCH] homar app icons: icons and widget previews for the desktop
+ editor
+
+The desktop's home-screen editor shows the phone's real icons. Two new
+commands in app/lawnchair/omalawn/AppIcons.kt:
+
+- launcher.app_icons {components?, size?, keys_only?}: for each launcher
+  activity (all when components is empty) its label, a key and a PNG
+  (base64) drawn like a workspace icon: the bitmap from Lawnchair's icon
+  cache (icon pack, shape, adaptive wrapping), read on the model thread,
+  drawn through newIcon(context, true) as BubbleTextView does, so themed
+  icons show when they are on.
+- launcher.widget_previews {providers?, size?, keys_only?}: each widget
+  provider's preview image, or its icon when it has none, fitted into
+  size x size.
+
+The key changes when the picture would: the app's version and update
+time, Lawnchair's version and icon settings (shared prefs with "icon" or
+"adaptive" in the name, the icon_shape keys), the night mode (themed
+icons follow it) and the size. keys_only answers without drawing, so the
+desktop asks for pictures only for what it has not cached. An answer
+stays under the link's 1 MiB line: past 700k characters of base64 the
+rest come back with deferred: true and no picture.
+
+Hooks: one line each in OmalawnCommands and in the link's method table.
+---
+ .../src/app/lawnchair/omalawn/AppIcons.kt     | 251 ++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   2 +
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |   2 +
+ 3 files changed, 255 insertions(+)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt b/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
+new file mode 100644
+index 0000000000..021d2e80e5
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
+@@ -0,0 +1,251 @@
++package app.lawnchair.omalawn
++
++import android.appwidget.AppWidgetManager
++import android.appwidget.AppWidgetProviderInfo
++import android.content.ComponentName
++import android.content.Context
++import android.content.pm.LauncherActivityInfo
++import android.content.pm.LauncherApps
++import android.content.pm.PackageManager
++import android.content.res.Configuration
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.graphics.Picture
++import android.graphics.drawable.Drawable
++import android.os.Build
++import android.os.Process
++import android.util.Base64
++import app.lawnchair.preferences2.PreferenceManager2
++import com.android.launcher3.LauncherAppState
++import com.android.launcher3.LauncherSettings
++import com.android.launcher3.icons.BitmapInfo
++import com.android.launcher3.model.data.AppInfo
++import com.android.launcher3.util.Executors.MODEL_EXECUTOR
++import java.io.ByteArrayOutputStream
++import java.security.MessageDigest
++import java.util.concurrent.ExecutionException
++import java.util.concurrent.FutureTask
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.TimeoutException
++import kotlin.math.roundToInt
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.runBlocking
++import org.json.JSONArray
++import org.json.JSONObject
++
++/**
++ * Pictures for the desktop's home-screen editor (patch 0016).
++ *
++ * `launcher.app_icons` draws app icons the way the home screen draws them: the bitmap comes from
++ * Lawnchair's icon cache (icon pack, shape, adaptive wrapping) and is drawn through the same
++ * `newIcon(context, FLAG_THEMED)` a workspace icon uses, so themed icons appear when they are on.
++ * `launcher.widget_previews` gives each widget provider's preview picture, or its icon when it has
++ * none.
++ *
++ * Params: `components` / `providers` (flattened component names; empty or missing = all),
++ * `size` (px, [MIN_PX]..[MAX_PX], default [DEFAULT_PX]) and `keys_only` (no pictures: just labels
++ * and keys, cheap enough to ask on every page open). Each entry carries a `key` that changes when
++ * the picture would change (the app's version, Lawnchair's icon settings, the night mode for
++ * themed icons, the size), so the desktop caches by it. One answer stays under the link's 1 MiB
++ * line: entries past [BUDGET] characters of base64 come back with `deferred: true` and no
++ * picture, for the desktop to ask again.
++ */
++object AppIcons {
++    private const val MIN_PX = 16
++    private const val MAX_PX = 512
++    private const val DEFAULT_PX = 128
++    private const val BUDGET = 700_000
++    private const val TIMEOUT_S = 30L
++
++    fun appIcons(ctx: Context, params: JSONObject): JSONArray {
++        val size = size(params)
++        val keysOnly = params.optBoolean("keys_only")
++        val want = names(params, "components")
++        val la = ctx.getSystemService(LauncherApps::class.java)!!
++        val user = Process.myUserHandle()
++        val all = la.getActivityList(null, user)
++        val acts = if (want == null) {
++            all
++        } else {
++            val byName = all.associateBy { it.componentName.flattenToString() }
++            want.mapNotNull { byName[it] ?: la.resolveActivity(intentFor(it) ?: return@mapNotNull null, user) }
++        }
++        val env = iconEnv(ctx)
++        val out = JSONArray()
++        // the icon cache may only be read on the model thread; drawing happens back here
++        val infos: List<Pair<LauncherActivityInfo, AppInfo?>> = if (keysOnly) {
++            acts.map { it to null }
++        } else {
++            val app = LauncherAppState.getInstance(ctx)
++            onModel {
++                acts.map { a ->
++                    val info = AppInfo(ctx, a, user)
++                    app.iconCache.getTitleAndIcon(info, a, LauncherSettings.Favorites.DESKTOP_ICON_FLAG)
++                    a to info
++                }
++            }
++        }
++        var used = 0
++        infos.forEach { (a, info) ->
++            val cn = a.componentName
++            val o = JSONObject()
++                .put("component", cn.flattenToString())
++                .put("label", info?.title?.toString() ?: a.label.toString())
++                .put("key", key(ctx, cn.packageName, env, size))
++            if (info != null) {
++                if (used > BUDGET) {
++                    o.put("deferred", true)
++                } else {
++                    val png = png(info.newIcon(ctx, BitmapInfo.FLAG_THEMED), size, size)
++                    used += png.length
++                    o.put("png_b64", png)
++                }
++            }
++            out.put(o)
++        }
++        return out
++    }
++
++    fun widgetPreviews(ctx: Context, params: JSONObject): JSONArray {
++        val size = size(params)
++        val keysOnly = params.optBoolean("keys_only")
++        val want = names(params, "providers")?.mapNotNull { ComponentName.unflattenFromString(it) }?.toSet()
++        val density = ctx.resources.displayMetrics.densityDpi
++        val out = JSONArray()
++        var used = 0
++        AppWidgetManager.getInstance(ctx).installedProviders
++            .filter { want == null || it.provider in want }
++            .forEach { p ->
++                val o = JSONObject()
++                    .put("provider", p.provider.flattenToShortString())
++                    .put("label", p.loadLabel(ctx.packageManager))
++                    .put("key", key(ctx, p.provider.packageName, "widget|${p.previewImage}|${p.icon}", size))
++                if (!keysOnly) {
++                    if (used > BUDGET) {
++                        o.put("deferred", true)
++                    } else {
++                        val (d, kind) = preview(ctx, p, density)
++                        if (d != null) {
++                            val (w, h) = fit(d, size)
++                            val png = png(d, w, h)
++                            used += png.length
++                            o.put("png_b64", png).put("kind", kind)
++                        }
++                    }
++                }
++                out.put(o)
++            }
++        return out
++    }
++
++    private fun preview(ctx: Context, p: AppWidgetProviderInfo, density: Int): Pair<Drawable?, String> {
++        runCatching { p.loadPreviewImage(ctx, density) }.getOrNull()?.let { return it to "preview" }
++        runCatching { p.loadIcon(ctx, density) }.getOrNull()?.let { return it to "icon" }
++        return null to "none"
++    }
++
++    /** The drawable's aspect ratio inside a [size] x [size] box. */
++    private fun fit(d: Drawable, size: Int): Pair<Int, Int> {
++        val w = d.intrinsicWidth.takeIf { it > 0 } ?: size
++        val h = d.intrinsicHeight.takeIf { it > 0 } ?: size
++        val s = size.toFloat() / maxOf(w, h)
++        return maxOf(1, (w * s).roundToInt()) to maxOf(1, (h * s).roundToInt())
++    }
++
++    /**
++     * The icon cache keeps hardware bitmaps, which a software Canvas refuses; a Picture records
++     * the drawing and renders it like the screen does, then a software copy is compressed.
++     */
++    private fun png(d: Drawable, w: Int, h: Int): String {
++        d.setBounds(0, 0, w, h)
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) { // no Picture-backed bitmaps before Android 9
++            val sw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
++            d.draw(Canvas(sw))
++            return encode(sw)
++        }
++        val pic = Picture()
++        d.draw(pic.beginRecording(w, h))
++        pic.endRecording()
++        val hw = Bitmap.createBitmap(pic, w, h, Bitmap.Config.ARGB_8888)
++        val bmp = if (hw.config == Bitmap.Config.HARDWARE) hw.copy(Bitmap.Config.ARGB_8888, false) else hw
++        if (bmp !== hw) hw.recycle()
++        return encode(bmp)
++    }
++
++    private fun encode(bmp: Bitmap): String {
++        val bytes = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
++        bmp.recycle()
++        return Base64.encodeToString(bytes, Base64.NO_WRAP)
++    }
++
++    /**
++     * Everything outside the app that changes how its icon is drawn: Lawnchair's version and its
++     * icon settings (pack, themed, shape, adaptive wrapping, backgrounds), plus the night mode,
++     * which themed icons follow.
++     */
++    private fun iconEnv(ctx: Context): String {
++        val sb = StringBuilder()
++        sb.append(version(ctx, ctx.packageName))
++        com.android.launcher3.LauncherPrefs.getPrefs(ctx).all.toSortedMap().forEach { (k, v) ->
++            if (k.contains("icon", ignoreCase = true) || k.contains("adaptive", ignoreCase = true)) sb.append('|').append(k).append('=').append(v)
++        }
++        val ds = runBlocking { PreferenceManager2.getInstance(ctx).preferencesDataStore.data.first() }
++        ds.asMap().entries.sortedBy { it.key.name }.forEach { (k, v) ->
++            if (k.name.contains("icon_shape")) sb.append('|').append(k.name).append('=').append(v)
++        }
++        sb.append("|night=").append(ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
++        return sb.toString()
++    }
++
++    private fun version(ctx: Context, pkg: String): String = try {
++        val pi = ctx.packageManager.getPackageInfo(pkg, 0)
++        "${pi.longVersionCode}@${pi.lastUpdateTime}"
++    } catch (e: PackageManager.NameNotFoundException) {
++        "gone"
++    }
++
++    private fun key(ctx: Context, pkg: String, env: String, size: Int): String {
++        val md = MessageDigest.getInstance("SHA-256")
++        md.update("$pkg|${version(ctx, pkg)}|$env|$size".toByteArray())
++        return md.digest().take(12).joinToString("") { "%02x".format(it) }
++    }
++
++    private fun size(p: JSONObject): Int {
++        if (p.isNull("size")) return DEFAULT_PX
++        val s = p.get("size").toString().toIntOrNull()
++        if (s == null || s !in MIN_PX..MAX_PX) {
++            throw OmalawnError("bad_params", "bad_params: size must be $MIN_PX..$MAX_PX px")
++        }
++        return s
++    }
++
++    /** A JSON array of names (or its text, from the provider); null = all. */
++    private fun names(p: JSONObject, k: String): List<String>? {
++        if (p.isNull(k)) return null
++        val arr = when (val v = p.get(k)) {
++            is JSONArray -> v
++            else -> JSONArray(v.toString())
++        }
++        if (arr.length() == 0) return null
++        return (0 until arr.length()).map { arr.getString(it) }
++    }
++
++    private fun intentFor(name: String) = ComponentName.unflattenFromString(name)?.let {
++        android.content.Intent(android.content.Intent.ACTION_MAIN)
++            .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
++            .setComponent(it)
++    }
++
++    private fun <T> onModel(block: () -> T): T {
++        val task = FutureTask(block)
++        MODEL_EXECUTOR.execute(task)
++        return try {
++            task.get(TIMEOUT_S, TimeUnit.SECONDS)
++        } catch (e: TimeoutException) {
++            task.cancel(false)
++            throw OmalawnError(OmalawnCommands.BUSY, "${OmalawnCommands.BUSY}: the launcher did not get to the icons within ${TIMEOUT_S}s")
++        } catch (e: ExecutionException) {
++            throw e.cause ?: e
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 9f634e13ac..8f391172e5 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -113,6 +113,8 @@ object OmalawnCommands {
+             }
+             "launcher.widgets_list" -> widgetsList(ctx)
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
++            "launcher.app_icons" -> AppIcons.appIcons(ctx, params) // patch 0016
++            "launcher.widget_previews" -> AppIcons.widgetPreviews(ctx, params) // patch 0016
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             "launcher.nova_convert" -> NovaIo.convert(ctx, params) // patch 0012
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index e5ecebc101..b5306af896 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -87,6 +87,8 @@ object LinkServer {
+         "launcher.wallpaper_lock_reset" to Spec(emptySet()),
+         "launcher.widgets_list" to Spec(emptySet()),
+         "launcher.widget_status" to Spec(setOf("id")),
++        "launcher.app_icons" to Spec(setOf("components", "size", "keys_only")),
++        "launcher.widget_previews" to Spec(setOf("providers", "size", "keys_only")),
+         "launcher.layout_export" to Spec(setOf("via"), Kind.BLOB_OUT),
+         "launcher.layout_import" to Spec(setOf("db"), Kind.BLOB_IN),
+         "launcher.stage_file" to Spec(setOf("name"), Kind.STAGE),

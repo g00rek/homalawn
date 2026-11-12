@@ -1,0 +1,60 @@
+[project]
+name = "homalawn"
+version = "0.1.0"
+description = "Run a patched Lawnchair home screen from an Omarchy desktop: CLI, desktop window, theme sync and MCP tools for AI agents."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES"]
+authors = [{ name = "Michał Górecki" }]
+requires-python = ">=3.12"
+keywords = ["android", "launcher", "lawnchair", "omarchy", "mcp", "home-screen", "hyprland"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "pillow>=11",
+    "qrcode>=8",
+    "typer>=0.12",
+]
+[project.urls]
+Homepage = "https://github.com/g00rek/homalawn"
+Documentation = "https://github.com/g00rek/homalawn/tree/main/docs/guide"
+Issues = "https://github.com/g00rek/homalawn/issues"
+Changelog = "https://github.com/g00rek/homalawn/blob/main/CHANGELOG.md"
+
+[project.scripts]
+homalawn = "homalawn.cli:app"
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.15"]
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["src/homalawn"]
+[tool.pytest.ini_options]
+markers = ["device: needs the test AVD (HOMALAWN_SERIAL)",
+           "slow: takes minutes (e.g. the 120 s pairing timeout); skip with -m \"not slow\""]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["lawnchair"]
+
+[tool.ruff.lint]
+# Only checks that find real bugs (syntax errors, undefined names, unused imports and variables);
+# no style rules, so the code keeps its own formatting.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixtures are imported into the test modules that use them, and tests keep unused results
+"tests/**" = ["F401", "F811", "F841"]

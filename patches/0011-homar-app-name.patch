@@ -1,0 +1,34 @@
+From 528b35927b5e8c41424d1fe32623bcbcffb0b51c Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 16 Oct 2026 13:07:45 +0200
+Subject: [PATCH] homar app name: the launcher label and the app name in
+ Settings say Homa Lawn
+
+Only the visible name changes (derived_app_name, both build types). The
+app's own id, signing and version come from patch 0019 (homalawn.gradle).
+---
+ build.gradle | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/build.gradle b/build.gradle
+index d0421b51be..b8840a3d7a 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -227,7 +227,7 @@ android {
+ 
+         debug {
+             applicationIdSuffix ".debug"
+-            resValue("string", "derived_app_name", "Lawnchair (Debug)")
++            resValue("string", "derived_app_name", "Homa Lawn") // Homa Lawn: the name on the home screen and in Settings
+ 
+             manifestPlaceholders.quickstepMinSdk = "0"
+             manifestPlaceholders.quickstepMaxSdk = "100000"
+@@ -236,7 +236,7 @@ android {
+         }
+ 
+         release {
+-            resValue("string", "derived_app_name", "Lawnchair")
++            resValue("string", "derived_app_name", "Homa Lawn")
+             minifyEnabled true
+             shrinkResources true
+             pseudoLocalesEnabled false

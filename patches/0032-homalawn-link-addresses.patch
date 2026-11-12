@@ -1,0 +1,37 @@
+From d8de6362604a1e5c60995bf7f66902c383554426 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 02:05:20 +0200
+Subject: [PATCH] Homa Lawn: link addresses (patch 0032)
+
+The paired link.hello also reports the phone's interface addresses (up, not loopback,
+not link-local, no %scope), so a computer can learn the Tailscale ones.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01791nLkUgyCjBru9PEVWX7a
+---
+ .../src/app/lawnchair/omalawn/OmalawnCommands.kt     | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 230883377c..b0b39ffd77 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -193,6 +193,18 @@ object OmalawnCommands {
+             .put("name", Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)
+             .put("fp", Identity.fingerprint())
+             .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
++            .put("addresses", addresses())
++    }
++
++    /** This phone's interface addresses for a paired computer: up, not loopback, not link-local. */
++    private fun addresses(): JSONArray = JSONArray().apply {
++        runCatching {
++            java.net.NetworkInterface.getNetworkInterfaces().asSequence()
++                .filter { it.isUp && !it.isLoopback }
++                .flatMap { it.inetAddresses.asSequence() }
++                .filter { !it.isLoopbackAddress && !it.isLinkLocalAddress }
++                .forEach { put(it.hostAddress!!.substringBefore('%')) }
++        }
+     }
+ 
+     /** Launchable activities of the current user, as the app drawer sees them: without the

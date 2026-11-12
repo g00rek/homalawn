@@ -1,0 +1,486 @@
+From a4d50082fec7611d760aef2afa20ac7b2ed8b1f2 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Tue, 13 Oct 2026 20:31:51 +0200
+Subject: [PATCH] omalawn silent update: install itself without a tap (Android
+ 12+)
+
+Once "Install unknown apps" is allowed, the checked update is written into
+a PackageInstaller session of this app's own package (MODE_FULL_INSTALL,
+setAppPackageName, USER_ACTION_NOT_REQUIRED) and committed right after the
+link's answer went out, since a silent install replaces this process; the
+link comes back on MY_PACKAGE_REPLACED as before. The last chunk's answer
+carries silent: true when Android's rule lets it through without the user
+(an installer updating itself, UPDATE_PACKAGES_WITHOUT_USER_ACTION, which
+is now declared, and the APK's targetSdk at least 29/30/31/33 on Android
+12/13/14/15). UpdateResultReceiver takes the outcome: on
+STATUS_PENDING_USER_ACTION the update notification comes up and its tap
+opens Android's confirmation for that session; on a failure the
+notification says why and its tap opens the installer the old way.
+A session Android has not answered at all after 45 s (no status, not even
+pending user action) is abandoned and gets that notification too: Google Play Protect can hold a silent install of a build
+it does not know with no screen to ask on (seen on the AVD). Android also
+allows one silent update per package and installer every 30 s, so a
+second one sooner needs the tap.
+The update notification's tap intent is made afresh each time
+(FLAG_CANCEL_CURRENT): with FLAG_UPDATE_CURRENT a live record kept its old
+flags, so a tap could bring back a left-behind settings page instead of
+the installer or the confirmation.
+The receiver logs each outcome (installed, pending_user_action, failed)
+with the predicted silent flag, and PREDICTION_MISMATCH when a predicted
+silent install asked for the user. A session prepared for an offer that
+then fails is abandoned at once, so no later chunk can commit it.
+Without "Install unknown apps", or before Android 12, the notification is
+as before. Debug hook debug_update_require_user_action makes sessions ask
+for the user, to drive the fallback on a device; debug_update_reset also
+abandons this app's sessions.
+---
+ lawnchair/AndroidManifest.xml                 |   7 +
+ .../omalawn/OmalawnControlProvider.kt         |   8 +-
+ .../app/lawnchair/omalawn/OmalawnUpdate.kt    | 271 +++++++++++++++++-
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  13 +-
+ 4 files changed, 283 insertions(+), 16 deletions(-)
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index 377564a999..a31ea9d064 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -32,6 +32,8 @@
+     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+     <!-- Homa Lawn updates: opens Android's installer for an update the paired computer sent -->
+     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
++    <!-- Homa Lawn updates: installs its own update without asking, once "Install unknown apps" is allowed (12+) -->
++    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+     <uses-permission android:name="com.google.android.apps.nexuslauncher.permission.QSB" />
+     <uses-permission android:name="com.kieronquinn.app.smartspacer.permission.ACCESS_SMARTSPACER"/>
+     <uses-permission android:name="android.permission.READ_CONTACTS" />
+@@ -185,6 +187,11 @@
+                 android:resource="@xml/omalawn_update_paths" />
+         </provider>
+ 
++        <!-- Homa Lawn updates: the result of its own install session (silent update, or the user is needed) -->
++        <receiver
++            android:name="app.lawnchair.omalawn.UpdateResultReceiver"
++            android:exported="false" />
++
+         <!-- Homa Lawn updates: what the update notification opens (installer, or "Install unknown apps" first) -->
+         <activity
+             android:name="app.lawnchair.omalawn.UpdateInstallActivity"
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index cef2977539..e0646bb2dd 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -72,7 +72,9 @@ class OmalawnControlProvider : ContentProvider() {
+      * CrashExit's armed restart alarms and its restart marker. `debug_media_prompt` posts the
+      * photo-access notification of `launcher.request_media_permission` unconditionally.
+      * `debug_update_reset` deletes an offered update (and any partial one) and its notification,
+-     * as installing the update does.
++     * as installing the update does (and abandons this app's install sessions).
++     * `debug_update_require_user_action` "1" makes the next self-installs ask for the user
++     * (USER_ACTION_REQUIRED), "0" puts the silent path back; in memory only.
+      */
+     private fun debug(ctx: Context, method: String, arg: String?, extras: Bundle?): Bundle {
+         if (!BuildConfig.DEBUG) return fail("unknown method $method")
+@@ -100,6 +102,10 @@ class OmalawnControlProvider : ContentProvider() {
+                 }
+                 "debug_link_state" -> return ok(linkState(ctx))
+                 "debug_update_reset" -> OmalawnUpdate.afterUpdate(ctx)
++                "debug_update_require_user_action" -> {
++                    OmalawnUpdate.forceUserAction = arg == "1"
++                    return ok(JSONObject().put("require_user_action", OmalawnUpdate.forceUserAction))
++                }
+                 "debug_pair_legacy_accept" -> {
+                     val token = Pairing.currentToken() ?: return ok(JSONObject().put("sent", false))
+                     ctx.startService(
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+index ce33b0a735..c074e6b14c 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+@@ -4,11 +4,16 @@ import android.app.Activity
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
++import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
++import android.content.pm.PackageInstaller
+ import android.content.pm.PackageManager
+ import android.net.Uri
++import android.os.Build
+ import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
+ import android.provider.Settings
+ import android.system.Os
+ import android.util.Log
+@@ -30,6 +35,15 @@ import org.json.JSONObject
+  * "Homa Lawn update from <computer>" opens [UpdateInstallActivity], which opens Android's installer
+  * (first asking for "Install unknown apps" when that is not allowed yet). Anything else is refused
+  * with a code and the file is deleted.
++ *
++ * Silent updates (Android 12+): once "Install unknown apps" is allowed, the checked APK is written
++ * into a PackageInstaller session of this app's own package with USER_ACTION_NOT_REQUIRED and
++ * committed right after the link's answer went out (a silent install replaces this process). The
++ * answer's `silent` says whether Android's rule lets it go through without the user (installer
++ * updating itself, UPDATE_PACKAGES_WITHOUT_USER_ACTION, the APK's targetSdk recent enough for this
++ * Android). When Android still wants the user (STATUS_PENDING_USER_ACTION) the notification comes
++ * up and its tap opens Android's confirmation for that session; a failed install gets a
++ * notification with the reason whose tap opens the installer the old way.
+  */
+ object OmalawnUpdate {
+     const val NOT_OURS = "not_ours"
+@@ -54,6 +68,32 @@ object OmalawnUpdate {
+ 
+     private val lock = Any()
+ 
++    /** Debug hook: the next sessions ask for the user (to drive the fallback on a device). */
++    @Volatile var forceUserAction = false
++
++    /** A written session waiting for the link's answer to go out before it is committed. */
++    private class PendingCommit(
++        val id: Int,
++        val sha: String,
++        val version: String,
++        val computer: String,
++        val predictedSilent: Boolean,
++    )
++    private var pendingCommit: PendingCommit? = null
++
++    /**
++     * How long a committed session may stay undecided. Google Play Protect can hold a silent
++     * install of a build it does not know indefinitely (no screen to ask on); then the session is
++     * abandoned and the notification offers the installer the old way, where Play Protect asks.
++     */
++    const val STUCK_MS = 45_000L
++    private val givenUp = mutableSetOf<Int>() // sessions abandoned as stuck: their late status is not news
++    private val decided = mutableSetOf<Int>() // sessions Android answered (any status): never stuck
++    const val EXTRA_PREDICTED_SILENT = "predicted_silent"
++
++    /** What [check] found in the offered APK. */
++    private class Checked(val versionCode: Long, val versionName: String, val targetSdk: Int)
++
+     fun authority(ctx: Context) = "${ctx.packageName}.omalawn.update"
+ 
+     private fun dir(ctx: Context): File {
+@@ -109,25 +149,42 @@ object OmalawnUpdate {
+             // only the newest checked update stays
+             apk.parentFile?.listFiles()?.filter { it.name.startsWith(PREFIX) && it != apk }?.forEach { it.delete() }
+             val canInstall = ctx.packageManager.canRequestPackageInstalls()
+-            val notified = notify(ctx, sha, info.second, computer, canInstall)
+-            Log.i(TAG, "update offered: ${info.second} (${info.first}) $name from $computer")
++            var silent = false
++            var session = false
++            if (canInstall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                try {
++                    silent = prepareSession(ctx, apk, sha, info, computer)
++                    session = true
++                } catch (e: Exception) {
++                    Log.w(TAG, "install session failed, falling back to the notification", e)
++                }
++            }
++            // with a session, a notification comes only if Android asks for the user (or it fails)
++            val notified = if (session) false else notify(ctx, sha, info.versionName, computer, canInstall)
++            Log.i(TAG, "update offered: ${info.versionName} (${info.versionCode}) $name from $computer, silent=$silent")
+             return JSONObject()
+                 .put("received", size)
+                 .put("offered", true)
+                 .put("package", ctx.packageName)
+-                .put("versionCode", info.first)
+-                .put("versionName", info.second)
++                .put("versionCode", info.versionCode)
++                .put("versionName", info.versionName)
+                 .put("can_install", canInstall)
+                 .put("notified", notified)
++                .put("silent", silent)
+         } catch (e: Throwable) {
++            // a session prepared above must never be committed by a later chunk's commitPending
++            pendingCommit?.let { stale ->
++                pendingCommit = null
++                runCatching { ctx.packageManager.packageInstaller.abandonSession(stale.id) }
++            }
+             part.delete()
+             apk.delete()
+             throw e
+         }
+     }
+ 
+-    /** (versionCode, versionName) of [apk] when it may replace this app; refuses otherwise. */
+-    private fun check(ctx: Context, apk: File): Pair<Long, String> {
++    /** What [apk] is when it may replace this app; refuses otherwise. */
++    private fun check(ctx: Context, apk: File): Checked {
+         val pm = ctx.packageManager
+         @Suppress("DEPRECATION")
+         val flags = PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
+@@ -144,7 +201,128 @@ object OmalawnUpdate {
+         if (archive.longVersionCode < installed) {
+             throw OmalawnError(OLDER, "$OLDER: this APK (${archive.longVersionCode}) is older than the installed one ($installed)")
+         }
+-        return archive.longVersionCode to (archive.versionName ?: "")
++        return Checked(archive.longVersionCode, archive.versionName ?: "", archive.applicationInfo?.targetSdkVersion ?: 0)
++    }
++
++    /**
++     * Whether Android installs an update without the user for an app targeting [targetSdk] on
++     * [sdk] (PackageInstaller.SessionParams.setRequireUserAction: 29 on 12, 30 on 13, 31 on 14,
++     * 33 on 15; later releases "will advance" — assumed here to stay two behind, as 15 is).
++     */
++    fun silentAllowed(sdk: Int, targetSdk: Int): Boolean = when {
++        sdk < Build.VERSION_CODES.S -> false
++        sdk <= Build.VERSION_CODES.S_V2 -> targetSdk >= 29
++        sdk == Build.VERSION_CODES.TIRAMISU -> targetSdk >= 30
++        sdk == Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> targetSdk >= 31
++        sdk == 35 -> targetSdk >= 33
++        else -> targetSdk >= sdk - 2
++    }
++
++    /**
++     * Writes [apk] into a new install session of this app (abandoning older ones) and keeps it for
++     * [commitPending]. True when Android's rule lets it install without the user.
++     */
++    private fun prepareSession(ctx: Context, apk: File, sha: String, info: Checked, computer: String): Boolean {
++        val installer = ctx.packageManager.packageInstaller
++        installer.mySessions.forEach { runCatching { installer.abandonSession(it.sessionId) } }
++        val requireUser = forceUserAction
++        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
++            setAppPackageName(ctx.packageName)
++            setSize(apk.length())
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                setRequireUserAction(
++                    if (requireUser) {
++                        PackageInstaller.SessionParams.USER_ACTION_REQUIRED
++                    } else {
++                        PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED
++                    },
++                )
++            }
++        }
++        val id = installer.createSession(params)
++        try {
++            installer.openSession(id).use { s ->
++                s.openWrite("base.apk", 0, apk.length()).use { out ->
++                    apk.inputStream().use { it.copyTo(out, 1 shl 16) }
++                    s.fsync(out)
++                }
++            }
++        } catch (e: Exception) {
++            runCatching { installer.abandonSession(id) }
++            throw e
++        }
++        val predicted = !requireUser && silentAllowed(Build.VERSION.SDK_INT, info.targetSdk)
++        pendingCommit = PendingCommit(id, sha, info.versionName, computer, predicted)
++        return predicted
++    }
++
++    /**
++     * Commits the session [offer] prepared, after the link answered (a silent install replaces this
++     * process). Its outcome arrives at [UpdateResultReceiver].
++     */
++    fun commitPending(ctx: Context) {
++        val p = synchronized(lock) { pendingCommit.also { pendingCommit = null } } ?: return
++        val installer = ctx.packageManager.packageInstaller
++        try {
++            val result = PendingIntent.getBroadcast(
++                ctx,
++                p.id,
++                Intent(ctx, UpdateResultReceiver::class.java)
++                    .putExtra(UpdateInstallActivity.EXTRA_SHA, p.sha)
++                    .putExtra(UpdateInstallActivity.EXTRA_VERSION, p.version)
++                    .putExtra(UpdateInstallActivity.EXTRA_COMPUTER, p.computer)
++                    .putExtra(EXTRA_PREDICTED_SILENT, p.predictedSilent),
++                // the installer fills in the status: mutable (explicit intent, so allowed)
++                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++            )
++            installer.openSession(p.id).use { it.commit(result.intentSender) }
++            Log.i(TAG, "install session ${p.id} committed (${p.version})")
++            Handler(Looper.getMainLooper()).postDelayed({ giveUpIfStuck(ctx, p) }, STUCK_MS)
++        } catch (e: Exception) {
++            Log.w(TAG, "install session ${p.id} could not be committed", e)
++            runCatching { installer.abandonSession(p.id) }
++            failed(ctx, p.sha, p.version, p.computer, "${e.javaClass.simpleName}: ${e.message}")
++        }
++    }
++
++    private fun giveUpIfStuck(ctx: Context, p: PendingCommit) {
++        val installer = ctx.packageManager.packageInstaller
++        // Android answered (a pending user action included: that session waits for the tap)
++        if (synchronized(lock) { p.id in decided }) return
++        if (installer.getSessionInfo(p.id) == null) return // gone meanwhile
++        Log.w(TAG, "install session ${p.id} undecided after ${STUCK_MS / 1000} s, abandoning it")
++        synchronized(lock) { givenUp.add(p.id) }
++        runCatching { installer.abandonSession(p.id) }
++        failed(ctx, p.sha, p.version, p.computer, "Android is still checking it, likely Google Play Protect")
++    }
++
++    /**
++     * Records that Android answered session [sessionId] (so [giveUpIfStuck] leaves it alone). False
++     * for the status of a session [giveUpIfStuck] abandoned (its notification is up already).
++     */
++    fun answered(sessionId: Int): Boolean = synchronized(lock) {
++        decided.add(sessionId)
++        !givenUp.remove(sessionId)
++    }
++
++    /** Android wants the user for the session: the notification, whose tap opens [confirm]. */
++    fun needsUser(ctx: Context, sha: String, version: String, computer: String, confirm: Intent?) {
++        if (pending(ctx, sha) == null) return
++        notify(ctx, sha, version, computer, ctx.packageManager.canRequestPackageInstalls(), confirm = confirm)
++    }
++
++    /** The session failed: a notification with the reason; its tap opens the installer the old way. */
++    fun failed(ctx: Context, sha: String, version: String, computer: String, reason: String) {
++        if (pending(ctx, sha) == null) return
++        Log.w(TAG, "update $version not installed: $reason")
++        notify(
++            ctx,
++            sha,
++            version,
++            computer,
++            ctx.packageManager.canRequestPackageInstalls(),
++            text = "Version $version did not install by itself (${reason.take(120)}). Tap, then Update.",
++        )
+     }
+ 
+     /** The checked update waiting for its tap, or null. */
+@@ -169,6 +347,8 @@ object OmalawnUpdate {
+         computer: String,
+         canInstall: Boolean,
+         alert: Boolean = true,
++        confirm: Intent? = null,
++        text: String? = null,
+     ): Boolean {
+         val nm = ctx.getSystemService(NotificationManager::class.java)!!
+         nm.createNotificationChannel(
+@@ -184,15 +364,20 @@ object OmalawnUpdate {
+                 .putExtra(UpdateInstallActivity.EXTRA_SHA, sha)
+                 .putExtra(UpdateInstallActivity.EXTRA_VERSION, version)
+                 .putExtra(UpdateInstallActivity.EXTRA_COMPUTER, computer)
++                .apply { if (confirm != null) putExtra(UpdateInstallActivity.EXTRA_CONFIRM, confirm) }
+                 // every tap starts afresh: a left-behind "Install unknown apps" page is not brought back
+                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++            // CANCEL_CURRENT, not UPDATE_CURRENT: an update keeps a live record's old intent flags
++            // (seen on the AVD: a record without CLEAR_TASK brought a left-behind settings page
++            // back) and only swaps extras; the notification is replaced together with it anyway
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT,
+         )
+-        val text = notificationText(version, canInstall)
++        val body = text ?: notificationText(version, canInstall)
+         val n = NotificationCompat.Builder(ctx, CHANNEL)
+             .setSmallIcon(R.drawable.ic_home_screen)
+             .setContentTitle("Homa Lawn update from ${computer.ifEmpty { "your computer" }}")
+-            .setContentText(text)
++            .setContentText(body)
++            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+             .setPriority(NotificationCompat.PRIORITY_HIGH)
+             .setContentIntent(tap)
+             .setGroup(GROUP)
+@@ -217,7 +402,12 @@ object OmalawnUpdate {
+     /** After this app was replaced: the offered file and its notification are done. */
+     fun afterUpdate(ctx: Context) {
+         runCatching {
+-            synchronized(lock) { dir(ctx).listFiles()?.forEach { it.delete() } }
++            synchronized(lock) {
++                pendingCommit = null
++                dir(ctx).listFiles()?.forEach { it.delete() }
++            }
++            val installer = ctx.packageManager.packageInstaller
++            installer.mySessions.forEach { runCatching { installer.abandonSession(it.sessionId) } }
+             ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_TAG, NOTIFICATION_ID)
+         }
+     }
+@@ -275,6 +465,19 @@ class UpdateInstallActivity : Activity() {
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
+         if (savedInstanceState != null) return // back from the settings page: onActivityResult continues
++        val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            intent.getParcelableExtra(EXTRA_CONFIRM, Intent::class.java)
++        } else {
++            @Suppress("DEPRECATION")
++            intent.getParcelableExtra(EXTRA_CONFIRM)
++        }
++        if (confirm != null) {
++            // Android's own confirmation for the session that could not install by itself
++            val started = runCatching { startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
++            if (!started) install() // the session is gone: the installer the old way
++            else finish()
++            return
++        }
+         if (packageManager.canRequestPackageInstalls()) {
+             refreshNotification()
+             install()
+@@ -333,6 +536,52 @@ class UpdateInstallActivity : Activity() {
+         const val EXTRA_SHA = "sha256"
+         const val EXTRA_VERSION = "version"
+         const val EXTRA_COMPUTER = "computer"
++        const val EXTRA_CONFIRM = "confirm"
+         private const val REQ_SOURCES = 1
+     }
+ }
++
++/** The outcome of [OmalawnUpdate]'s install session (not exported; the installer fills the status). */
++class UpdateResultReceiver : BroadcastReceiver() {
++    override fun onReceive(ctx: Context, intent: Intent) {
++        val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
++        val sha = intent.getStringExtra(UpdateInstallActivity.EXTRA_SHA) ?: return
++        val version = intent.getStringExtra(UpdateInstallActivity.EXTRA_VERSION) ?: ""
++        val computer = intent.getStringExtra(UpdateInstallActivity.EXTRA_COMPUTER) ?: ""
++        val id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
++        val predicted = intent.getBooleanExtra(OmalawnUpdate.EXTRA_PREDICTED_SILENT, false)
++        val outcome = when (status) {
++            PackageInstaller.STATUS_SUCCESS -> "installed"
++            PackageInstaller.STATUS_PENDING_USER_ACTION -> "pending_user_action"
++            else -> "failed"
++        }
++        // a wrong silentAllowed prediction shows here (e.g. a new Android or a vendor policy)
++        // (a success after the person confirmed is expected when not predicted: not flagged)
++        val mismatch = status == PackageInstaller.STATUS_PENDING_USER_ACTION && predicted
++        Log.i(
++            "OmalawnUpdate",
++            "install session $id outcome=$outcome status=$status predicted_silent=$predicted" +
++                (if (mismatch) " PREDICTION_MISMATCH" else "") + " version=$version sdk=${Build.VERSION.SDK_INT}",
++        )
++        if (!OmalawnUpdate.answered(id) && status != PackageInstaller.STATUS_SUCCESS) return
++        when (status) {
++            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
++                val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                    intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
++                } else {
++                    @Suppress("DEPRECATION")
++                    intent.getParcelableExtra(Intent.EXTRA_INTENT)
++                }
++                OmalawnUpdate.needsUser(ctx, sha, version, computer, confirm)
++            }
++            PackageInstaller.STATUS_SUCCESS -> OmalawnUpdate.afterUpdate(ctx)
++            else -> OmalawnUpdate.failed(
++                ctx,
++                sha,
++                version,
++                computer,
++                intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "status $status",
++            )
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 382b3b50ac..7df26dbd34 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -452,10 +452,15 @@ object LinkServer {
+                     val f = OmalawnCommands.stageFile(ctx, name, blob!!)
+                     writer.result(id, JSONObject().put("path", f.absolutePath))
+                 }
+-                Kind.UPDATE -> writer.result(
+-                    id,
+-                    app.lawnchair.omalawn.OmalawnUpdate.offer(ctx, params, blob!!, Pins.name(ctx, fp) ?: ""),
+-                )
++                Kind.UPDATE -> {
++                    val r = app.lawnchair.omalawn.OmalawnUpdate.offer(ctx, params, blob!!, Pins.name(ctx, fp) ?: "")
++                    // a silent install replaces this process: the answer goes out first, then the commit
++                    try {
++                        writer.result(id, r)
++                    } finally {
++                        app.lawnchair.omalawn.OmalawnUpdate.commitPending(ctx)
++                    }
++                }
+             }
+         } catch (e: OmalawnError) {
+             writer.error(id, e.code, e.message ?: e.code, e.data)

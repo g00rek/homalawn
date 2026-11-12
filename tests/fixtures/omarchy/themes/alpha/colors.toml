@@ -1,0 +1,5 @@
+mode = "dark"
+accent = "#7aa2f7"
+background = "#1a1b26"
+lighter_background = "#24283b"
+foreground = "#a9b1d6"

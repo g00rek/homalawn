@@ -1,0 +1,103 @@
+Third-party material in Homa Lawn
+=================================
+
+This file lists third-party code and data included in this repository and in the
+Homa Lawn phone app, with their licenses. See NOTICE for the overview and for
+what a binary release of the phone app contains.
+
+
+1. Flux
+-------
+
+Flux (https://github.com/bjarneo/flux), MIT License,
+Copyright (c) 2026 Bjarne Oeverli
+
+Code adapted from Flux is in:
+  src/homalawn/phonekeys.py
+  src/homalawn/link/addresses.py
+  lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+    (patches/0030-homalawn-computers.patch, changed by patches/0034-homalawn-computers-style-pairing.patch)
+  lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+    (patches/0031-homalawn-look-book.patch)
+
+MIT License
+
+Copyright (c) 2026 Bjarne Oeverli
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+2. BIP-39 English word list
+---------------------------
+
+The four pairing words are taken from the BIP-39 English word list
+(https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt), unchanged
+(2048 words, SHA-256 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda).
+BIP-39 ("Mnemonic code for generating deterministic keys") states
+"License: MIT".
+
+Used in:
+  src/homalawn/link/words.txt
+  the phone app's assets (omalawn_words.txt, patches/0003-omalawn-link.patch)
+
+MIT License
+
+Copyright (c) the authors of BIP-39: Marek Palatinus, Pavol Rusnak,
+Aaron Voisine, Sean Bowe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+3. Lawnchair and the Android Open Source Project (phone app)
+-------------------------------------------------------------
+
+The phone app is built from Lawnchair (https://github.com/LawnchairLauncher/lawnchair),
+Copyright (c) the Lawnchair contributors, which builds on Launcher3 from the
+Android Open Source Project, Copyright (c) The Android Open Source Project.
+Both are licensed under the Apache License, Version 2.0, the same license as
+this repository (see LICENSE). Lawnchair's source is not part of this
+repository; the patches in patches/ are applied to it at build time.
+
+Lawnchair bundles further libraries, each under its own license (Apache-2.0,
+BSD-3-Clause, MIT, GPL-2.0-or-later and others). Their full list and license
+texts are part of every build of the phone app: Homa Lawn's settings › About ›
+Open-source licenses. See NOTICE for the GPL-2.0-or-later library and where its
+complete corresponding source is.
+
+The phone app also ships the Google Sans Flex font that Lawnchair includes,
+licensed under the SIL Open Font License, Version 1.1.
+
+The Permissions row icon added by patches/0033 is the Material Design "verified
+user" icon (Apache License, Version 2.0).

@@ -1,0 +1,182 @@
+From ce8eefd5b02ca862575ce88fd1c3fea0ebeccf07 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Tue, 13 Oct 2026 17:43:47 +0200
+Subject: [PATCH] omalawn lock screen wallpaper
+
+launcher.wallpaper_set {path, which} sets the home screen ("home",
+FLAG_SYSTEM, the default, so older desktops keep working), the lock screen
+("lock", FLAG_LOCK) or both. launcher.wallpaper_backup {which} reads the
+home or the lock screen picture; a lock screen without a picture of its own
+(it shows the home one) is refused with lock_follows_home.
+launcher.wallpaper_lock_reset drops the lock screen's own picture so it
+shows the home one again (Android re-numbers the home wallpaper then).
+launcher.wallpaper_info adds lock_follows_home and the screen's size in
+pixels, portrait (width, height), for cropping on the computer. The link
+accepts which on both calls.
+---
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  | 87 +++++++++++++++----
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  5 +-
+ 2 files changed, 74 insertions(+), 18 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 94ce123d64..748618324d 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -62,6 +62,7 @@ object OmalawnCommands {
+         "launcher.prefs_set_many",
+         "launcher.wallpaper_backup",
+         "launcher.wallpaper_set",
++        "launcher.wallpaper_lock_reset",
+         "launcher.layout_export",
+         "launcher.layout_import",
+     )
+@@ -101,9 +102,13 @@ object OmalawnCommands {
+                 JSONObject()
+             }
+             "launcher.wallpaper_info" -> wallpaperInfo(ctx)
+-            "launcher.wallpaper_backup" -> wallpaperBackup(ctx)
++            "launcher.wallpaper_backup" -> wallpaperBackup(ctx, which(params, allowBoth = false))
+             "launcher.wallpaper_set" -> {
+-                wallpaperSet(ctx, str(params, "path") ?: error("path required"))
++                wallpaperSet(ctx, str(params, "path") ?: error("path required"), which(params, allowBoth = true))
++                JSONObject()
++            }
++            "launcher.wallpaper_lock_reset" -> {
++                wallpaperLockReset(ctx)
+                 JSONObject()
+             }
+             "launcher.widgets_list" -> widgetsList(ctx)
+@@ -317,16 +322,46 @@ object OmalawnCommands {
+         onMain { ReloadHelper(ctx).restart() }
+     }
+ 
+-    private fun wallpaperInfo(ctx: Context): JSONObject {
+-        val wm = WallpaperManager.getInstance(ctx)
+-        return JSONObject()
+-            .put("system_id", wm.getWallpaperId(WallpaperManager.FLAG_SYSTEM))
+-            .put("lock_id", wm.getWallpaperId(WallpaperManager.FLAG_LOCK))
+-            .put("live", wm.wallpaperInfo != null)
++    /**
++     * Which wallpaper a call is about: "home" (FLAG_SYSTEM, the default, so older desktops keep
++     * working), "lock" (FLAG_LOCK) or, for wallpaper_set only, "both".
++     */
++    private fun which(p: JSONObject, allowBoth: Boolean): Int = when (val w = str(p, "which") ?: "home") {
++        "home" -> WallpaperManager.FLAG_SYSTEM
++        "lock" -> WallpaperManager.FLAG_LOCK
++        "both" -> if (allowBoth) WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK else badWhich(w)
++        else -> badWhich(w)
+     }
+ 
+-    /** Saves the current system wallpaper as PNG under files/omalawn/ and returns its path. */
+-    private fun wallpaperBackup(ctx: Context): JSONObject {
++    private fun badWhich(w: String): Nothing =
++        throw OmalawnError("bad_params", "bad_params: which must be home, lock or both, not $w")
++
++    /**
++     * lock_id is negative while the lock screen has no wallpaper of its own and shows the home
++     * one (lock_follows_home). width x height: the whole screen in pixels, portrait.
++     */
++    private fun wallpaperInfo(ctx: Context): JSONObject {
++        val wm = WallpaperManager.getInstance(ctx)
++        val lockId = wm.getWallpaperId(WallpaperManager.FLAG_LOCK)
++        val dm = android.util.DisplayMetrics()
++        @Suppress("DEPRECATION")
++        ctx.getSystemService(android.hardware.display.DisplayManager::class.java)
++            ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.getRealMetrics(dm)
++        return JSONObject()
++            .put("system_id", wm.getWallpaperId(WallpaperManager.FLAG_SYSTEM))
++            .put("lock_id", lockId)
++            .put("lock_follows_home", lockId < 0)
++            .put("live", wm.wallpaperInfo != null)
++            .put("width", minOf(dm.widthPixels, dm.heightPixels))
++            .put("height", maxOf(dm.widthPixels, dm.heightPixels))
++    }
++
++    /**
++     * Saves the current home ([which] FLAG_SYSTEM) or lock screen (FLAG_LOCK) wallpaper as PNG
++     * under files/omalawn/ and returns its path. A lock screen that shows the home wallpaper has
++     * no picture of its own: that is refused with lock_follows_home (wallpaper_info says so first).
++     */
++    private fun wallpaperBackup(ctx: Context, which: Int): JSONObject {
+         val dir = privateDir(ctx)
+         val now = System.currentTimeMillis()
+         // A backup is read and deleted by its caller within seconds of this call; only one older
+@@ -338,10 +373,20 @@ object OmalawnCommands {
+         }
+         val out = File(dir, "wp-backup-$now-${UUID.randomUUID().toString().take(8)}.png")
+         val wm = WallpaperManager.getInstance(ctx)
+-        if (wm.wallpaperInfo != null) error("live wallpaper: the current wallpaper is a live wallpaper and cannot be saved")
++        val lock = which == WallpaperManager.FLAG_LOCK
++        if (lock && wm.getWallpaperId(WallpaperManager.FLAG_LOCK) < 0) {
++            throw OmalawnError(
++                "lock_follows_home",
++                "lock_follows_home: the lock screen shows the home wallpaper and has none of its own",
++            )
++        }
++        if (!lock && wm.wallpaperInfo != null) error("live wallpaper: the current wallpaper is a live wallpaper and cannot be saved")
++        if (lock && Build.VERSION.SDK_INT >= 34 && wm.getWallpaperInfo(WallpaperManager.FLAG_LOCK) != null) {
++            error("live wallpaper: the current lock screen wallpaper is a live wallpaper and cannot be saved")
++        }
+         val failures = mutableListOf<String>()
+         try {
+-            val pfd = wm.getWallpaperFile(WallpaperManager.FLAG_SYSTEM)
++            val pfd = wm.getWallpaperFile(which)
+             if (pfd == null) {
+                 failures.add("getWallpaperFile returned null")
+             } else {
+@@ -354,7 +399,11 @@ object OmalawnCommands {
+             failures.add("getWallpaperFile: ${e.javaClass.simpleName}: ${e.message}")
+         }
+         try {
+-            val d = wm.drawable ?: error("no drawable")
++            val d = (
++                if (!lock) wm.drawable
++                else if (Build.VERSION.SDK_INT >= 34) wm.getDrawable(WallpaperManager.FLAG_LOCK)
++                else error("no lock screen drawable before Android 14")
++                ) ?: error("no drawable")
+             val bmp = android.graphics.Bitmap.createBitmap(
+                 d.intrinsicWidth.coerceAtLeast(1),
+                 d.intrinsicHeight.coerceAtLeast(1),
+@@ -372,17 +421,23 @@ object OmalawnCommands {
+         error("cannot back up the current wallpaper (${failures.joinToString("; ")})")
+     }
+ 
+-    private fun wallpaperSet(ctx: Context, path: String) {
++    /** [which]: FLAG_SYSTEM (home screen), FLAG_LOCK (lock screen) or both. */
++    private fun wallpaperSet(ctx: Context, path: String, which: Int) {
+         // The desktop copies the image in with run-as (umask 0): lock it down before reading it.
+         privateDir(ctx)
+         File(path).takeIf { it.parentFile?.canonicalFile == File(ctx.filesDir, "omalawn").canonicalFile }
+             ?.let { if (it.exists()) private600(it) }
+-        // Home wallpaper only: the lock screen is never touched (and never backed up).
+         File(path).inputStream().use {
+-            WallpaperManager.getInstance(ctx).setStream(it, null, true, WallpaperManager.FLAG_SYSTEM)
++            WallpaperManager.getInstance(ctx).setStream(it, null, true, which)
+         }
+     }
+ 
++    /** Drops the lock screen's own wallpaper, so the lock screen shows the home one again. */
++    private fun wallpaperLockReset(ctx: Context) {
++        val wm = WallpaperManager.getInstance(ctx)
++        if (wm.getWallpaperId(WallpaperManager.FLAG_LOCK) >= 0) wm.clear(WallpaperManager.FLAG_LOCK)
++    }
++
+     private fun widgetsList(ctx: Context): JSONArray {
+         val out = JSONArray()
+         // AppWidgetProviderInfo sizes are pixels; the contract reports dp.
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 925aedaecd..382b3b50ac 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -82,8 +82,9 @@ object LinkServer {
+         "launcher.pref_set" to Spec(setOf("store", "key", "type", "value")),
+         "launcher.prefs_set_many" to Spec(setOf("writes")),
+         "launcher.wallpaper_info" to Spec(emptySet()),
+-        "launcher.wallpaper_backup" to Spec(emptySet(), Kind.BLOB_OUT),
+-        "launcher.wallpaper_set" to Spec(setOf("path")),
++        "launcher.wallpaper_backup" to Spec(setOf("which"), Kind.BLOB_OUT),
++        "launcher.wallpaper_set" to Spec(setOf("path", "which")),
++        "launcher.wallpaper_lock_reset" to Spec(emptySet()),
+         "launcher.widgets_list" to Spec(emptySet()),
+         "launcher.widget_status" to Spec(setOf("id")),
+         "launcher.layout_export" to Spec(setOf("via"), Kind.BLOB_OUT),

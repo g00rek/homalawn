@@ -1,0 +1,1678 @@
+From 74bfb8505f685114bb4302099ca4a76dd75ef284 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 16 Oct 2026 08:37:29 +0200
+Subject: [PATCH] homar theme wallpapers: pick the phone's lock and home
+ wallpapers from the Omarchy theme
+
+A "Wallpaper from Omarchy" settings screen. On top, two mini phones show the lock screen (clock and
+date) and the home screen (this phone's own dock and apps) as the draft would make them, each with
+its darken/lighten layer. A segmented "Lock screen / Home screen / Both" says which screen(s) the
+choice is for (the previews light up; tapping a preview picks that screen). Below, three tabs:
+Current (keep what the screen shows; the phone's own wallpaper when Android lets it be read, else
+its wallpaper colours), Omarchy (the theme's backgrounds) and Gradients (made from the theme's
+colours by the computer). Taps only change the draft; the bottom bar's Apply sends one choice per
+screen (launcher.theme_wallpaper_choice {at, screens}) and shows how it goes (Applying, waiting for
+the unlock, computer not reachable, failed); Discard returns to what is applied. The computer
+pushes the list (launcher.theme_wallpapers_set: items, gradients, screens, layer, thumbnails) and
+answers (launcher.theme_wallpaper_ack). Hooks: the three methods in OmalawnCommands and LinkServer,
+one route line in PreferenceNavigation and one row in PreferencesDashboard.
+
+The choice read also answers needs_list while this process has no list in the current format (the
+home screen restarted, often for an app update, or the list on disk is the older format the
+computer sent an older build), so the computer sends the whole list again; launcher.ping carries
+installed_at (the package's lastUpdateTime), because our builds share one version. A failed ack
+with code wallpaper_unsaved (the current wallpaper cannot be saved first) shows only the question
+"Replace current wallpaper?"; Replace sends the same choice with overwrite, Cancel keeps it as the
+draft. Every word on the screen is our own English string (Apply included), never a translated one.
+---
+ lawnchair/res/values/homar_strings.xml        |   33 +
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |    5 +-
+ .../app/lawnchair/omalawn/ThemeWallpapers.kt  |  420 +++++++
+ .../omalawn/ThemeWallpapersScreen.kt          | 1087 +++++++++++++++++
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |    4 +
+ .../destinations/PreferencesDashboard.kt      |    3 +
+ .../navigation/PreferenceNavigation.kt        |    2 +
+ 7 files changed, 1553 insertions(+), 1 deletion(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index a245a80481..315c8cc12f 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -2,4 +2,37 @@
+ <resources>
+     <!-- gesture option: app search screen with the keyboard at once, without the app drawer first -->
+     <string name="homar_gesture_search">Search (instant)</string>
++    <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017) -->
++    <string name="homar_wallpapers_label">Wallpaper from Omarchy</string>
++    <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
++    <string name="homar_wallpapers_theme">Omarchy theme: %1$s</string>
++    <string name="homar_wallpapers_sync_off">Wallpaper sync is off for this phone. Turn it on in Homa Lawn on your computer.</string>
++    <string name="homar_wallpapers_nothing_yet">Your computer has not sent its theme\'s wallpapers yet. They appear here once Homa Lawn on your computer is connected to this phone.</string>
++    <string name="homar_wallpapers_update_computer">Update Homa Lawn on your computer to choose the lock screen and home screen wallpapers here.</string>
++    <string name="homar_wallpapers_empty">This theme has no wallpapers.</string>
++    <string name="homar_wallpapers_no_gradients">This theme has no colours to make gradients from.</string>
++    <string name="homar_wallpapers_applying">Applying…</string>
++    <string name="homar_wallpapers_selected">selected</string>
++    <string name="homar_wallpapers_discard">Discard</string>
++    <!-- our own words, not Android's or Lawnchair's: those come translated, and Homa Lawn speaks English -->
++    <string name="homar_wallpapers_apply">Apply</string>
++    <string name="homar_wallpapers_replace_title">Replace current wallpaper?</string>
++    <string name="homar_wallpapers_replace">Replace</string>
++    <string name="homar_wallpapers_cancel">Cancel</string>
++    <string name="homar_wallpapers_target_home">Home screen</string>
++    <string name="homar_wallpapers_target_lock">Lock screen</string>
++    <string name="homar_wallpapers_preview">%1$s preview</string>
++    <string name="homar_wallpapers_tab_keep">Keep current</string>
++    <string name="homar_wallpapers_tab_wallpapers">Theme wallpapers</string>
++    <string name="homar_wallpapers_tab_gradients">Gradients</string>
++    <string name="homar_wallpapers_keep_one">This screen keeps the wallpaper it has now.</string>
++    <string name="homar_wallpapers_layer">Darken / lighten</string>
++    <string name="homar_wallpapers_lighter">lighter</string>
++    <string name="homar_wallpapers_darker">darker</string>
++    <string name="homar_wallpapers_parallax">Parallax</string>
++    <string name="homar_wallpapers_parallax_hint">The wallpaper moves as you swipe between pages</string>
++    <string name="homar_wallpapers_on_lock">on the lock screen</string>
++    <string name="homar_wallpapers_on_home">on the home screen</string>
++    <string name="homar_wallpapers_gradient">gradient</string>
++    <string name="homar_wallpapers_unreachable">Computer not reachable — your choice is applied when it is.</string>
+ </resources>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 8f391172e5..e67a1b1d2b 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -86,7 +86,7 @@ object OmalawnCommands {
+             "link.ping" -> JSONObject().put("t", System.currentTimeMillis())
+             "link.hello" -> hello(ctx, paired)
+             "launcher.apps_list" -> appsList(ctx)
+-            "launcher.ping" -> ping(ctx)
++            "launcher.ping" -> ping(ctx).put("installed_at", ThemeWallpapers.installedAt(ctx)) // patch 0017
+             // starts the home screen load if nothing else will (no launcher activity), waits a
+             // little; touches nothing that blocks on the main thread (db is null until it exists)
+             "launcher.ensure_loaded" -> JSONObject()
+@@ -115,6 +115,9 @@ object OmalawnCommands {
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
+             "launcher.app_icons" -> AppIcons.appIcons(ctx, params) // patch 0016
+             "launcher.widget_previews" -> AppIcons.widgetPreviews(ctx, params) // patch 0016
++            "launcher.theme_wallpapers_set" -> ThemeWallpapers.set(ctx, params) // patch 0017
++            "launcher.theme_wallpaper_choice" -> ThemeWallpapers.choice(ctx) // patch 0017
++            "launcher.theme_wallpaper_ack" -> ThemeWallpapers.ack(ctx, params) // patch 0017
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             "launcher.nova_convert" -> NovaIo.convert(ctx, params) // patch 0012
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
+new file mode 100644
+index 0000000000..5e15c269c3
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
+@@ -0,0 +1,420 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import android.util.Base64
++import java.io.File
++import java.util.UUID
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import org.json.JSONArray
++import org.json.JSONObject
++
++/**
++ * The "Wallpaper from Omarchy" screen's data (patch 0017): what the computer offers this phone's
++ * lock screen and home screen, and the choice made here.
++ *
++ * `launcher.theme_wallpapers_set {enabled, theme, current_id, message, target, items, gradients,
++ * screens, layer, thumbs}` replaces the list and stores the given thumbnails (base64 JPEG, one file
++ * per key); it answers `{have: [thumb keys of the list held here]}` so the computer sends only the
++ * missing ones, in as many calls as it needs. `items` are the theme's backgrounds and `gradients`
++ * the gradients made from its colours, each `{id, name, thumb}`; `screens` says what each screen
++ * shows now (`{home: {kind, id?}, lock: ...}`, kind keep, wallpaper or gradient); `layer` is the
++ * darken (+) / lighten (-) percentage per screen, laid over the previews here (the thumbnails come
++ * untinted). A computer from before per-screen choices sends `target` and `current_id` instead.
++ * Format 3 (the computer's whole look model, as its window edits it) adds `format: 3` and
++ * `wallpaper: {parallax}` (the home screen's wallpaper scrolling; a `same` there, from computers
++ * before 2026-10-17, is ignored: the two screens are always set separately), and per item a `wide` thumbnail (the home picture as it is sent with parallax on) and, where the
++ * lock screen has its own crop, a `lock` one; then this screen also edits each screen's colour
++ * layer and parallax. A computer from before sends neither, and those controls stay hidden.
++ *
++ * The screen's selection is a draft; its Apply stores one pending choice `{at, format: 3, screens,
++ * layer, wallpaper: {parallax}}` (at: epoch ms; one choice per screen; a computer from before
++ * format 3 reads only `screens`) that the computer reads with `launcher.theme_wallpaper_choice`
++ * (until it says received) and answers with `launcher.theme_wallpaper_ack {at, state: received |
++ * applied | waiting | failed, current_id?, message?, code?}`. The choice read also says `needs_list`
++ * when this process has no list in the current format yet (the home screen restarted, often for an
++ * app update, or the list on disk came from the older format the computer sent an older build): the
++ * computer then sends the whole list again. A failed ack with code `wallpaper_unsaved` (the current
++ * wallpaper cannot be saved first) makes the screen ask "Replace current wallpaper?"; its Replace
++ * stores the same choice again with `overwrite: true`. Everything lives in files/omalawn/walls/, so
++ * the last list and pictures stay on the phone while the computer is away. The change of wallpaper
++ * itself is the computer's: nothing here touches the wallpaper.
++ */
++object ThemeWallpapers {
++    /** Without "received" within this long, the screen says the computer is not reachable. */
++    const val RECEIVE_WAIT_MS = 8_000L
++
++    const val KEEP = "keep"
++    const val WALLPAPER = "wallpaper"
++    const val GRADIENT = "gradient"
++    val SCREENS = listOf("home", "lock")
++    private val PARTS = mapOf("home" to listOf("home"), "lock" to listOf("lock"), "both" to listOf("home", "lock"))
++
++    /** A wallpaper or gradient: its thumbnail, the wide one (parallax) and the lock screen's own cut. */
++    data class Item(val id: String, val name: String, val thumb: String, val wide: String? = null, val lock: String? = null)
++
++    /** The list and choice format with the whole look model. */
++    const val FORMAT = 3
++
++    /** What one screen shows: keep (what it has now), or a wallpaper or gradient by id. */
++    data class Sel(val kind: String, val id: String? = null) {
++        fun encode(): String = if (id == null) kind else "$kind:$id"
++
++        fun toJson(): JSONObject = JSONObject().put("kind", kind).apply { if (id != null) put("id", id) }
++
++        companion object {
++            val Keep = Sel(KEEP)
++
++            fun decode(s: String?): Sel? {
++                if (s == null) return null
++                val kind = s.substringBefore(':')
++                val id = s.substringAfter(':', "").ifEmpty { null }
++                return when {
++                    kind == KEEP -> Keep
++                    (kind == WALLPAPER || kind == GRADIENT) && id != null && KEY.matches(id) -> Sel(kind, id)
++                    else -> null
++                }
++            }
++
++            fun fromJson(o: JSONObject?): Sel? {
++                if (o == null) return null
++                val kind = o.optString("kind")
++                val id = if (o.isNull("id")) null else o.optString("id").takeIf { KEY.matches(it) }
++                return when (kind) {
++                    KEEP -> Keep
++                    WALLPAPER, GRADIENT -> Sel(kind, id) // id null: the computer has no such picture now
++                    else -> null
++                }
++            }
++        }
++    }
++
++    /**
++     * What the screens get: one choice and colour layer (darken +, lighten -) per screen, each set
++     * on its own, and the home screen's parallax.
++     */
++    data class Look(
++        val screens: Map<String, Sel>,
++        val layer: Map<String, Int> = SCREENS.associateWith { 0 },
++        val parallax: Boolean = false,
++    ) {
++        /**
++         * As it is sent: parallax only scrolls a theme wallpaper, so a gradient or a kept home
++         * screen sends it off (the switch itself is remembered in the draft).
++         */
++        fun normal(): Look = if (parallax && screens["home"]?.kind != WALLPAPER) copy(parallax = false) else this
++
++        fun toJson(): JSONObject = JSONObject()
++            .put("screens", screensJson(screens))
++            .put("layer", JSONObject().apply { SCREENS.forEach { put(it, layer[it] ?: 0) } })
++            .put("wallpaper", JSONObject().put("parallax", parallax))
++
++        companion object {
++            fun fromJson(o: JSONObject?): Look? {
++                val screens = screensFrom(o?.optJSONObject("screens")) ?: return null
++                val w = o!!.optJSONObject("wallpaper")
++                return Look(
++                    screens = screens,
++                    layer = layerFrom(o.optJSONObject("layer")),
++                    parallax = w?.optBoolean("parallax") ?: false,
++                )
++            }
++        }
++    }
++
++    /** An Apply not settled yet: what the screens should get. */
++    data class Choice(
++        val look: Look,
++        val at: Long,
++        val received: Boolean = false,
++        val waiting: String? = null,
++        val overwrite: Boolean = false, // Replace in the overwrite question: no backup of the wallpaper
++    )
++
++    data class State(
++        val known: Boolean = false, // the computer has sent a list at least once
++        val enabled: Boolean = false, // this phone's wallpaper sync is on
++        val theme: String? = null,
++        val message: String? = null, // why there is nothing to show (from the computer)
++        val items: List<Item> = emptyList(),
++        val gradients: List<Item> = emptyList(),
++        val look: Look = Look(SCREENS.associateWith { Sel.Keep }),
++        val perScreen: Boolean = false, // the computer takes one choice per screen (sent `screens`)
++        val model: Boolean = false, // the computer takes the whole look model (format 3): layers, parallax
++        val currentId: String? = null,
++        val choice: Choice? = null,
++        val error: String? = null, // the last choice failed: the computer's line
++        val unsaved: Look? = null, // the last choice failed as wallpaper_unsaved: the screen asks to replace
++        val pictures: Int = 0, // bumped whenever thumbnails arrive
++        val applied: Int = 0, // bumped whenever the computer reports a choice applied
++    ) {
++        val screens: Map<String, Sel> get() = look.screens
++        val layer: Map<String, Int> get() = look.layer
++
++        fun item(id: String?): Item? = id?.let { i -> items.firstOrNull { it.id == i } ?: gradients.firstOrNull { it.id == i } }
++
++        /**
++         * `a` asks for something else than `b`, as far as the computer takes it: a computer from
++         * before the look model reads only what each screen shows.
++         */
++        fun differs(a: Look, b: Look): Boolean = if (model) a.normal() != b.normal() else a.screens != b.screens
++
++        /** The list shows this look applied. */
++        fun shows(l: Look): Boolean = !differs(l, look)
++
++        /** The choice can be offered: a keep, or a picture the list has. */
++        fun valid(s: Sel): Boolean = when (s.kind) {
++            KEEP -> true
++            WALLPAPER -> items.any { it.id == s.id }
++            GRADIENT -> gradients.any { it.id == s.id }
++            else -> false
++        }
++    }
++
++    private val _state = MutableStateFlow(State())
++    val state: StateFlow<State> = _state.asStateFlow()
++
++    private val lock = Any()
++    private var loaded = false
++    private var listed = false // a list in the current format (per screen) arrived in this process
++    private val KEY = Regex("[0-9a-f]{16}")
++    private const val INDEX = "index.json"
++    private const val CHOICE = "choice.json"
++    const val UNSAVED = "wallpaper_unsaved"
++
++    private fun dir(ctx: Context): File = File(OmalawnCommands.privateDir(ctx), "walls").apply { mkdirs() }
++
++    fun thumbFile(ctx: Context, key: String): File? = if (KEY.matches(key)) File(dir(ctx), "$key.jpg") else null
++
++    private fun screensFrom(o: JSONObject?): Map<String, Sel>? {
++        if (o == null) return null
++        val out = SCREENS.associateWith { Sel.fromJson(o.optJSONObject(it)) }
++        return if (out.values.any { it == null }) null else out.mapValues { it.value!! }
++    }
++
++    private fun layerFrom(o: JSONObject?): Map<String, Int> = SCREENS.associateWith { (o?.optInt(it) ?: 0).coerceIn(-100, 100) }
++
++    private fun screensJson(m: Map<String, Sel>): JSONObject =
++        JSONObject().apply { SCREENS.forEach { put(it, m.getValue(it).toJson()) } }
++
++    /** Reads what the computer sent last, once per process. */
++    fun load(ctx: Context) {
++        synchronized(lock) {
++            if (loaded) return
++            loaded = true
++            val d = dir(ctx)
++            var st = State()
++            runCatching { JSONObject(File(d, INDEX).readText()) }.getOrNull()?.let { st = fromIndex(it, st) }
++            runCatching { JSONObject(File(d, CHOICE).readText()) }.getOrNull()?.let { c ->
++                // a choice stored by a build from before the look model: layers and parallax as listed
++                val look = Look.fromJson(c)?.let { l ->
++                    if (c.has("wallpaper")) l else l.copy(layer = st.look.layer, parallax = st.look.parallax)
++                }
++                if (look != null && c.optLong("at") > 0) {
++                    st = st.copy(
++                        choice = Choice(
++                            look,
++                            c.optLong("at"),
++                            c.optBoolean("received"),
++                            c.optString("waiting").ifEmpty { null },
++                            c.optBoolean("overwrite"),
++                        ),
++                    )
++                }
++            }
++            _state.value = st
++        }
++    }
++
++    private fun items(arr: JSONArray?): List<Item> {
++        val out = mutableListOf<Item>()
++        val a = arr ?: JSONArray()
++        for (i in 0 until a.length()) {
++            val it = a.optJSONObject(i) ?: continue
++            val id = it.optString("id")
++            val thumb = it.optString("thumb")
++            val wide = it.optString("wide").takeIf { k -> KEY.matches(k) }
++            val lock = it.optString("lock").takeIf { k -> KEY.matches(k) }
++            if (KEY.matches(id) && KEY.matches(thumb)) out.add(Item(id, it.optString("name").take(120), thumb, wide, lock))
++        }
++        return out
++    }
++
++    private fun fromIndex(o: JSONObject, st: State): State {
++        val currentId = text(o, "current_id")?.takeIf { KEY.matches(it) }
++        val sent = screensFrom(o.optJSONObject("screens"))
++        // a computer from before per-screen choices: the screens its target names show its wallpaper
++        val screens = sent ?: run {
++            val parts = PARTS[o.optString("target")] ?: SCREENS
++            SCREENS.associateWith { if (it in parts) Sel(WALLPAPER, currentId) else Sel.Keep }
++        }
++        val model = sent != null && o.optInt("format") >= FORMAT
++        val w = if (model) o.optJSONObject("wallpaper") else null
++        val look = Look(
++            screens = screens,
++            layer = layerFrom(o.optJSONObject("layer")),
++            parallax = w?.optBoolean("parallax") ?: false,
++        ).normal()
++        return st.copy(
++            known = true,
++            enabled = o.optBoolean("enabled"),
++            theme = text(o, "theme"),
++            message = text(o, "message"),
++            items = items(o.optJSONArray("items")),
++            gradients = items(o.optJSONArray("gradients")),
++            look = look,
++            perScreen = sent != null,
++            model = model,
++            currentId = currentId,
++        )
++    }
++
++    private fun text(o: JSONObject, k: String): String? = if (o.isNull(k)) null else o.optString(k).ifEmpty { null }?.take(300)
++
++    private fun write(f: File, data: ByteArray) {
++        val tmp = File(f.parentFile, ".wall-${UUID.randomUUID()}")
++        try {
++            tmp.outputStream().use { it.write(data) }
++            if (!tmp.renameTo(f)) error("cannot write ${f.name}")
++        } finally {
++            tmp.delete()
++        }
++    }
++
++    private fun saveChoice(ctx: Context, c: Choice?) {
++        val f = File(dir(ctx), CHOICE)
++        if (c == null) {
++            f.delete()
++            return
++        }
++        val o = c.look.toJson().put("at", c.at).put("received", c.received)
++        if (c.waiting != null) o.put("waiting", c.waiting)
++        if (c.overwrite) o.put("overwrite", true)
++        write(f, o.toString().toByteArray())
++    }
++
++    /** `launcher.theme_wallpapers_set`. */
++    fun set(ctx: Context, params: JSONObject): JSONObject = synchronized(lock) {
++        load(ctx)
++        val d = dir(ctx)
++        val thumbs = params.optJSONArray("thumbs") ?: JSONArray()
++        var stored = 0
++        for (i in 0 until thumbs.length()) {
++            val t = thumbs.optJSONObject(i) ?: continue
++            val file = thumbFile(ctx, t.optString("key")) ?: throw OmalawnError("bad_params", "bad_params: thumbnail key")
++            val bytes = try {
++                Base64.decode(t.optString("jpeg"), Base64.DEFAULT)
++            } catch (e: IllegalArgumentException) {
++                throw OmalawnError("bad_params", "bad_params: thumbnail is not base64")
++            }
++            write(file, bytes)
++            stored++
++        }
++        val index = JSONObject()
++            .put("enabled", params.optBoolean("enabled"))
++            .put("theme", params.opt("theme") ?: JSONObject.NULL)
++            .put("message", params.opt("message") ?: JSONObject.NULL)
++            .put("current_id", params.opt("current_id") ?: JSONObject.NULL)
++            .put("target", params.opt("target") ?: JSONObject.NULL)
++            .put("items", params.optJSONArray("items") ?: JSONArray())
++            .put("gradients", params.optJSONArray("gradients") ?: JSONArray())
++            .put("screens", params.optJSONObject("screens") ?: JSONObject.NULL)
++            .put("layer", params.optJSONObject("layer") ?: JSONObject.NULL)
++            .put("format", params.optInt("format"))
++            .put("wallpaper", params.optJSONObject("wallpaper") ?: JSONObject.NULL)
++        var st = fromIndex(index, _state.value)
++        listed = st.perScreen
++        val c = st.choice
++        if (c != null && st.shows(c.look)) {
++            st = st.copy(choice = null, error = null) // the list shows the choice done
++        }
++        if (st.choice == null) saveChoice(ctx, null)
++        write(File(d, INDEX), index.toString().toByteArray())
++        val all = (st.items + st.gradients).flatMap { listOfNotNull(it.thumb, it.wide, it.lock) }.distinct()
++        val wanted = all.map { "$it.jpg" }.toSet()
++        val have = all.filter { File(d, "$it.jpg").isFile }
++        if (have.size == all.size) { // the list is complete: pictures of older lists go
++            d.listFiles()?.filter { it.name.endsWith(".jpg") && it.name !in wanted }?.forEach { it.delete() }
++        }
++        _state.value = st.copy(pictures = _state.value.pictures + stored)
++        JSONObject().put("have", JSONArray(have.distinct()))
++    }
++
++    /**
++     * `launcher.theme_wallpaper_choice`: the Apply the computer has not received yet, and
++     * `needs_list` while no list in the current format has arrived in this process.
++     */
++    fun choice(ctx: Context): JSONObject = synchronized(lock) {
++        load(ctx)
++        val c = _state.value.choice
++        JSONObject().put(
++            "choice",
++            if (c == null || c.received) {
++                JSONObject.NULL
++            } else {
++                c.look.toJson().put("at", c.at).put("format", FORMAT).apply { if (c.overwrite) put("overwrite", true) }
++            },
++        ).put("needs_list", !listed)
++    }
++
++    /** The install's time (the package's lastUpdateTime): `installed_at` in launcher.ping. Every
++     *  install changes it, so the computer tells our builds apart though they share one version. */
++    fun installedAt(ctx: Context): Long = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime
++
++    /** `launcher.theme_wallpaper_ack`. */
++    fun ack(ctx: Context, params: JSONObject): JSONObject = synchronized(lock) {
++        load(ctx)
++        val at = params.optLong("at")
++        val stateName = params.optString("state")
++        val current = text(params, "current_id")?.takeIf { KEY.matches(it) }
++        val message = text(params, "message")
++        val code = text(params, "code")
++        var st = _state.value
++        val c = st.choice
++        if (c != null && c.at == at) {
++            st = when (stateName) {
++                "received" -> st.copy(choice = c.copy(received = true), error = null)
++                "waiting" -> st.copy(choice = c.copy(received = true, waiting = message))
++                "applied" -> st.copy(choice = null, error = null, look = c.look, currentId = current ?: st.currentId, applied = st.applied + 1)
++                // a wallpaper that cannot be saved first: no message, the screen asks to replace it
++                "failed" -> if (code == UNSAVED && !c.overwrite) {
++                    st.copy(choice = null, error = null, unsaved = c.look)
++                } else {
++                    st.copy(choice = null, error = message ?: "The computer could not apply it.")
++                }
++                else -> throw OmalawnError("bad_params", "bad_params: state must be received, applied, waiting or failed")
++            }
++            saveChoice(ctx, st.choice)
++        } else if (stateName == "applied" && current != null) {
++            st = st.copy(currentId = current, applied = st.applied + 1)
++        }
++        _state.value = st
++        JSONObject().put("ok", true)
++    }
++
++    /**
++     * Apply on the screen: what the screens should get, as one pending choice the computer applies
++     * at its next look (within seconds when connected). Nothing is stored when it is what the screens
++     * show already (or what is on its way); a choice the computer has not read yet is replaced.
++     */
++    fun apply(ctx: Context, want: Look, overwrite: Boolean = false): Boolean {
++        synchronized(lock) {
++            load(ctx)
++            val st = _state.value
++            val look = want.normal()
++            if (!st.enabled || !st.perScreen || SCREENS.any { it !in look.screens }) return false
++            if (look.screens.values.any { !st.valid(it) }) return false
++            if (st.differs(look, st.choice?.look ?: st.look).not()) return false
++            val c = Choice(look, System.currentTimeMillis(), overwrite = overwrite)
++            saveChoice(ctx, c)
++            _state.value = st.copy(choice = c, error = null, unsaved = null)
++            return true
++        }
++    }
++
++    /** Cancel in the overwrite question: nothing is sent; the screen keeps the choice as its draft. */
++    fun dismissUnsaved() {
++        synchronized(lock) { _state.value = _state.value.copy(unsaved = null) }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+new file mode 100644
+index 0000000000..a1f535f117
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+@@ -0,0 +1,1087 @@
++package app.lawnchair.omalawn
++
++import android.app.WallpaperManager
++import android.content.Context
++import android.graphics.Bitmap
++import android.graphics.BitmapFactory
++import android.graphics.Canvas
++import android.text.format.DateFormat
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.selection.selectable
++import androidx.compose.foundation.selection.selectableGroup
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.BatteryFull
++import androidx.compose.material.icons.rounded.CameraAlt
++import androidx.compose.material.icons.rounded.Check
++import androidx.compose.material.icons.rounded.CloudOff
++import androidx.compose.material.icons.rounded.ErrorOutline
++import androidx.compose.material.icons.rounded.FlashlightOn
++import androidx.compose.material.icons.rounded.Home
++import androidx.compose.material.icons.rounded.Info
++import androidx.compose.material.icons.rounded.Lock
++import androidx.compose.material.icons.rounded.Palette
++import androidx.compose.material.icons.rounded.Search
++import androidx.compose.material.icons.rounded.SignalCellular4Bar
++import androidx.compose.material.icons.rounded.Wallpaper
++import androidx.compose.material.icons.rounded.Wifi
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Button
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedButton
++import androidx.compose.material3.Slider
++import androidx.compose.material3.SliderDefaults
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableLongStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.produceState
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.shadow
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.ImageBitmap
++import androidx.compose.ui.graphics.Shape
++import androidx.compose.ui.graphics.asImageBitmap
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.semantics.clearAndSetSemantics
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.role
++import androidx.compose.ui.semantics.selected
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.navigation.NavGraphBuilder
++import androidx.navigation.compose.composable
++import app.lawnchair.omalawn.ThemeWallpapers.Look
++import app.lawnchair.omalawn.ThemeWallpapers.Sel
++import app.lawnchair.ui.preferences.LocalIsExpandedScreen
++import app.lawnchair.ui.preferences.LocalNavController
++import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
++import app.lawnchair.ui.preferences.components.controls.SwitchPreference
++import app.lawnchair.ui.preferences.components.layout.BottomSpacer
++import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
++import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
++import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
++import com.android.launcher3.LauncherAppState
++import com.android.launcher3.LauncherSettings
++import com.android.launcher3.R
++import com.android.launcher3.model.data.ItemInfoWithIcon
++import java.util.Date
++import kotlin.coroutines.resume
++import kotlin.math.roundToInt
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.suspendCancellableCoroutine
++import kotlinx.coroutines.withContext
++import kotlinx.coroutines.withTimeoutOrNull
++import kotlinx.serialization.Serializable
++import org.json.JSONObject
++
++/** The settings route of the "Wallpaper from Omarchy" screen (patch 0017). */
++@Serializable
++data object HomarWallpapers
++
++/** Registers the screen in Lawnchair's settings graph (one line in PreferenceNavigation). */
++fun NavGraphBuilder.homarWallpapers() {
++    composable<HomarWallpapers> { ThemeWallpapersScreen() }
++}
++
++/** Its row on the settings home (one line in PreferencesDashboard). */
++@Composable
++fun HomarWallpapersEntry() {
++    val nav = LocalNavController.current
++    PreferenceCategory(
++        label = stringResource(R.string.homar_wallpapers_label),
++        description = stringResource(R.string.homar_wallpapers_description),
++        iconResource = R.drawable.ic_wallpaper,
++        onNavigate = { nav.navigate(HomarWallpapers) },
++    )
++}
++
++private const val LOCK = "lock"
++private const val HOME = "home"
++private const val TAB_KEEP = 0
++private const val TAB_WALLPAPERS = 1
++private const val TAB_GRADIENTS = 2
++
++private fun tabOf(s: Sel?): Int? = when (s?.kind) {
++    ThemeWallpapers.KEEP -> TAB_KEEP
++    ThemeWallpapers.WALLPAPER -> TAB_WALLPAPERS
++    ThemeWallpapers.GRADIENT -> TAB_GRADIENTS
++    else -> null
++}
++
++/** The draft as text, so it survives a rotation. */
++private fun encode(l: Look): String = l.toJson().toString()
++
++private fun decode(s: String?): Look? = s?.let { runCatching { Look.fromJson(JSONObject(it)) }.getOrNull() }
++
++/**
++ * The screen. On top, the lock screen and the home screen as they will look (the draft; views,
++ * not controls). Below, a Lock screen panel and a Home screen panel: the two screens are always
++ * set separately. Each panel: Keep current, the theme's wallpapers or gradients made from its
++ * colours; its darken / lighten layer; on the Home screen panel, while it shows Theme wallpapers,
++ * the parallax switch. A computer from before the look model takes no layers or parallax: those stay
++ * hidden. Taps only change the draft (it survives a rotation; leaving the screen drops it); Apply
++ * sends it as one choice and the bar shows how it goes; Discard returns to what is applied.
++ */
++@Composable
++fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
++    val ctx = LocalContext.current
++    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { ThemeWallpapers.load(ctx) } }
++    val st by ThemeWallpapers.state.collectAsState()
++    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
++    val choice = st.choice
++    LaunchedEffect(choice) {
++        while (choice != null && !choice.received) {
++            now = System.currentTimeMillis()
++            if (now - choice.at > ThemeWallpapers.RECEIVE_WAIT_MS) break
++            delay(500)
++        }
++    }
++    // what is applied, or on its way: the draft is compared with this
++    val base: Look = (choice?.look ?: st.look).normal()
++    var draftText by rememberSaveable { mutableStateOf<String?>(null) }
++    val draft: Look = decode(draftText)?.takeIf { d -> d.screens.values.all { st.valid(it) } } ?: base
++    val dirty = st.differs(draft, base)
++    // a lambda, not a function reference: it captures the current `base`
++    val edit: (Look) -> Unit = { l ->
++        draftText = if (l != base) encode(l) else null
++    }
++    val showPicker = st.known && st.enabled && st.message == null && st.perScreen &&
++        (st.items.isNotEmpty() || st.gradients.isNotEmpty())
++    val status: Pair<ImageVector?, String>? = when {
++        choice != null && choice.waiting != null -> Icons.Rounded.Lock to choice.waiting
++        choice != null && !choice.received && now - choice.at > ThemeWallpapers.RECEIVE_WAIT_MS ->
++            Icons.Rounded.CloudOff to stringResource(R.string.homar_wallpapers_unreachable)
++        choice != null -> null to stringResource(R.string.homar_wallpapers_applying)
++        st.error != null -> Icons.Rounded.ErrorOutline to st.error!!
++        else -> null
++    }
++
++    // the computer cannot save the current wallpaper first: ask, with no other words (owner's rule);
++    // Cancel keeps the refused choice as the draft
++    val unsaved = st.unsaved
++    if (unsaved != null) {
++        val cancel = {
++            edit(unsaved)
++            ThemeWallpapers.dismissUnsaved()
++        }
++        AlertDialog(
++            onDismissRequest = cancel,
++            title = { Text(stringResource(R.string.homar_wallpapers_replace_title)) },
++            confirmButton = {
++                TextButton(onClick = {
++                    if (!ThemeWallpapers.apply(ctx, unsaved, overwrite = true)) cancel()
++                }) { Text(stringResource(R.string.homar_wallpapers_replace)) }
++            },
++            dismissButton = {
++                TextButton(onClick = cancel) { Text(stringResource(R.string.homar_wallpapers_cancel)) }
++            },
++        )
++    }
++
++    PreferenceLayout(
++        label = stringResource(R.string.homar_wallpapers_label),
++        backArrowVisible = !LocalIsExpandedScreen.current,
++        modifier = modifier,
++        verticalArrangement = Arrangement.spacedBy(0.dp),
++        bottomBar = {
++            if (!showPicker) {
++                BottomSpacer()
++            } else {
++                ApplyBar(
++                    dirty = dirty,
++                    status = status,
++                    error = choice == null && st.error != null,
++                    onDiscard = { draftText = null },
++                    onApply = {
++                        if (ThemeWallpapers.apply(ctx, draft)) draftText = null
++                    },
++                )
++            }
++        },
++    ) {
++        when {
++            !st.known -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_nothing_yet))
++            !st.enabled -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_sync_off))
++            st.message != null -> Notice(Icons.Rounded.Info, st.message!!)
++            !st.perScreen -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_update_computer))
++            st.items.isEmpty() && st.gradients.isEmpty() -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_empty))
++            else -> {
++                ThemeLine(st.theme)
++                Previews(st = st, base = base, shown = draft)
++                WallpaperPanel(st, base, draft, LOCK, stringResource(R.string.homar_wallpapers_target_lock), edit = edit)
++                WallpaperPanel(st, base, draft, HOME, stringResource(R.string.homar_wallpapers_target_home), edit = edit)
++                Spacer(Modifier.height(8.dp))
++            }
++        }
++    }
++}
++
++/** The followed theme's name, as a small label over the previews. */
++@Composable
++private fun ThemeLine(theme: String?) {
++    if (theme == null) return
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.Center,
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(top = 4.dp, bottom = 12.dp)
++            .semantics(mergeDescendants = true) {},
++    ) {
++        Surface(
++            shape = CircleShape,
++            color = MaterialTheme.colorScheme.secondaryContainer,
++        ) {
++            Row(
++                verticalAlignment = Alignment.CenterVertically,
++                modifier = Modifier.padding(start = 10.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
++            ) {
++                Icon(
++                    imageVector = Icons.Rounded.Palette,
++                    contentDescription = null,
++                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
++                    modifier = Modifier.size(16.dp),
++                )
++                Text(
++                    text = stringResource(R.string.homar_wallpapers_theme, theme),
++                    style = MaterialTheme.typography.labelLarge,
++                    color = MaterialTheme.colorScheme.onSecondaryContainer,
++                    modifier = Modifier.padding(start = 6.dp),
++                )
++            }
++        }
++    }
++}
++
++/** The two phones side by side: lock screen, then home screen, each showing the draft. */
++@Composable
++private fun Previews(st: ThemeWallpapers.State, base: Look, shown: Look) {
++    BoxWithConstraints(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
++        val gap = 20.dp
++        val w = minOf((maxWidth - gap) / 2, 124.dp)
++        Row(
++            horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
++            modifier = Modifier.fillMaxWidth(),
++        ) {
++            listOf(LOCK, HOME).forEach { p ->
++                PhonePreview(st = st, screen = p, shown = shown, base = base, width = w)
++            }
++        }
++    }
++}
++
++@Composable
++private fun PhonePreview(st: ThemeWallpapers.State, screen: String, shown: Look, base: Look, width: Dp) {
++    val label = stringResource(if (screen == LOCK) R.string.homar_wallpapers_target_lock else R.string.homar_wallpapers_target_home)
++    val description = stringResource(R.string.homar_wallpapers_preview, label)
++    val outer = RoundedCornerShape(26.dp)
++    val inner = RoundedCornerShape(20.dp)
++    Column(
++        horizontalAlignment = Alignment.CenterHorizontally,
++        modifier = Modifier
++            .width(width)
++            .clearAndSetSemantics { contentDescription = description },
++    ) {
++        Box(
++            modifier = Modifier
++                .fillMaxWidth()
++                .aspectRatio(9f / 19.5f)
++                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, outer)
++                .padding(5.dp)
++                .shadow(2.dp, inner)
++                .clip(inner)
++                .background(MaterialTheme.colorScheme.surfaceVariant),
++        ) {
++            ScreenPicture(st = st, shown = shown, base = base, screen = screen, modifier = Modifier.fillMaxSize())
++            if (screen == LOCK) LockOverlay() else HomeOverlay()
++        }
++        Text(
++            text = label,
++            style = MaterialTheme.typography.labelLarge,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            fontWeight = FontWeight.Medium,
++            modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
++        )
++    }
++}
++
++/**
++ * What a screen shows for a look: a wallpaper or gradient with that screen's colour layer over
++ * it (the home screen with parallax on a theme wallpaper: the left part of the wide picture, its
++ * first page; the lock screen with its own cut whenever it has one); keep shows what the screen has now (what the computer
++ * put there, else the phone's own wallpaper).
++ */
++@Composable
++private fun ScreenPicture(st: ThemeWallpapers.State, shown: Look, base: Look, screen: String, modifier: Modifier = Modifier) {
++    val kept = shown.screens.getValue(screen).kind == ThemeWallpapers.KEEP
++    val look = if (kept && base.screens.getValue(screen).kind != ThemeWallpapers.KEEP) base else shown
++    val sel = look.screens.getValue(screen)
++    Box(modifier = modifier) {
++        if (sel.kind == ThemeWallpapers.KEEP) {
++            SystemWallpaper(screen = screen, applied = st.applied, modifier = Modifier.fillMaxSize())
++        } else {
++            val item = st.item(sel.id)
++            val wide = screen == HOME && look.normal().parallax && item?.wide != null
++            val key = when {
++                wide -> item?.wide
++                screen == LOCK && item?.lock != null -> item.lock
++                else -> item?.thumb
++            }
++            Thumbnail(key, st.pictures, Modifier.fillMaxSize(), alignment = if (wide) Alignment.CenterStart else Alignment.Center)
++            Layer(look.layer[screen] ?: 0)
++        }
++    }
++}
++
++/** The darken (+) / lighten (-) layer the computer lays over the wallpaper. */
++@Composable
++private fun Layer(amount: Int) {
++    if (amount == 0) return
++    val c = if (amount > 0) Color.Black else Color.White
++    Box(Modifier.fillMaxSize().background(c.copy(alpha = (kotlin.math.abs(amount) / 100f).coerceAtMost(1f))))
++}
++
++@Composable
++private fun Thumbnail(key: String?, pictures: Int, modifier: Modifier = Modifier, alignment: Alignment = Alignment.Center) {
++    val ctx = LocalContext.current
++    val bitmap by produceState<ImageBitmap?>(null, key, pictures) {
++        value = withContext(Dispatchers.IO) {
++            key?.let { ThemeWallpapers.thumbFile(ctx, it) }?.takeIf { it.isFile }
++                ?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
++        }
++    }
++    Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
++        bitmap?.let {
++            Image(bitmap = it, contentDescription = null, contentScale = ContentScale.Crop, alignment = alignment, modifier = Modifier.fillMaxSize())
++        }
++    }
++}
++
++/** The phone's own wallpaper, when Android lets it be read; else a wash of its colours. */
++@Composable
++private fun SystemWallpaper(screen: String, applied: Int, modifier: Modifier = Modifier) {
++    val ctx = LocalContext.current
++    val picture by produceState<Pair<ImageBitmap?, List<Color>>?>(null, screen, applied) {
++        value = withContext(Dispatchers.IO) { CurrentWallpaper.read(ctx, screen) }
++    }
++    val p = picture
++    val surface = MaterialTheme.colorScheme.surfaceVariant
++    Box(modifier.background(surface)) {
++        when {
++            p?.first != null -> Image(p.first!!, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
++            p != null && p.second.isNotEmpty() -> Box(
++                Modifier
++                    .fillMaxSize()
++                    .background(Brush.verticalGradient(if (p.second.size == 1) p.second + p.second else p.second)),
++            )
++            p != null -> Icon(
++                Icons.Rounded.Wallpaper,
++                contentDescription = null,
++                tint = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.align(Alignment.Center).size(28.dp),
++            )
++        }
++    }
++}
++
++/** Reads what a screen shows now on this phone. */
++private object CurrentWallpaper {
++    fun read(ctx: Context, screen: String): Pair<ImageBitmap?, List<Color>> {
++        val wm = WallpaperManager.getInstance(ctx)
++        val lock = screen == LOCK && wm.getWallpaperId(WallpaperManager.FLAG_LOCK) >= 0
++        val flag = if (lock) WallpaperManager.FLAG_LOCK else WallpaperManager.FLAG_SYSTEM
++        val bitmap = runCatching {
++            wm.getWallpaperFile(flag)?.use { pfd ->
++                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
++                BitmapFactory.decodeFileDescriptor(pfd.fileDescriptor, null, opts)
++                var sample = 1
++                while (opts.outWidth / (sample * 2) >= 360) sample *= 2
++                android.system.Os.lseek(pfd.fileDescriptor, 0, android.system.OsConstants.SEEK_SET)
++                BitmapFactory.decodeFileDescriptor(pfd.fileDescriptor, null, BitmapFactory.Options().apply { inSampleSize = sample })
++            }
++        }.getOrNull()
++        if (bitmap != null) return bitmap.asImageBitmap() to emptyList()
++        val wc = runCatching { wm.getWallpaperColors(flag) ?: wm.getWallpaperColors(WallpaperManager.FLAG_SYSTEM) }.getOrNull()
++        val colors = listOfNotNull(wc?.primaryColor, wc?.secondaryColor, wc?.tertiaryColor).map { Color(it.toArgb()) }
++        return null to colors
++    }
++}
++
++/** A clock and date as the lock screen draws them. */
++@Composable
++private fun LockOverlay() {
++    val ctx = LocalContext.current
++    val time = remember {
++        val d = Date()
++        DateFormat.getTimeFormat(ctx).format(d).replace(Regex("\\s?[AaPp]\\.?[Mm]\\.?$"), "") to
++            DateFormat.format("EEE, d MMM", d).toString()
++    }
++    BoxWithConstraints(Modifier.fillMaxSize()) {
++        val w = maxWidth
++        StatusBar(showTime = false)
++        Icon(
++            Icons.Rounded.Lock,
++            contentDescription = null,
++            tint = Color.White,
++            modifier = Modifier.align(Alignment.TopCenter).padding(top = w * 0.14f).size(w * 0.07f),
++        )
++        Column(
++            horizontalAlignment = Alignment.CenterHorizontally,
++            modifier = Modifier.align(Alignment.TopCenter).padding(top = w * 0.32f),
++        ) {
++            Text(
++                text = time.second,
++                color = Color.White,
++                fontSize = (w.value * 0.075f).sp,
++                fontWeight = FontWeight.Medium,
++                style = MaterialTheme.typography.labelSmall.copy(shadow = textShadow()),
++            )
++            Text(
++                text = time.first,
++                color = Color.White,
++                fontSize = (w.value * 0.3f).sp,
++                lineHeight = (w.value * 0.32f).sp,
++                fontWeight = FontWeight.Light,
++                style = MaterialTheme.typography.displaySmall.copy(shadow = textShadow()),
++            )
++        }
++        Row(
++            horizontalArrangement = Arrangement.SpaceBetween,
++            modifier = Modifier
++                .align(Alignment.BottomCenter)
++                .fillMaxWidth()
++                .padding(horizontal = w * 0.1f, vertical = w * 0.1f),
++        ) {
++            listOf(Icons.Rounded.FlashlightOn, Icons.Rounded.CameraAlt).forEach {
++                Box(
++                    contentAlignment = Alignment.Center,
++                    modifier = Modifier.size(w * 0.17f).clip(CircleShape).background(Color.Black.copy(alpha = 0.32f)),
++                ) {
++                    Icon(it, null, tint = Color.White, modifier = Modifier.size(w * 0.085f))
++                }
++            }
++        }
++    }
++}
++
++private fun textShadow() = androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.35f), blurRadius = 6f)
++
++/** A home screen: the date, a row of apps, the dock and the search bar, with this phone's icons. */
++@Composable
++private fun HomeOverlay() {
++    val ctx = LocalContext.current
++    val icons by produceState<HomeIcons.Set?>(null) { value = HomeIcons.load(ctx) }
++    val date = remember { DateFormat.format("EEEE, MMM d", Date()).toString() }
++    BoxWithConstraints(Modifier.fillMaxSize()) {
++        val w = maxWidth
++        val icon = w * 0.165f
++        StatusBar(showTime = true)
++        Text(
++            text = date,
++            color = Color.White,
++            fontSize = (w.value * 0.07f).sp,
++            fontWeight = FontWeight.Medium,
++            maxLines = 1,
++            overflow = TextOverflow.Clip,
++            style = MaterialTheme.typography.labelSmall.copy(shadow = textShadow()),
++            modifier = Modifier.padding(start = w * 0.08f, top = w * 0.17f),
++        )
++        Column(
++            verticalArrangement = Arrangement.spacedBy(w * 0.07f),
++            horizontalAlignment = Alignment.CenterHorizontally,
++            modifier = Modifier
++                .align(Alignment.BottomCenter)
++                .fillMaxWidth()
++                .padding(bottom = w * 0.07f),
++        ) {
++            IconRow(icons?.apps.orEmpty(), 4, icon)
++            IconRow(icons?.dock.orEmpty(), 4, icon)
++            Box(
++                contentAlignment = Alignment.CenterStart,
++                modifier = Modifier
++                    .fillMaxWidth(0.84f)
++                    .height(w * 0.15f)
++                    .clip(CircleShape)
++                    .background(Color.White.copy(alpha = 0.82f)),
++            ) {
++                Icon(
++                    Icons.Rounded.Search,
++                    null,
++                    tint = Color(0xFF444746),
++                    modifier = Modifier.padding(start = w * 0.05f).size(w * 0.08f),
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun IconRow(icons: List<ImageBitmap>, count: Int, size: Dp) {
++    Row(
++        horizontalArrangement = Arrangement.SpaceEvenly,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = size * 0.25f),
++    ) {
++        repeat(count) { i ->
++            val b = icons.getOrNull(i)
++            if (b != null) {
++                Image(b, null, modifier = Modifier.size(size))
++            } else {
++                Box(Modifier.size(size).clip(CircleShape).background(Color.White.copy(alpha = 0.28f)))
++            }
++        }
++    }
++}
++
++@Composable
++private fun StatusBar(showTime: Boolean) {
++    BoxWithConstraints(Modifier.fillMaxWidth()) {
++        val w = maxWidth
++        val s = w * 0.06f
++        Row(
++            verticalAlignment = Alignment.CenterVertically,
++            modifier = Modifier.fillMaxWidth().padding(horizontal = w * 0.08f, vertical = w * 0.05f),
++        ) {
++            if (showTime) {
++                val ctx = LocalContext.current
++                val t = remember { DateFormat.getTimeFormat(ctx).format(Date()).replace(Regex("\\s?[AaPp]\\.?[Mm]\\.?$"), "") }
++                Text(t, color = Color.White, fontSize = (w.value * 0.055f).sp, fontWeight = FontWeight.Medium)
++            }
++            Spacer(Modifier.weight(1f))
++            listOf(Icons.Rounded.Wifi, Icons.Rounded.SignalCellular4Bar, Icons.Rounded.BatteryFull).forEach {
++                Icon(it, null, tint = Color.White, modifier = Modifier.size(s))
++            }
++        }
++    }
++}
++
++/** This phone's dock and a few of its home-screen apps, as the launcher draws their icons. */
++private object HomeIcons {
++    class Set(val dock: List<ImageBitmap>, val apps: List<ImageBitmap>)
++
++    @Volatile private var cached: Set? = null
++
++    suspend fun load(ctx: Context): Set? {
++        cached?.let { return it }
++        val model = runCatching { LauncherAppState.getInstance(ctx).model }.getOrNull() ?: return null
++        val items: List<ItemInfoWithIcon>? = withTimeoutOrNull(3_000) {
++            suspendCancellableCoroutine { cont ->
++                model.loadAsync { data ->
++                    val all = data?.itemsIdMap?.filterIsInstance<ItemInfoWithIcon>().orEmpty()
++                    val dock = all.filter { it.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT }.sortedBy { it.screenId }
++                    val desk = all.filter { it.container == LauncherSettings.Favorites.CONTAINER_DESKTOP }
++                        .sortedWith(compareBy({ it.screenId }, { -it.cellY }, { it.cellX }))
++                    cont.resume(dock.take(4) + desk.take(4))
++                }
++            }
++        }
++        if (items == null) return null
++        val px = (48 * ctx.resources.displayMetrics.density).toInt().coerceAtLeast(48)
++        val bitmaps = withContext(Dispatchers.Default) {
++            items.map { info ->
++                runCatching {
++                    val d = runCatching { info.newIcon(ctx) as android.graphics.drawable.Drawable }
++                        .onFailure { android.util.Log.w("HomarWallpapers", "icon of ${info.targetComponent}", it) }
++                        .getOrNull()
++                        ?: ctx.packageManager.getActivityIcon(info.targetComponent!!)
++                    val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
++                    d.setBounds(0, 0, px, px)
++                    d.draw(Canvas(bmp))
++                    bmp.asImageBitmap()
++                }.getOrNull()
++            }
++        }
++        val dockCount = items.count { it.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT }
++        return Set(bitmaps.take(dockCount).filterNotNull(), bitmaps.drop(dockCount).filterNotNull()).also { cached = it }
++    }
++}
++
++/**
++ * One screen's wallpaper panel. Source tabs; the pictures or the keep line; the darken / lighten
++ * layer and, for the home screen while it shows Theme wallpapers, parallax (only when the computer
++ * takes them).
++ */
++@Composable
++private fun WallpaperPanel(
++    st: ThemeWallpapers.State,
++    base: Look,
++    draft: Look,
++    panel: String,
++    title: String,
++    edit: (Look) -> Unit,
++) {
++    val sel = draft.screens.getValue(panel)
++    var tabPicked by rememberSaveable(panel) { mutableStateOf<Int?>(null) }
++    val tab = tabPicked ?: tabOf(sel) ?: TAB_WALLPAPERS
++    val pick: (Sel) -> Unit = { s -> edit(draft.copy(screens = draft.screens + (panel to s))) }
++    // a tile's description names the screen: there are two panels
++    val prefix = "$title: "
++    val onTab: (Int) -> Unit = { t ->
++        tabPicked = t
++        when {
++            t == TAB_KEEP -> pick(Sel.Keep)
++            // back from Keep current: what this screen had, when it had a picture of this tab
++            sel.kind == ThemeWallpapers.KEEP && tabOf(base.screens.getValue(panel)) == t -> pick(base.screens.getValue(panel))
++        }
++    }
++    PreferenceGroup(heading = title) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .background(MaterialTheme.colorScheme.surfaceContainer)
++                .padding(bottom = 12.dp),
++        ) {
++            SourceTabs(tab = tab, selected = sel, hasGradients = st.gradients.isNotEmpty(), onTab = onTab)
++            when (tab) {
++                TAB_KEEP -> KeepLine()
++                TAB_WALLPAPERS -> PicturePane(
++                    st = st,
++                    items = st.items,
++                    kind = ThemeWallpapers.WALLPAPER,
++                    base = base,
++                    selected = sel,
++                    prefix = prefix,
++                    empty = stringResource(R.string.homar_wallpapers_empty),
++                    onPick = pick,
++                )
++                else -> PicturePane(
++                    st = st,
++                    items = st.gradients,
++                    kind = ThemeWallpapers.GRADIENT,
++                    base = base,
++                    selected = sel,
++                    prefix = prefix,
++                    empty = stringResource(R.string.homar_wallpapers_no_gradients),
++                    onPick = pick,
++                )
++            }
++        }
++        if (st.model) {
++            val kept = sel.kind == ThemeWallpapers.KEEP
++            LayerSlider(
++                value = draft.layer[panel] ?: 0,
++                enabled = !kept,
++                description = prefix + stringResource(R.string.homar_wallpapers_layer),
++                onChange = { v -> edit(draft.copy(layer = draft.layer + (panel to v))) },
++            )
++            // parallax scrolls a theme wallpaper only: no switch with a gradient or Keep current
++            if (panel == HOME && sel.kind == ThemeWallpapers.WALLPAPER) {
++                SwitchPreference(
++                    checked = draft.parallax,
++                    onCheckedChange = { edit(draft.copy(parallax = it)) },
++                    label = stringResource(R.string.homar_wallpapers_parallax),
++                    description = stringResource(R.string.homar_wallpapers_parallax_hint),
++                )
++            }
++        }
++    }
++}
++
++/**
++ * Keep current, Theme wallpapers, Gradients. A dot marks where the choice is. Each tab is as wide
++ * as its label needs (a row of equal tabs cuts "Theme wallpapers" on a phone).
++ */
++@Composable
++private fun SourceTabs(tab: Int, selected: Sel?, hasGradients: Boolean, onTab: (Int) -> Unit) {
++    val tabs = listOf(
++        stringResource(R.string.homar_wallpapers_tab_keep),
++        stringResource(R.string.homar_wallpapers_tab_wallpapers),
++        stringResource(R.string.homar_wallpapers_tab_gradients),
++    )
++    val chosen = tabOf(selected)
++    val accent = MaterialTheme.colorScheme.primary
++    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
++        Row(Modifier.fillMaxWidth().selectableGroup()) {
++            tabs.forEachIndexed { i, label ->
++                val on = tab == i
++                val enabled = i != TAB_GRADIENTS || hasGradients
++                val color = when {
++                    !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
++                    on -> accent
++                    else -> MaterialTheme.colorScheme.onSurfaceVariant
++                }
++                Column(
++                    horizontalAlignment = Alignment.CenterHorizontally,
++                    modifier = Modifier
++                        .weight(label.length + 6f)
++                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
++                        .selectable(selected = on, enabled = enabled, role = Role.Tab, onClick = { onTab(i) }),
++                ) {
++                    Row(
++                        verticalAlignment = Alignment.CenterVertically,
++                        modifier = Modifier.height(48.dp),
++                    ) {
++                        Text(
++                            label,
++                            maxLines = 1,
++                            softWrap = false,
++                            color = color,
++                            style = MaterialTheme.typography.labelLarge,
++                            fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
++                        )
++                        if (chosen == i) {
++                            Spacer(Modifier.width(5.dp))
++                            Box(Modifier.size(6.dp).clip(CircleShape).background(accent))
++                        }
++                    }
++                    Box(
++                        Modifier
++                            .fillMaxWidth(0.8f)
++                            .height(3.dp)
++                            .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
++                            .background(if (on) accent else Color.Transparent),
++                    )
++                }
++            }
++        }
++        Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
++    }
++    Spacer(Modifier.height(12.dp))
++}
++
++/** Keep current: the screen is left alone. */
++@Composable
++private fun KeepLine() {
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = 20.dp, vertical = 8.dp)
++            .semantics(mergeDescendants = true) {},
++    ) {
++        Icon(Icons.Rounded.Wallpaper, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
++        Text(
++            text = stringResource(R.string.homar_wallpapers_keep_one),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(start = 12.dp),
++        )
++    }
++}
++
++/** The theme's wallpapers or its gradients, three to a row. */
++@Composable
++private fun PicturePane(
++    st: ThemeWallpapers.State,
++    items: List<ThemeWallpapers.Item>,
++    kind: String,
++    base: Look,
++    selected: Sel?,
++    prefix: String,
++    empty: String,
++    onPick: (Sel) -> Unit,
++) {
++    if (items.isEmpty()) {
++        Text(
++            text = empty,
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
++        )
++        return
++    }
++    val gradient = kind == ThemeWallpapers.GRADIENT
++    Column(
++        modifier = Modifier.padding(horizontal = 12.dp),
++        verticalArrangement = Arrangement.spacedBy(12.dp),
++    ) {
++        items.chunked(3).forEach { row ->
++            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++                row.forEach { item ->
++                    val sel = Sel(kind, item.id)
++                    PictureTile(
++                        item = item,
++                        pictures = st.pictures,
++                        named = gradient,
++                        prefix = prefix,
++                        selected = sel == selected,
++                        onLock = base.screens[LOCK] == sel,
++                        onHome = base.screens[HOME] == sel,
++                        modifier = Modifier.weight(1f),
++                        onClick = { onPick(sel) },
++                    )
++                }
++                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
++            }
++        }
++    }
++}
++
++/** One wallpaper or gradient: an outline and check when selected; where it is in use now. */
++@Composable
++private fun PictureTile(
++    item: ThemeWallpapers.Item,
++    pictures: Int,
++    named: Boolean,
++    prefix: String,
++    selected: Boolean,
++    onLock: Boolean,
++    onHome: Boolean,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val selectedText = stringResource(R.string.homar_wallpapers_selected)
++    val lockText = stringResource(R.string.homar_wallpapers_on_lock)
++    val homeText = stringResource(R.string.homar_wallpapers_on_home)
++    val gradientText = stringResource(R.string.homar_wallpapers_gradient)
++    Tile(
++        selected = selected,
++        modifier = modifier
++            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
++            .clearAndSetSemantics {
++                role = Role.RadioButton
++                this.selected = selected
++                contentDescription = prefix + (if (named) "${item.name} $gradientText" else item.name) +
++                    (if (selected) ", $selectedText" else "") +
++                    (if (onLock) ", $lockText" else "") +
++                    (if (onHome) ", $homeText" else "")
++            },
++    ) {
++        Thumbnail(item.thumb, pictures, Modifier.fillMaxSize())
++        if (named) {
++            Text(
++                text = item.name,
++                color = Color.White,
++                style = MaterialTheme.typography.labelMedium.copy(shadow = textShadow()),
++                textAlign = TextAlign.Center,
++                modifier = Modifier
++                    .align(Alignment.BottomCenter)
++                    .fillMaxWidth()
++                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.35f))))
++                    .padding(top = 14.dp, bottom = 8.dp),
++            )
++        }
++        if (onLock || onHome) {
++            Row(
++                horizontalArrangement = Arrangement.spacedBy(2.dp),
++                modifier = Modifier
++                    .align(Alignment.TopStart)
++                    .padding(6.dp)
++                    .clip(CircleShape)
++                    .background(Color.Black.copy(alpha = 0.45f))
++                    .padding(horizontal = 6.dp, vertical = 3.dp),
++            ) {
++                if (onLock) Icon(Icons.Rounded.Lock, null, tint = Color.White, modifier = Modifier.size(12.dp))
++                if (onHome) Icon(Icons.Rounded.Home, null, tint = Color.White, modifier = Modifier.size(12.dp))
++            }
++        }
++    }
++}
++
++/** A tall rounded tile with the selection ring and check mark. */
++@Composable
++private fun Tile(selected: Boolean, modifier: Modifier = Modifier, content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit) {
++    val accent = MaterialTheme.colorScheme.primary
++    val shape: Shape = RoundedCornerShape(if (selected) 20.dp else 14.dp)
++    Box(
++        modifier = modifier
++            .aspectRatio(9f / 19.5f)
++            .border(if (selected) 3.dp else 0.dp, if (selected) accent else Color.Transparent, RoundedCornerShape(20.dp))
++            .padding(if (selected) 5.dp else 0.dp)
++            .clip(shape)
++            .background(MaterialTheme.colorScheme.surfaceVariant),
++    ) {
++        content()
++        if (selected) {
++            Box(
++                contentAlignment = Alignment.Center,
++                modifier = Modifier
++                    .align(Alignment.TopEnd)
++                    .padding(6.dp)
++                    .size(22.dp)
++                    .clip(CircleShape)
++                    .background(accent),
++            ) {
++                Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(15.dp))
++            }
++        }
++    }
++}
++
++/** Darken / lighten: a black (+) or white (-) layer over this panel's screen(s), -100..100 %. */
++@Composable
++private fun LayerSlider(value: Int, enabled: Boolean, description: String, onChange: (Int) -> Unit) {
++    val label = stringResource(R.string.homar_wallpapers_layer)
++    val amount = if (value < 0) "−${-value}%" else "$value%"
++    Column(
++        modifier = Modifier
++            .fillMaxWidth()
++            .background(MaterialTheme.colorScheme.surfaceContainer)
++            .padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 6.dp),
++    ) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Text(
++                text = label,
++                style = MaterialTheme.typography.titleMedium,
++                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
++                modifier = Modifier.weight(1f),
++            )
++            Text(
++                text = amount,
++                style = MaterialTheme.typography.labelLarge,
++                fontWeight = FontWeight.SemiBold,
++                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
++            )
++        }
++        // the track runs from white (lighter) through clear to black (darker), as the layer does:
++        // drawn under the slider, whose own track is clear
++        val outline = MaterialTheme.colorScheme.outline
++        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth()) {
++            Box(
++                Modifier
++                    .fillMaxWidth()
++                    .padding(horizontal = 2.dp)
++                    .height(10.dp)
++                    .clip(CircleShape)
++                    .background(Brush.horizontalGradient(listOf(Color.White, Color(0xFF8A8A8A), Color.Black)))
++                    .border(1.dp, outline.copy(alpha = if (enabled) 0.6f else 0.25f), CircleShape),
++            )
++            Slider(
++                value = value.toFloat(),
++                onValueChange = { onChange(it.roundToInt().coerceIn(-100, 100)) },
++                valueRange = -100f..100f,
++                enabled = enabled,
++                colors = SliderDefaults.colors(
++                    activeTrackColor = Color.Transparent,
++                    inactiveTrackColor = Color.Transparent,
++                    disabledActiveTrackColor = Color.Transparent,
++                    disabledInactiveTrackColor = Color.Transparent,
++                    activeTickColor = Color.Transparent,
++                    inactiveTickColor = Color.Transparent,
++                    disabledActiveTickColor = Color.Transparent,
++                    disabledInactiveTickColor = Color.Transparent,
++                ),
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .semantics { contentDescription = description },
++            )
++        }
++        Row {
++            Text(
++                stringResource(R.string.homar_wallpapers_lighter),
++                style = MaterialTheme.typography.labelSmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.weight(1f),
++            )
++            Text(
++                stringResource(R.string.homar_wallpapers_darker),
++                style = MaterialTheme.typography.labelSmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        }
++    }
++}
++
++/** Apply and Discard at the bottom, with how the last Apply goes just above them. */
++@Composable
++private fun ApplyBar(
++    dirty: Boolean,
++    status: Pair<ImageVector?, String>?,
++    error: Boolean,
++    onDiscard: () -> Unit,
++    onApply: () -> Unit,
++) {
++    Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 3.dp) {
++        Column(modifier = Modifier.fillMaxWidth()) {
++            if (status != null) {
++                val color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
++                Row(
++                    verticalAlignment = Alignment.CenterVertically,
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .padding(start = 24.dp, end = 24.dp, top = 16.dp)
++                        .semantics(mergeDescendants = true) {},
++                ) {
++                    val (icon, text) = status
++                    if (icon != null) {
++                        Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
++                    } else {
++                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
++                    }
++                    Text(
++                        text = text,
++                        color = color,
++                        style = MaterialTheme.typography.bodyMedium,
++                        modifier = Modifier.padding(start = 12.dp),
++                    )
++                }
++            }
++            Row(
++                horizontalArrangement = Arrangement.spacedBy(12.dp),
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(horizontal = 16.dp, vertical = 12.dp),
++            ) {
++                OutlinedButton(enabled = dirty, onClick = onDiscard, modifier = Modifier.weight(1f)) {
++                    Text(stringResource(R.string.homar_wallpapers_discard))
++                }
++                Button(enabled = dirty, onClick = onApply, modifier = Modifier.weight(1f)) {
++                    Text(stringResource(R.string.homar_wallpapers_apply))
++                }
++            }
++            BottomSpacer()
++        }
++    }
++}
++
++@Composable
++private fun Notice(icon: ImageVector, text: String, error: Boolean = false) {
++    PreferenceGroup {
++        PreferenceTemplate(
++            title = {},
++            description = {
++                Text(
++                    text = text,
++                    color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            },
++            startWidget = {
++                Icon(
++                    imageVector = icon,
++                    contentDescription = null,
++                    tint = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            },
++            modifier = Modifier.fillMaxWidth(),
++        )
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index b5306af896..6607e03854 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -89,6 +89,10 @@ object LinkServer {
+         "launcher.widget_status" to Spec(setOf("id")),
+         "launcher.app_icons" to Spec(setOf("components", "size", "keys_only")),
+         "launcher.widget_previews" to Spec(setOf("providers", "size", "keys_only")),
++        // the "Wallpaper from Omarchy" screen (patch 0017), see ThemeWallpapers
++        "launcher.theme_wallpapers_set" to Spec(setOf("enabled", "theme", "current_id", "message", "target", "items", "gradients", "screens", "layer", "format", "wallpaper", "thumbs")),
++        "launcher.theme_wallpaper_choice" to Spec(emptySet()),
++        "launcher.theme_wallpaper_ack" to Spec(setOf("at", "state", "current_id", "message", "code")),
+         "launcher.layout_export" to Spec(setOf("via"), Kind.BLOB_OUT),
+         "launcher.layout_import" to Spec(setOf("db"), Kind.BLOB_IN),
+         "launcher.stage_file" to Spec(setOf("name"), Kind.STAGE),
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+index 55d0efd52f..2e4ea77af8 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
+ import androidx.core.content.getSystemService
+ import app.lawnchair.LawnchairApp
+ import app.lawnchair.LawnchairLauncher
++import app.lawnchair.omalawn.HomarWallpapersEntry
+ import app.lawnchair.preferences.getAdapter
+ import app.lawnchair.preferences.observeAsState
+ import app.lawnchair.preferences.preferenceManager
+@@ -147,6 +148,8 @@ fun PreferencesDashboard(
+                 isSelected = currentRoute is HomeScreen,
+             )
+ 
++            HomarWallpapersEntry() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
++
+             val isSmartspaceEnabled = prefs2.enableSmartspace.firstCached()
+             PreferenceCategory(
+                 label = stringResource(id = R.string.smartspace_widget),
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+index 155a9800cc..21633f407e 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+@@ -25,6 +25,7 @@ import app.lawnchair.ui.preferences.components.colorpreference.ColorPreferenceMo
+ import app.lawnchair.ui.preferences.components.colorpreference.ColorSelection
+ import app.lawnchair.ui.preferences.components.search.SearchProviderId
+ import app.lawnchair.ui.preferences.components.search.SearchProviderPreferenceScreen
++import app.lawnchair.omalawn.homarWallpapers
+ import app.lawnchair.ui.preferences.destinations.AppDrawerFoldersPreference
+ import app.lawnchair.ui.preferences.destinations.AppDrawerPreferences
+ import app.lawnchair.ui.preferences.destinations.BackupAndRestorePreference
+@@ -143,6 +144,7 @@ fun PreferenceNavigation(
+         composable<HomeScreen>(
+             deepLinks = getDeepLink(HomeScreen),
+         ) { HomeScreenPreferences() }
++        homarWallpapers() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
+         composable<HomeScreenGrid>(
+             deepLinks = getDeepLink(HomeScreenGrid),
+         ) { HomeScreenGridPreferences() }

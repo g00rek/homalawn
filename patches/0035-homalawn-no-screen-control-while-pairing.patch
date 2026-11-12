@@ -1,0 +1,138 @@
+From 3ae5003a400be4f341fa1eb60fc4fe9aab7286e6 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 07:49:11 +0100
+Subject: [PATCH] Homa Lawn: no Screen control while pairing is on screen
+ (patch 0035)
+
+A paired computer with Screen control on could ask to pair from a new key and tap Accept with an
+injected gesture. While the pairing screen is started, or any pair request is open, every screen.*
+call but screen.status is refused with pairing_open: taps, swipes, keys, typing, launching, and the
+tree and screenshot.
+---
+ .../omalawn/link/PairConfirmActivity.kt       |  1 +
+ .../src/app/lawnchair/omalawn/link/Pairing.kt |  3 ++
+ .../lawnchair/omalawn/link/PairingOnScreen.kt | 51 +++++++++++++++++++
+ .../omalawn/screen/ScreenCommands.kt          | 12 ++++-
+ 4 files changed, 66 insertions(+), 1 deletion(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/PairingOnScreen.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index ef31948ce0..c76f7d2adf 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -123,6 +123,7 @@ class PairConfirmActivity : ComponentActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        PairingOnScreen.watch(this) // Screen control stands still while this screen shows (patch 0035)
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
+         enableEdgeToEdge()
+         setContent { LawnchairTheme { PairDialog() } }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+index 01e48faf6a..e2dbc93f18 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+@@ -279,6 +279,9 @@ object Pairing {
+         if (token != null && outcome != ACCEPTED) finish(ctx, token, outcome)
+     }
+ 
++    /** A pair request is open (from `link.pair_request` until it ends): Screen control stands still. */
++    fun requestOpen(): Boolean = synchronized(this) { current != null }
++
+     /** Debug provider: the pending request's token (null when none). */
+     fun currentToken(): String? = synchronized(this) { current?.token }
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairingOnScreen.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairingOnScreen.kt
+new file mode 100644
+index 0000000000..e2b10866f9
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairingOnScreen.kt
+@@ -0,0 +1,51 @@
++package app.lawnchair.omalawn.link
++
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.LifecycleEventObserver
++import androidx.lifecycle.LifecycleOwner
++import app.lawnchair.omalawn.OmalawnError
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * Pairing needs a person's finger, so Screen control stands still while pairing is on screen.
++ *
++ * Screen control's gestures are injected by the accessibility service and reach the pairing
++ * screen as real, unobscured touches: without this, a paired computer with Screen control on could
++ * send a pair request from a new key and tap Accept itself. While [showing] is true, every
++ * `screen.*` call except `screen.status` is refused with [PAIRING_OPEN] (actions, and the tree and
++ * screenshot too, so the words cannot be read remotely either). [ScreenCommands] asks at its one
++ * dispatch point, after it holds the screen lock.
++ *
++ * [showing] is true while
++ * - a [PairConfirmActivity] is started (visible: resumed, or paused under something translucent);
++ *   counted from its own lifecycle events, which Android always balances (a screen destroyed while
++ *   resumed still passes ON_PAUSE and ON_STOP), and a killed process takes the count with it, so it
++ *   cannot stick; or
++ * - a pair request is open at all ([Pairing.requestOpen]: from `link.pair_request` until it is
++ *   accepted, rejected, dismissed, withdrawn or timed out), which covers the notification's Review
++ *   and Reject in the shade before the pairing screen is even open.
++ */
++object PairingOnScreen {
++    const val PAIRING_OPEN = "pairing_open"
++    const val MESSAGE = "Screen control is paused while the phone shows a pairing request; a person answers it on the phone."
++
++    private val started = AtomicInteger(0)
++
++    private val observer = LifecycleEventObserver { _, event ->
++        when (event) {
++            Lifecycle.Event.ON_START -> started.incrementAndGet()
++            Lifecycle.Event.ON_STOP -> started.updateAndGet { (it - 1).coerceAtLeast(0) }
++            else -> Unit
++        }
++    }
++
++    /** From [PairConfirmActivity.onCreate]: follow this screen's lifecycle. */
++    fun watch(owner: LifecycleOwner) = owner.lifecycle.addObserver(observer)
++
++    fun showing(): Boolean = started.get() > 0 || Pairing.requestOpen()
++
++    /** Refuses with [PAIRING_OPEN] while [showing]. */
++    fun refuseWhileShowing() {
++        if (showing()) throw OmalawnError(PAIRING_OPEN, MESSAGE)
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+index fb3ef1b955..471c64ddd2 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+@@ -21,6 +21,7 @@ import app.lawnchair.LawnchairAccessibilityService
+ import app.lawnchair.omalawn.Blob
+ import app.lawnchair.omalawn.OmalawnCommands
+ import app.lawnchair.omalawn.OmalawnError
++import app.lawnchair.omalawn.link.PairingOnScreen
+ import java.io.ByteArrayOutputStream
+ import java.util.concurrent.CountDownLatch
+ import java.util.concurrent.Executors
+@@ -36,6 +37,9 @@ import org.json.JSONObject
+  * events).
+  *
+  * Node ids ("n0", "n1", …) name the nodes of the last `screen.tree` and are valid until the next.
++ *
++ * While pairing is on screen every call but `screen.status` is refused (`pairing_open`,
++ * [PairingOnScreen]): accepting a computer takes a person's finger, never Screen control's.
+  */
+ object ScreenCommands {
+     const val SCREEN_OFF = "screen_off"
+@@ -98,7 +102,13 @@ object ScreenCommands {
+ 
+     private val ACTIONS = setOf("screen.tap", "screen.long_press", "screen.swipe", "screen.type", "screen.key")
+ 
+-    private fun act(ctx: Context, svc: LawnchairAccessibilityService, method: String, params: JSONObject): Any = when (method) {
++    private fun act(ctx: Context, svc: LawnchairAccessibilityService, method: String, params: JSONObject): Any {
++        // under the screen lock: an action that waited for it is checked when it would run
++        PairingOnScreen.refuseWhileShowing()
++        return perform(ctx, svc, method, params)
++    }
++
++    private fun perform(ctx: Context, svc: LawnchairAccessibilityService, method: String, params: JSONObject): Any = when (method) {
+         "screen.tree" -> tree(svc)
+         "screen.tap" -> {
+             val (x, y) = point(ctx, params)

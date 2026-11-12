@@ -1,0 +1,325 @@
+From 7071713eda050dcf3ad07545d1c2eb03e10050f9 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 22:06:03 +0200
+Subject: [PATCH] homalawn device geometry: one reading from the DeviceProfile,
+ in every state
+
+launcher.device_profile no longer measures the launcher's views, with a
+second, approximate sum when they are not laid out (just after an update,
+the phone locked, no launcher activity yet). It reports the portrait
+home screen's DeviceProfile - the object the Launcher activity lays out
+with - put through the same sums Workspace, CellLayout,
+ShortcutAndWidgetContainer and Hotseat make, so the reading is the same
+in every state. The old fallback took Launcher3's visual cellWidthPx for
+the layout cell and the full screen width for the dock, which squeezed
+the desktop preview's grid (w 0.7167 of the screen instead of 0.9583).
+The source field is gone with the second path, and so is the page
+indicator (the preview never draws it).
+
+The debug build's provider gets debug_home_views, which reads the views
+back for the device test that checks the two agree.
+---
+ .../app/lawnchair/omalawn/DeviceGeometry.kt   | 236 ++++++++++--------
+ .../omalawn/OmalawnControlProvider.kt         |   3 +
+ 2 files changed, 128 insertions(+), 111 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+index e43eaeb55d..5548c8a7fb 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+@@ -2,6 +2,7 @@ package app.lawnchair.omalawn
+ 
+ import android.content.Context
+ import android.graphics.Rect
++import android.view.Surface
+ import android.view.View
+ import com.android.launcher3.BubbleTextView
+ import com.android.launcher3.CellLayout
+@@ -11,142 +12,155 @@ import com.android.launcher3.Launcher
+ import com.android.launcher3.util.Executors.MAIN_EXECUTOR
+ import java.util.concurrent.FutureTask
+ import java.util.concurrent.TimeUnit
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.roundToInt
+ import org.json.JSONObject
+ 
+ /**
+- * `launcher.device_profile`: where the home screen really draws things, so the computer's preview
+- * can draw the same (patch 0021). Every length is in the phone's screen pixels, every position
++ * `launcher.device_profile`: where the home screen draws things, so the computer's preview can
++ * draw the same (patches 0021, 0024). Every length is in the phone's screen pixels, every position
+  * from the screen's top left corner.
+  *
+- * `{source, screen: {w, h, density}, insets: {left, top, right, bottom}, grid: {cols, rows},
++ * `{screen: {w, h, density}, insets: {left, top, right, bottom}, grid: {cols, rows},
+  * workspace: {x, y, w, h, cell_w, cell_h, gap_x, gap_y}, icon: {size, text_size, drawable_padding,
+  * top, labels}, hotseat: {x, y, w, h, cell_w, cell_h, gap_x, count, icon_size, icon_top},
+- * page_indicator: {x, y, w, h, visible, pages?}, folder_icon_size, widget_padding: {left, top, right,
+- * bottom}}`. `workspace` is the grid of cells (the cell layout's content, without its padding):
+- * cell (x, y) starts at `x + x * (cell_w + gap_x)`. `icon.top` is the icon's top inside its cell;
+- * the label starts `drawable_padding` below the icon. `source` says how it was read: `views` from
+- * the launcher's laid-out screen (exact), `profile` from Lawnchair's DeviceProfile alone (no
+- * launcher activity yet: the same sums, without what only the views know).
++ * folder_icon_size, widget_padding: {left, top, right, bottom}}`. `workspace` is the grid of cells
++ * (the cell layout's content, without its padding): cell (x, y) starts at
++ * `x + x * (cell_w + gap_x)`. `icon.top` is the icon's top inside its cell; the label starts
++ * `drawable_padding` below the icon. `hotseat` is the dock's grid of cells, the same way.
++ *
++ * One reading in every state (launcher shown, phone locked, launcher process just started after
++ * an update, no launcher activity yet): it is the portrait home screen's [DeviceProfile], the very
++ * object the Launcher activity lays its views out with (Launcher.initDeviceProfile takes it from
++ * InvariantDeviceProfile, LauncherRootView only updates its insets), put through the same sums
++ * those views make: Workspace (padding `workspacePadding`, pages inside the insets, PagedView),
++ * CellLayout (padding `cellLayoutPaddingPx`, cells by DeviceProfile.calculateCellWidth/Height,
++ * the border space between them), ShortcutAndWidgetContainer (an icon's top padding in its cell)
++ * and Hotseat (`hotseatBarSizePx` at the bottom, padding getHotseatLayoutPadding, Lawnchair's dock
++ * pages and their indicator). Nothing is read from laid-out views, so nothing depends on whether
++ * they exist; [views] (debug builds only) reads them back for the device test that proves it.
+  */
+ object DeviceGeometry {
+     private const val WAIT_S = 5L
+ 
+-    fun read(ctx: Context): JSONObject {
+-        val task = FutureTask { onMain(ctx) }
++    /** Hotseat.DOCK_PAGE_INDICATOR_HEIGHT_DP (private there): the dock's page dots below its pages. */
++    private const val DOCK_PAGE_INDICATOR_HEIGHT_DP = 8
++
++    fun read(ctx: Context): JSONObject = onMain { measure(ctx, portrait(ctx)) }
++
++    private fun <T> onMain(block: () -> T): T {
++        val task = FutureTask { block() }
+         MAIN_EXECUTOR.execute(task)
+         return task.get(WAIT_S, TimeUnit.SECONDS)
+     }
+ 
+-    private fun onMain(ctx: Context): JSONObject {
+-        val launcher = Launcher.ACTIVITY_TRACKER.getCreatedContext<Launcher>()
+-        val dp: DeviceProfile = launcher?.deviceProfile ?: InvariantDeviceProfile.INSTANCE.get(ctx).getDeviceProfile(ctx)
+-        val insets = dp.insets
+-        val out = JSONObject()
+-            .put("screen", JSONObject().put("w", dp.deviceProperties.widthPx).put("h", dp.deviceProperties.heightPx).put("density", ctx.resources.displayMetrics.density))
+-            .put("insets", rect(insets))
+-            .put("grid", JSONObject().put("cols", dp.inv.numColumns).put("rows", dp.inv.numRows))
+-            .put("folder_icon_size", dp.folderIconSizePx)
+-            .put("widget_padding", rect(dp.widgetPadding))
+-        val page = launcher?.workspace?.let { w -> (w.getPageAt(w.currentPage) ?: w.getPageAt(0)) as? CellLayout }
+-        val viewsReady = page != null && page.shortcutsAndWidgets.width > 0 && launcher.hotseat.width > 0
+-        if (viewsReady) {
+-            out.put("source", "views")
+-            out.put("workspace", cells(page!!))
+-            val sample = (0 until page.shortcutsAndWidgets.childCount)
+-                .map { page.shortcutsAndWidgets.getChildAt(it) }
+-                .firstOrNull { it is BubbleTextView } as BubbleTextView?
+-            out.put("icon", icon(dp, sample))
+-            val hot = launcher!!.hotseat
+-            // the dock's first page (Lawnchair can page a long dock): its cells, else the dock itself
+-            val hotLayout: CellLayout? = hot.currentPageLayout ?: hot.getPageAt(0)
+-            val hotCells = hotLayout?.shortcutsAndWidgets
+-            val h = if (hotLayout != null) cells(hotLayout) else box(hot)
+-            val hotIcon = hotCells?.let { c -> (0 until c.childCount).map { c.getChildAt(it) }.firstOrNull { it is BubbleTextView } } as BubbleTextView?
+-            val b = Rect()
+-            hotIcon?.getIconBounds(b)
+-            out.put(
+-                "hotseat",
+-                h.put("count", dp.numShownHotseatIcons)
+-                    .put("icon_size", hotIcon?.iconSize ?: dp.iconSizePx)
+-                    .put("icon_top", if (hotIcon != null) b.top else (dp.hotseatCellHeightPx - dp.iconSizePx) / 2),
+-            )
+-            val ind = launcher.workspace.pageIndicator as? View
+-            out.put(
+-                "page_indicator",
+-                (if (ind != null) box(ind) else JSONObject().put("x", 0).put("y", 0).put("w", 0).put("h", 0))
+-                    .put("visible", ind != null && ind.isShown && ind.alpha > 0.01f && ind.height > 0)
+-                    .put("pages", launcher.workspace.pageCount),
+-            )
+-        } else {
+-            out.put("source", "profile")
+-            profile(dp, out)
+-        }
+-        return out
++    /** The profile the home screen uses upright, whatever way the phone is held right now. */
++    private fun portrait(ctx: Context): DeviceProfile {
++        val idp = InvariantDeviceProfile.INSTANCE.get(ctx)
++        val now = idp.getDeviceProfile(ctx)
++        val p = now.deviceProperties
++        if (!p.isLandscape) return now
++        return idp.getBestMatch(
++            min(p.widthPx, p.heightPx).toFloat(), max(p.widthPx, p.heightPx).toFloat(), Surface.ROTATION_0,
++        )
+     }
+ 
+-    /** A cell layout's grid of cells, on the screen. */
+-    private fun cells(c: CellLayout): JSONObject {
+-        val content = c.shortcutsAndWidgets
+-        val p = IntArray(2)
+-        content.getLocationOnScreen(p)
+-        // the space between cells, from what the layout itself measured
+-        val gx = if (c.countX > 1) (content.width - c.countX * c.cellWidth) / (c.countX - 1) else 0
+-        val gy = if (c.countY > 1) (content.height - c.countY * c.cellHeight) / (c.countY - 1) else 0
+-        return JSONObject().put("x", p[0]).put("y", p[1]).put("w", content.width).put("h", content.height)
+-            .put("cell_w", c.cellWidth).put("cell_h", c.cellHeight)
+-            .put("gap_x", maxOf(0, gx)).put("gap_y", maxOf(0, gy))
++    private fun measure(ctx: Context, dp: DeviceProfile): JSONObject {
++        val w = dp.deviceProperties.widthPx
++        val h = dp.deviceProperties.heightPx
++        val ins = dp.insets
++        val cols = dp.inv.numColumns
++        val rows = dp.inv.numRows
++
++        // Workspace: full screen, padded by workspacePadding; PagedView lays its pages out inside
++        // the insets (getPageWidthSize, onMeasure); each CellLayout pads by cellLayoutPaddingPx.
++        val wp = dp.workspacePadding
++        val clp = dp.cellLayoutPaddingPx
++        val pageW = (w - ins.left - ins.right - wp.left - wp.right) / dp.panelCount
++        val pageH = h - ins.top - ins.bottom - wp.top - wp.bottom
++        val gridW = pageW - clp.left - clp.right
++        val gridH = pageH - clp.top - clp.bottom
++        val bx = dp.cellLayoutBorderSpacePx.x
++        val by = dp.cellLayoutBorderSpacePx.y
++        val cellW = DeviceProfile.calculateCellWidth(gridW, bx, cols)
++        val cellH = DeviceProfile.calculateCellHeight(gridH, by, rows)
++        val workspace = JSONObject()
++            .put("x", ins.left + wp.left + clp.left).put("y", ins.top + wp.top + clp.top)
++            .put("w", gridW).put("h", gridH).put("cell_w", cellW).put("cell_h", cellH)
++            .put("gap_x", bx).put("gap_y", by)
++        // ShortcutAndWidgetContainer.measureChild: an icon's top padding in its workspace cell
++        val iconTop = if (dp.cellYPaddingPx >= 0) dp.cellYPaddingPx
++        else max(0f, (cellH - min(gridH, dp.getCellContentHeight(CellLayout.WORKSPACE))) / 2f).toInt()
++
++        // Hotseat: hotseatBarSizePx at the screen's bottom, padded by getHotseatLayoutPadding; its
++        // pages (Lawnchair: numHotseatPages, each numShownHotseatIcons x numHotseatRows) fill it,
++        // less the dots below them when there is more than one page.
++        val hp = dp.getHotseatLayoutPadding(ctx)
++        val barY = h - dp.hotseatBarSizePx
++        val dots = if (dp.numHotseatPages > 1) (DOCK_PAGE_INDICATOR_HEIGHT_DP * ctx.resources.displayMetrics.density).roundToInt() else 0
++        val dockW = w - hp.left - hp.right
++        val dockH = max(0, dp.hotseatBarSizePx - hp.top - hp.bottom - dots)
++        val n = max(1, dp.numShownHotseatIcons)
++        val dockCellW = DeviceProfile.calculateCellWidth(dockW, dp.hotseatBorderSpace, n)
++        val dockCellH = DeviceProfile.calculateCellHeight(dockH, dp.hotseatBorderSpace, max(1, dp.numHotseatRows))
++        val dockIconTop = max(0f, (dockCellH - min(dockH, dp.getCellContentHeight(CellLayout.HOTSEAT))) / 2f).toInt()
++
++        return JSONObject()
++            .put("screen", JSONObject().put("w", w).put("h", h).put("density", ctx.resources.displayMetrics.density))
++            .put("insets", rect(ins))
++            .put("grid", JSONObject().put("cols", cols).put("rows", rows))
++            .put("workspace", workspace)
++            .put(
++                "icon",
++                JSONObject().put("size", dp.iconSizePx).put("text_size", dp.iconTextSizePx)
++                    .put("drawable_padding", dp.iconDrawablePaddingPx).put("top", iconTop)
++                    .put("labels", dp.iconTextSizePx > 0),
++            )
++            .put(
++                "hotseat",
++                JSONObject().put("x", hp.left).put("y", barY + hp.top).put("w", dockW).put("h", dockH)
++                    .put("cell_w", dockCellW).put("cell_h", dockCellH).put("gap_x", dp.hotseatBorderSpace)
++                    .put("count", dp.numShownHotseatIcons)
++                    .put("icon_size", dp.iconSizePx).put("icon_top", dockIconTop),
++            )
++            .put("folder_icon_size", dp.folderIconSizePx)
++            .put("widget_padding", rect(dp.widgetPadding))
+     }
+ 
++    /**
++     * Debug builds only (the provider's `debug_home_views`): the same numbers read back from the
++     * Launcher's laid-out views (positions on the screen), for the device test that proves [read]
++     * equals them. Null while there is no launcher activity or its views are not laid out.
++     */
++    fun views(): JSONObject? = onMain {
++        val launcher = Launcher.ACTIVITY_TRACKER.getCreatedContext<Launcher>() ?: return@onMain null
++        val ws = launcher.workspace ?: return@onMain null
++        val page = (ws.getPageAt(ws.currentPage) ?: ws.getPageAt(0)) as? CellLayout ?: return@onMain null
++        val dock = launcher.hotseat?.let { it.currentPageLayout ?: it.getPageAt(0) } ?: return@onMain null
++        if (page.shortcutsAndWidgets.width <= 0 || dock.shortcutsAndWidgets.width <= 0) return@onMain null
++        fun firstIcon(c: CellLayout) = (0 until c.shortcutsAndWidgets.childCount)
++            .map { c.shortcutsAndWidgets.getChildAt(it) }.firstOrNull { it is BubbleTextView } as BubbleTextView?
++        fun iconOf(v: BubbleTextView?): JSONObject? = v?.let {
++            val b = Rect()
++            it.getIconBounds(b)
++            JSONObject().put("size", it.iconSize).put("top", b.top).put("cell", box(it))
++        }
++        JSONObject()
++            .put("workspace", cells(page)).put("icon", iconOf(firstIcon(page)))
++            .put("hotseat", cells(dock)).put("dock_icon", iconOf(firstIcon(dock)))
++            .put("insets", rect(launcher.deviceProfile.insets))
++    }
++
++    private fun cells(c: CellLayout): JSONObject = box(c.shortcutsAndWidgets)
++        .put("cell_w", c.cellWidth).put("cell_h", c.cellHeight).put("cols", c.countX).put("rows", c.countY)
++
+     private fun box(v: View): JSONObject {
+         val p = IntArray(2)
+         v.getLocationOnScreen(p)
+         return JSONObject().put("x", p[0]).put("y", p[1]).put("w", v.width).put("h", v.height)
+     }
+ 
+-    private fun icon(dp: DeviceProfile, sample: BubbleTextView?): JSONObject {
+-        val b = Rect()
+-        sample?.getIconBounds(b)
+-        return JSONObject()
+-            .put("size", sample?.iconSize ?: dp.iconSizePx)
+-            .put("text_size", dp.iconTextSizePx)
+-            .put("drawable_padding", dp.iconDrawablePaddingPx)
+-            .put("top", if (sample != null) b.top else maxOf(0, dp.cellYPaddingPx))
+-            .put("labels", dp.iconTextSizePx > 0)
+-    }
+-
+-    /** Without laid-out views: Launcher3's own sums (insets + workspace padding + cell layout padding). */
+-    private fun profile(dp: DeviceProfile, out: JSONObject) {
+-        val ins = dp.insets
+-        val cols = dp.inv.numColumns
+-        val rows = dp.inv.numRows
+-        val bx = dp.cellLayoutBorderSpacePx.x
+-        val by = dp.cellLayoutBorderSpacePx.y
+-        val x = ins.left + dp.workspacePadding.left + dp.cellLayoutPaddingPx.left
+-        val y = ins.top + dp.workspacePadding.top + dp.cellLayoutPaddingPx.top
+-        out.put(
+-            "workspace",
+-            JSONObject().put("x", x).put("y", y)
+-                .put("w", cols * dp.cellWidthPx + (cols - 1) * bx).put("h", rows * dp.cellHeightPx + (rows - 1) * by)
+-                .put("cell_w", dp.cellWidthPx).put("cell_h", dp.cellHeightPx).put("gap_x", bx).put("gap_y", by),
+-        )
+-        out.put("icon", icon(dp, null))
+-        val n = maxOf(1, dp.numShownHotseatIcons)
+-        val hy = dp.deviceProperties.heightPx - dp.hotseatBarSizePx
+-        val hw = dp.deviceProperties.widthPx - ins.left - ins.right
+-        out.put(
+-            "hotseat",
+-            JSONObject().put("x", ins.left).put("y", hy).put("w", hw).put("h", dp.hotseatCellHeightPx)
+-                .put("cell_w", (hw - (n - 1) * dp.hotseatBorderSpace) / n).put("cell_h", dp.hotseatCellHeightPx)
+-                .put("gap_x", dp.hotseatBorderSpace).put("count", dp.numShownHotseatIcons)
+-                .put("icon_size", dp.iconSizePx).put("icon_top", (dp.hotseatCellHeightPx - dp.iconSizePx) / 2),
+-        )
+-        out.put(
+-            "page_indicator",
+-            JSONObject().put("x", 0).put("y", hy - dp.workspacePageIndicatorHeight).put("w", dp.deviceProperties.widthPx)
+-                .put("h", dp.workspacePageIndicatorHeight).put("visible", dp.workspacePageIndicatorHeight > 0),
+-        )
+-    }
+-
+     private fun rect(r: Rect): JSONObject =
+         JSONObject().put("left", r.left).put("top", r.top).put("right", r.right).put("bottom", r.bottom)
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 9b21863bd7..449ca1c614 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -76,6 +76,8 @@ class OmalawnControlProvider : ContentProvider() {
+      * last outcome `launcher.update_status` reports.
+      * `debug_update_require_user_action` "1" makes the next self-installs ask for the user
+      * (USER_ACTION_REQUIRED), "0" puts the silent path back; in memory only.
++     * `debug_home_views` reads the home screen's cells, dock and an icon back from the launcher's
++     * laid-out views (`{}` without them), to check `launcher.device_profile` against (patch 0024).
+      */
+     private fun debug(ctx: Context, method: String, arg: String?, extras: Bundle?): Bundle {
+         if (!BuildConfig.DEBUG) return fail("unknown method $method")
+@@ -102,6 +104,7 @@ class OmalawnControlProvider : ContentProvider() {
+                     return ok(linkState(ctx))
+                 }
+                 "debug_link_state" -> return ok(linkState(ctx))
++                "debug_home_views" -> return ok(DeviceGeometry.views() ?: JSONObject())
+                 "debug_update_reset" -> {
+                     OmalawnUpdate.afterUpdate(ctx)
+                     OmalawnUpdate.clearStatus(ctx)

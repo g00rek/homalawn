@@ -1,0 +1,811 @@
+From 0bca2fee5d9b80cbbad7d58ddc81a9892f61660c Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 23 Oct 2026 14:13:32 +0200
+Subject: [PATCH] homalawn computers: the link knows the calling computer; Pins
+ is a list with last seen and forget tombstones
+
+Every link command now carries the calling computer's fingerprint. Pins keeps name, added and
+last seen (written at most once a minute) per computer, lists them, and forget() removes one,
+leaves a tombstone (newest 64) and tells the removal listeners; a computer that unpairs itself
+leaves no tombstone but also notifies the listeners. Pairing again clears the tombstone. An
+unpaired hello and the not_paired error say "forgotten" for a tombstoned computer. Debug hooks
+debug_computers and debug_forget.
+---
+ lawnchair/res/values/homar_strings.xml        |   6 +-
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  19 +-
+ .../omalawn/OmalawnControlProvider.kt         |  14 ++
+ .../lawnchair/omalawn/link/ComputersEntry.kt  |  19 +-
+ .../lawnchair/omalawn/link/ComputersScreen.kt | 195 ++++++++++++++++++
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  89 +++++---
+ .../omalawn/link/PairConfirmActivity.kt       |  27 +--
+ .../src/app/lawnchair/omalawn/link/Pairing.kt |   2 +-
+ .../src/app/lawnchair/omalawn/link/Pins.kt    | 102 +++++++--
+ .../navigation/PreferenceNavigation.kt        |   2 +
+ 10 files changed, 379 insertions(+), 96 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index 99708b14d2..0af9089a3a 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -2,9 +2,9 @@
+ <resources>
+     <!-- gesture option: app search screen with the keyboard at once, without the app drawer first -->
+     <string name="homar_gesture_search">Search (instant)</string>
+-    <!-- settings: the pairing screen, the way in when the home screen cannot be showing -->
+-    <string name="homar_computers_label">Pair a computer</string>
+-    <string name="homar_computers_description">Let a computer with Homa Lawn reach this phone, or forget the paired ones</string>
++    <!-- settings: the paired computers, pairing another and forgetting them (patch 0030) -->
++    <string name="homar_computers_label">Computers</string>
++    <string name="homar_computers_description">See the computers paired with this phone, pair another or forget one</string>
+     <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017) -->
+     <string name="homar_wallpapers_label">Wallpaper from Omarchy</string>
+     <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 6edad96b10..beaf51afda 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -53,9 +53,10 @@ object OmalawnCommands {
+      * [paired] is what the caller's own authentication decided; only `link.hello` reports it.
+      * Methods in [SERIAL] (layout, preferences, wallpaper, staged files) run one at a time across
+      * every caller, so concurrent link connections and the provider never interleave writes.
++     * [caller] is the calling computer's certificate fingerprint (null from the adb provider).
+      */
+-    fun dispatch(ctx: Context, method: String, params: JSONObject, paired: Boolean = false): Any =
+-        if (method in SERIAL) serially { run(ctx, method, params, paired) } else run(ctx, method, params, paired)
++    fun dispatch(ctx: Context, method: String, params: JSONObject, paired: Boolean = false, caller: String? = null): Any =
++        if (method in SERIAL) serially { run(ctx, method, params, paired, caller) } else run(ctx, method, params, paired, caller)
+ 
+     private val SERIAL = setOf(
+         "launcher.pref_set",
+@@ -81,10 +82,10 @@ object OmalawnCommands {
+         }
+     }
+ 
+-    private fun run(ctx: Context, method: String, params: JSONObject, paired: Boolean): Any = try {
++    private fun run(ctx: Context, method: String, params: JSONObject, paired: Boolean, caller: String?): Any = try {
+         when (method) {
+             "link.ping" -> JSONObject().put("t", System.currentTimeMillis())
+-            "link.hello" -> hello(ctx, paired)
++            "link.hello" -> hello(ctx, paired, caller)
+             "launcher.apps_list" -> appsList(ctx)
+             "launcher.ping" -> ping(ctx).put("installed_at", ThemeWallpapers.installedAt(ctx)) // patch 0017
+             // starts the home screen load if nothing else will (no launcher activity), waits a
+@@ -168,10 +169,14 @@ object OmalawnCommands {
+         }
+     }
+ 
+-    /** An unpaired computer learns only that it is not paired and the protocol version. */
+-    private fun hello(ctx: Context, paired: Boolean): JSONObject {
++    /** An unpaired computer learns only that it is not paired, the protocol version and whether the
++     *  phone forgot it. */
++    private fun hello(ctx: Context, paired: Boolean, caller: String?): JSONObject {
+         val o = JSONObject().put("paired", paired).put("v", LINK_VERSION)
+-        if (!paired) return o
++        if (!paired) {
++            if (caller != null && app.lawnchair.omalawn.link.Pins.isForgotten(ctx, caller)) o.put("forgotten", true)
++            return o
++        }
+         return o.put("device", Build.MODEL)
+             .put("name", Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)
+             .put("fp", Identity.fingerprint())
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 449ca1c614..354b538368 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -63,6 +63,8 @@ class OmalawnControlProvider : ContentProvider() {
+      * `debug_pair_legacy_accept` sends the old notification Accept (a service intent) for the
+      * pending request, as an app with notification access could; it must pin nothing.
+      * `debug_pin <fp> [name=…]` and `debug_unpin <fp>` add/remove a link pin without pairing;
++     * `debug_forget <fp>` forgets a computer as the phone does (a tombstone is left);
++     * `debug_computers` lists them (`{"computers":[{fp,name,added,seen,online}]}`).
+      * `debug_pair_reset` forgets the pairing rate window and cool-down; `debug_pair_fire_stale` fires
+      * the Review action of the last ended pairing (must be dead), `debug_pair_fire_current` the
+      * pending one's (opens the confirmation screen, pins nothing); `debug_sas` (extras phone, desktop,
+@@ -85,6 +87,18 @@ class OmalawnControlProvider : ContentProvider() {
+             when (method) {
+                 "debug_pin" -> Pins.add(ctx, arg ?: return fail("fingerprint required"), extras?.getString("name") ?: "debug")
+                 "debug_unpin" -> Pins.remove(ctx, arg ?: return fail("fingerprint required"))
++                "debug_forget" -> Pins.forget(ctx, arg ?: return fail("fingerprint required"))
++                "debug_computers" -> return ok(
++                    JSONObject().put(
++                        "computers",
++                        org.json.JSONArray().apply {
++                            val online = LinkServer.connectedFps()
++                            Pins.list(ctx).forEach {
++                                put(JSONObject().put("fp", it.fp).put("name", it.name).put("added", it.added).put("seen", it.seen).put("online", it.fp in online))
++                            }
++                        },
++                    ),
++                )
+                 "debug_pair_reset" -> Pairing.resetRateLimit()
+                 "debug_allow_local_pairing" -> {
+                     val on = when (arg) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+index 0d9bc2aa29..43b76fd6f9 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+@@ -1,31 +1,24 @@
+ package app.lawnchair.omalawn.link
+ 
+-import android.content.Intent
+ import androidx.compose.runtime.Composable
+-import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.res.stringResource
++import app.lawnchair.ui.preferences.LocalNavController
+ import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
+ import com.android.launcher3.R
+ 
+ /**
+- * "Computers" in Homa Lawn's settings: opens the pairing screen ([PairConfirmActivity.ACTION_WAIT]:
+- * "Waiting for a computer…", pairing open while it shows, and "Forget all computers"). The way in
++ * "Computers" in Homa Lawn's settings: opens [ComputersScreen] (the paired computers, Forget, and
++ * "Pair a computer", which opens the pairing screen, [PairConfirmActivity.ACTION_WAIT]: the way in
+  * when the home screen cannot be showing; it was the status notification's "Pair a computer"
+- * until that notification went (2026-10-17).
++ * until that notification went, 2026-10-17).
+  */
+ @Composable
+ fun HomarComputersEntry() {
+-    val ctx = LocalContext.current
++    val nav = LocalNavController.current
+     PreferenceCategory(
+         label = stringResource(R.string.homar_computers_label),
+         description = stringResource(R.string.homar_computers_description),
+         iconResource = R.drawable.homar_ic_computer,
+-        onNavigate = {
+-            ctx.startActivity(
+-                Intent(ctx, PairConfirmActivity::class.java)
+-                    .setAction(PairConfirmActivity.ACTION_WAIT)
+-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+-            )
+-        },
++        onNavigate = { nav.navigate(HomarComputers) },
+     )
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+new file mode 100644
+index 0000000000..5be6dadb93
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+@@ -0,0 +1,195 @@
++// Adapted from Flux (https://github.com/bjarneo/flux), MIT License, Copyright (c) 2026 Bjarne Oeverli
++// (android/.../ui/ComputersScreen.kt and ui/ScreenKit.kt): a list of the paired computers with each one's
++// state and an unpair per computer; "last seen" in the words of Flux's agoText. Differences: Lawnchair's
++// preference rows instead of Flux's cards, Forget in a details dialog and a confirmation instead of a long press.
++package app.lawnchair.omalawn.link
++
++import android.content.Intent
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.unit.dp
++import androidx.navigation.NavGraphBuilder
++import androidx.navigation.compose.composable
++import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
++import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
++import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import kotlinx.serialization.Serializable
++
++/** The settings route of the "Computers" screen (patch 0030). */
++@Serializable
++data object HomarComputers
++
++/** Registers the screen in Lawnchair's settings graph (one line in PreferenceNavigation). */
++fun NavGraphBuilder.homarComputers() {
++    composable<HomarComputers> { ComputersScreen() }
++}
++
++/**
++ * Every paired computer with its state, "Pair a computer", and Forget (one, or all) behind a
++ * confirmation. Forgetting closes that computer's connections through [Pins]' removal listener, so
++ * nothing more is done here. The list follows [Pins] and [LinkServer] as they change.
++ */
++@Composable
++fun ComputersScreen() {
++    val ctx = LocalContext.current
++    val scope = rememberCoroutineScope()
++    var tick by remember { mutableIntStateOf(0) }
++    DisposableEffect(Unit) {
++        val l: () -> Unit = { tick++ }
++        Pins.onChange(l)
++        LinkServer.onChange(l)
++        onDispose {
++            Pins.removeListener(l)
++            LinkServer.removeListener(l)
++        }
++    }
++    val computers = remember(tick) { Pins.list(ctx) }
++    val online = remember(tick) { LinkServer.connectedFps() }
++    // only the fingerprint is held: the computer shown is always the live one, and a dialog for a
++    // computer forgotten elsewhere closes
++    var open by remember { mutableStateOf<String?>(null) }
++    var forgetting by remember { mutableStateOf<String?>(null) }
++    var forgettingAll by remember { mutableStateOf(false) }
++    // forgetting closes sockets and deletes files: off the main thread
++    fun inBackground(work: () -> Unit) {
++        scope.launch {
++            withContext(Dispatchers.IO) { work() }
++            tick++
++        }
++    }
++
++    PreferenceLayout(label = "Computers", backArrowVisible = true) {
++        PreferenceGroup(heading = "Paired computers") {
++            if (computers.isEmpty()) Text("No computer is paired.", Modifier.padding(16.dp))
++            computers.forEach { c ->
++                PreferenceTemplate(
++                    title = { Text(c.name.ifEmpty { "Computer" }) },
++                    description = { Text(statusLine(c, c.fp in online) + " · Paired " + date(c.added)) },
++                    startWidget = { if (c.fp in online) OnlineDot() },
++                    modifier = Modifier.clickable { open = c.fp },
++                )
++            }
++        }
++        PreferenceGroup {
++            PreferenceTemplate(
++                title = { Text("Pair a computer") },
++                modifier = Modifier.clickable {
++                    ctx.startActivity(
++                        Intent(ctx, PairConfirmActivity::class.java)
++                            .setAction(PairConfirmActivity.ACTION_WAIT)
++                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
++                    )
++                },
++            )
++            if (computers.isNotEmpty()) {
++                PreferenceTemplate(
++                    title = { Text("Forget all computers", color = MaterialTheme.colorScheme.error) },
++                    modifier = Modifier.clickable { forgettingAll = true },
++                )
++            }
++        }
++    }
++
++    open?.let { fp -> computers.firstOrNull { it.fp == fp } }?.let { c ->
++        AlertDialog(
++            onDismissRequest = { open = null },
++            title = { Text(c.name.ifEmpty { "Computer" }) },
++            text = {
++                Text(
++                    statusLine(c, c.fp in online) + "\nPaired " + date(c.added) + "\nFingerprint " + c.fp.take(16),
++                )
++            },
++            confirmButton = {
++                TextButton({ open = null; forgetting = c.fp }) {
++                    Text("Forget", color = MaterialTheme.colorScheme.error)
++                }
++            },
++            dismissButton = { TextButton({ open = null }) { Text("Close") } },
++        )
++    }
++    forgetting?.let { fp -> computers.firstOrNull { it.fp == fp } }?.let { c ->
++        val name = c.name.ifEmpty { "Computer" }
++        AlertDialog(
++            onDismissRequest = { forgetting = null },
++            title = { Text("Forget $name?") },
++            text = { Text("$name can no longer use this phone. It will be told the next time it connects.") },
++            confirmButton = {
++                TextButton({
++                    forgetting = null
++                    inBackground { Pins.forget(ctx.applicationContext, c.fp) }
++                }) { Text("Forget") }
++            },
++            dismissButton = { TextButton({ forgetting = null }) { Text("Cancel") } },
++        )
++    }
++    if (forgettingAll) {
++        AlertDialog(
++            onDismissRequest = { forgettingAll = false },
++            title = { Text("Forget all computers?") },
++            text = {
++                val n = computers.size
++                Text(
++                    "${if (n == 1) "The paired computer" else "All $n paired computers"} will no longer reach " +
++                        "this phone until paired again.",
++                )
++            },
++            confirmButton = {
++                TextButton({
++                    forgettingAll = false
++                    inBackground { Pins.forgetAll(ctx.applicationContext) }
++                }) { Text("Forget") }
++            },
++            dismissButton = { TextButton({ forgettingAll = false }) { Text("Cancel") } },
++        )
++    }
++}
++
++@Composable
++private fun OnlineDot() {
++    Box(Modifier.size(10.dp).background(Color(0xFF34A853), CircleShape))
++}
++
++private fun statusLine(c: Computer, online: Boolean): String = when {
++    online -> "Online now"
++    c.seen == 0L -> "Not seen yet"
++    else -> "Last seen " + ago(c.seen)
++}
++
++// English whatever the phone's language is (getRelativeTimeSpanString follows the language)
++private fun ago(ms: Long): String {
++    val m = (System.currentTimeMillis() - ms) / 60_000
++    return when {
++        m < 1 -> "just now"
++        m < 60 -> "$m min ago"
++        m < 1440 -> "${m / 60} h ago"
++        else -> "${m / 1440} days ago"
++    }
++}
++
++private fun date(ms: Long): String = if (ms == 0L) {
++    "?"
++} else {
++    java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.ENGLISH).format(java.util.Date(ms))
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 078708b6ee..c0d316bbd0 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -30,11 +30,13 @@ import org.json.JSONObject
+ 
+ /**
+  * The link: mutual TLS 1.3 on TCP 47100 (all interfaces), one thread per connection, at most
+- * [MAX_CONNECTIONS]. Any client certificate passes the handshake; what it may call is decided per
++ * [MAX_CONNECTIONS] paired. Any client certificate passes the handshake; what it may call is decided per
+  * request from [Pins]: a pinned computer gets every method below, an unpinned one only [OPEN].
+  *
+- * Slots: handshaking sockets (max [MAX_PENDING], oldest dropped), paired computers (max
+- * [MAX_CONNECTIONS]), unpaired ones (max [MAX_UNPAIRED], oldest evicted, each closed after
++ * Slots: handshaking sockets (max [MAX_PENDING], oldest dropped), paired connections (max
++ * [MAX_PER_COMPUTER] for each computer, its oldest dropped when it opens one more, and
++ * [MAX_CONNECTIONS] for all computers together; a computer that is forgotten or unpairs loses all
++ * of them, see [closeComputer]), unpaired ones (max [MAX_UNPAIRED], oldest evicted, each closed after
+  * [UNPAIRED_LIFETIME_MS]) and ONE pairing slot: an unpaired connection whose `link.pair_request`
+  * was accepted leaves the evictable unpaired queue, its 30 s close is replaced by the 120 s
+  * pairing deadline, and on Accept it is promoted to the paired set and stays open (on Reject,
+@@ -46,7 +48,8 @@ import org.json.JSONObject
+  */
+ object LinkServer {
+     const val PORT = 47100
+-    const val MAX_CONNECTIONS = 4 // paired computers
++    const val MAX_PER_COMPUTER = 4
++    const val MAX_CONNECTIONS = 16 // paired, all computers together
+     const val MAX_UNPAIRED = 2
+     private const val MAX_PENDING = 4 // sockets still in the TLS handshake
+     private const val HANDSHAKE_MS = 10_000L
+@@ -124,7 +127,7 @@ object LinkServer {
+     /** Slot bookkeeping, all under [slots]. */
+     private val slots = Any()
+     private val pending = ArrayDeque<Socket>() // accepted, TLS not finished; oldest first
+-    private val pairedConns = mutableMapOf<Socket, String>() // -> certificate fingerprint
++    private val pairedConns = linkedMapOf<Socket, String>() // -> certificate fingerprint; oldest first
+     private val unpairedConns = ArrayDeque<Socket>() // oldest first
+     private var pairingConn: Socket? = null // the one connection with a pending pair request
+     private val lifetimes = HashMap<Socket, ScheduledFuture<*>>() // unpaired lifetime / pairing deadline
+@@ -145,11 +148,12 @@ object LinkServer {
+     fun removeListener(l: () -> Unit) = listeners.remove(l)
+     private fun changed() = listeners.forEach { runCatching { it() } }
+ 
++    /** Fingerprints of the paired computers connected right now (each once). */
++    fun connectedFps(): Set<String> = synchronized(slots) { pairedConns.values.toSet() }
++
+     /** Names of the paired computers connected right now (each once). */
+-    fun connectedNames(ctx: Context): List<String> {
+-        val fps = synchronized(slots) { pairedConns.values.toSet() }
+-        return fps.mapNotNull { Pins.name(ctx, it)?.ifEmpty { null } }.sorted()
+-    }
++    fun connectedNames(ctx: Context): List<String> =
++        connectedFps().mapNotNull { Pins.name(ctx, it)?.ifEmpty { null } }.sorted()
+ 
+     @Volatile private var lastScreenUse = 0L // elapsedRealtime of the last screen.* call, 0 = never
+ 
+@@ -259,6 +263,30 @@ object LinkServer {
+         }
+     }
+ 
++    init {
++        Pins.onRemoved { fp -> closeComputer(fp) }
++    }
++
++    /** Closes every connection of computer [fp] (it was forgotten or unpaired itself). */
++    fun closeComputer(fp: String) {
++        val socks = synchronized(slots) { pairedConns.filterValues { it == fp }.keys.toList() }
++        socks.forEach { drop(it) }
++    }
++
++    /**
++     * Seats [s] among the paired connections of computer [fp]. Returns whether it got a slot and the
++     * connection to drop (that computer's oldest, when it already has [MAX_PER_COMPUTER]) or null.
++     * Call under [slots]; drop the returned socket outside it.
++     */
++    private fun seatPaired(s: Socket, fp: String): Pair<Boolean, Socket?> {
++        val mine = pairedConns.filterValues { it == fp }.keys
++        val evict = if (mine.size >= MAX_PER_COMPUTER) mine.first() else null
++        if (evict == null && pairedConns.size >= MAX_CONNECTIONS) return false to null
++        evict?.let { pairedConns.remove(it) }
++        pairedConns[s] = fp
++        return true to evict
++    }
++
+     private fun drop(s: Socket, ctx: Context? = null) {
+         var wasPaired = false
+         val wasPairing = synchronized(slots) {
+@@ -289,25 +317,28 @@ object LinkServer {
+     }
+ 
+     /**
+-     * The pairing on [s] ended. Accepted: [s] joins the paired set and keeps going (closed when the
+-     * set is full; the computer then simply dials again). Otherwise [s] is closed once `pair_wait`
++     * The pairing on [s] ended. Accepted: [s] joins the paired set and keeps going (closed when all
++     * [MAX_CONNECTIONS] are taken; the computer then simply dials again). Otherwise [s] is closed once `pair_wait`
+      * has answered, or after [PAIR_END_GRACE_MS] at the latest.
+      */
+     fun leavePairing(s: Socket, accepted: Boolean, fp: String) {
++        var evict: Socket? = null
+         val keep = synchronized(slots) {
+             if (pairingConn !== s) return@synchronized false
+             pairingConn = null
+             lifetimes.remove(s)?.cancel(false)
+-            if (accepted && pairedConns.size < MAX_CONNECTIONS) {
+-                pairedConns[s] = fp
+-                true
++            if (accepted) {
++                val (ok, old) = seatPaired(s, fp)
++                evict = old
++                ok
+             } else {
+                 false
+             }
+         }
++        evict?.let { drop(it) }
+         if (keep) changed()
+         if (!keep) {
+-            if (accepted) Log.w(TAG, "paired, but $MAX_CONNECTIONS computers are connected; closing so it dials again")
++            if (accepted) Log.w(TAG, "paired, but $MAX_CONNECTIONS connections are open; closing so it dials again")
+             closeLater(s, PAIR_END_GRACE_MS)
+         }
+     }
+@@ -316,17 +347,19 @@ object LinkServer {
+         timer.schedule({ runCatching { s.close() } }, ms, TimeUnit.MILLISECONDS)
+ 
+     /**
+-     * After TLS: a paired computer takes one of [MAX_CONNECTIONS] slots (refused when all are
+-     * taken); an unpaired one takes one of [MAX_UNPAIRED] (the oldest is dropped when full) and
+-     * lives at most [UNPAIRED_LIFETIME_MS], so strangers never use up a paired computer's slot.
++     * After TLS: a paired connection takes a slot of its computer (its oldest is dropped when it
++     * has [MAX_PER_COMPUTER]; refused when all [MAX_CONNECTIONS] are taken); an unpaired one takes
++     * one of [MAX_UNPAIRED] (the oldest is dropped when full) and lives at most
++     * [UNPAIRED_LIFETIME_MS], so strangers never use up a paired computer's slot.
+      */
+     private fun seat(s: Socket, paired: Boolean, fp: String): Boolean {
+         var evict: Socket? = null
+         val ok = synchronized(slots) {
+             if (!pending.remove(s)) return@synchronized false // dropped while handshaking
+             if (paired) {
+-                if (pairedConns.size >= MAX_CONNECTIONS) return@synchronized false
+-                pairedConns[s] = fp
++                val (ok, old) = seatPaired(s, fp)
++                evict = old
++                if (!ok) return@synchronized false
+             } else {
+                 unpairedConns.addLast(s)
+                 lifetimes[s] = closeLater(s, UNPAIRED_LIFETIME_MS)
+@@ -391,7 +424,8 @@ object LinkServer {
+         if (!paired && method !in OPEN) {
+             // the same answer whether or not the method exists, and the connection ends: any blob
+             // it meant to send is never read
+-            writer.error(id, NOT_PAIRED, "this computer is not paired with the phone")
++            val data = if (Pins.isForgotten(ctx, fp)) JSONObject().put("forgotten", true) else null
++            writer.error(id, NOT_PAIRED, "this computer is not paired with the phone", data)
+             return false
+         }
+         val spec = METHODS[method]
+@@ -429,11 +463,12 @@ object LinkServer {
+         ) {
+             noteScreenUse()
+         }
++        Pins.touch(ctx, fp) // paired here: a request that got this far is the computer being seen
+         try {
+             when (spec.kind) {
+-                Kind.PLAIN -> writer.result(id, OmalawnCommands.dispatch(ctx, method, params, paired))
++                Kind.PLAIN -> writer.result(id, OmalawnCommands.dispatch(ctx, method, params, paired, fp))
+                 Kind.BLOB_OUT -> {
+-                    val out = OmalawnCommands.dispatch(ctx, method, params, paired)
++                    val out = OmalawnCommands.dispatch(ctx, method, params, paired, fp)
+                     if (out is Blob) {
+                         writer.blob(id, out.bytes, out.meta)
+                         return true
+@@ -452,7 +487,7 @@ object LinkServer {
+                     val f = OmalawnCommands.stageFile(ctx, "import-${UUID.randomUUID()}.db", blob!!, internal = true)
+                     params.put("path", f.absolutePath)
+                     val r = try {
+-                        OmalawnCommands.dispatch(ctx, method, params, paired)
++                        OmalawnCommands.dispatch(ctx, method, params, paired, fp)
+                     } finally {
+                         f.delete() // the import deletes it too; this covers a refusal before it ran
+                     }
+@@ -462,7 +497,7 @@ object LinkServer {
+                     val f = OmalawnCommands.stageFile(ctx, "import-nova-${UUID.randomUUID()}.zip", blob!!, internal = true)
+                     params.put("path", f.absolutePath)
+                     val r = try {
+-                        OmalawnCommands.dispatch(ctx, method, params, paired) as JSONObject
++                        OmalawnCommands.dispatch(ctx, method, params, paired, fp) as JSONObject
+                     } finally {
+                         f.delete() // the conversion deletes it too; this covers a refusal before it ran
+                     }
+@@ -540,9 +575,9 @@ object LinkServer {
+                     return accepted // Reject/timeout: the phone hangs up after answering
+                 }
+                 "link.unpair" -> {
+-                    Pins.remove(ctx, conn.fp)
+                     Log.i(TAG, "a computer unpaired itself fp=${conn.fp.take(16)}")
+-                    writer.result(id, JSONObject().put("unpaired", true))
++                    writer.result(id, JSONObject().put("unpaired", true)) // before remove: it closes this socket
++                    Pins.remove(ctx, conn.fp)
+                     return false
+                 }
+             }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index 6431cea1d0..1cb9d02ea1 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -2,7 +2,6 @@ package app.lawnchair.omalawn.link
+ 
+ import android.annotation.SuppressLint
+ import android.app.Activity
+-import android.app.AlertDialog
+ import android.app.KeyguardManager
+ import android.content.Intent
+ import android.graphics.Typeface
+@@ -25,7 +24,7 @@ import android.widget.TextView
+  * Not exported, so only Lawnchair's own PendingIntents reach it. Two ways in:
+  *
+  * - "Pair a computer" in Homa Lawn's settings ([ACTION_WAIT]): the screen says "Waiting for a
+- *   computer…" (with "Forget all computers" while any is paired) and keeps the pairing window ([PairingGate]) open while it shows, at most
++ *   computer…" and keeps the pairing window ([PairingGate]) open while it shows, at most
+  *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, screen off) closes the window.
+  *   Tapping "Pair a computer" again only brings this one screen forward (singleTop). When a
+  *   computer's request arrives, the same screen switches in place to its name and four words
+@@ -140,33 +139,9 @@ class PairConfirmActivity : Activity() {
+             setOnClickListener { finish() }
+         })
+         root.addView(buttons)
+-        // the one place on the phone to forget every paired computer
+-        val paired = Pins.count(this)
+-        if (paired > 0) {
+-            root.addView(Button(this).apply {
+-                text = "Forget all computers"
+-                setOnClickListener { confirmForgetAll(paired) }
+-            })
+-        }
+         setContentView(root)
+     }
+ 
+-    private fun confirmForgetAll(paired: Int) {
+-        AlertDialog.Builder(this)
+-            .setTitle("Forget all computers?")
+-            .setMessage(
+-                "${if (paired == 1) "The paired computer" else "All $paired paired computers"} will no longer reach " +
+-                    "this phone until paired again.",
+-            )
+-            .setNegativeButton("Cancel", null)
+-            .setPositiveButton("Forget") { _, _ ->
+-                Pins.clear(applicationContext)
+-                Log.i(TAG, "all computers forgotten from the pairing screen")
+-                if (token == null) showWaiting("All computers forgotten.")
+-            }
+-            .show()
+-    }
+-
+     @SuppressLint("ClickableViewAccessibility")
+     private fun showRequest(t: String) {
+         val (name, words) = Pairing.pending(t) ?: return
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+index 3e9ebad280..010ec8c9e3 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+@@ -179,7 +179,7 @@ object Pairing {
+             Log.i(TAG, "pair request refused: the home screen is not showing and pairing is not open")
+             throw OmalawnError(
+                 PairingGate.PAIRING_CLOSED,
+-                "pairing is closed; open the home screen on the phone (or Pair a computer in Homa Lawn's settings)",
++                "pairing is closed; open the home screen on the phone (or Computers › Pair a computer in Homa Lawn's settings)",
+             )
+         }
+         if (PairingGate.isLocal(conn.inetAddress) && !PairingGate.localAllowed(ctx)) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
+index 43d40ecdde..8b75424294 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
+@@ -6,40 +6,61 @@ import java.io.File
+ import java.util.concurrent.CopyOnWriteArrayList
+ import org.json.JSONObject
+ 
++/** A computer allowed to use the link: [added] and [seen] are epoch milliseconds (0 = never seen). */
++data class Computer(val fp: String, val name: String, val added: Long, val seen: Long)
++
+ /**
+- * Computers allowed to use the link: certificate SHA-256 (lowercase hex) → name, kept in
+- * app-private no-backup storage (`no_backup/omalawn_link_pins.json`, 0600). Checked on every request,
+- * so forgetting a computer takes effect on its open connection too.
++ * Computers allowed to use the link: certificate SHA-256 (lowercase hex) → name, added and last seen,
++ * kept in app-private no-backup storage (`no_backup/omalawn_link_pins.json`, 0600). Checked on every
++ * request, so forgetting a computer takes effect on its open connection too. A computer the phone
++ * forgot leaves a tombstone (`omalawn_link_forgotten.json`, the newest [MAX_TOMBSTONES]) so it can be
++ * told when it next connects; pairing it again clears the tombstone. A computer that unpaired itself
++ * ([remove]) leaves none.
+  */
+ object Pins {
+     private val FP = Regex("[0-9a-f]{64}")
+     private val listeners = CopyOnWriteArrayList<() -> Unit>()
++    private val removalListeners = CopyOnWriteArrayList<(String) -> Unit>()
+     private var cache: JSONObject? = null
++    private var tombCache: JSONObject? = null
++
++    private const val MAX_TOMBSTONES = 64
++    private const val SEEN_EVERY_MS = 60_000L
+ 
+     private fun file(ctx: Context) = File(ctx.noBackupFilesDir, "omalawn_link_pins.json")
++    private fun tombFile(ctx: Context) = File(ctx.noBackupFilesDir, "omalawn_link_forgotten.json")
+ 
+-    @Synchronized
+-    private fun load(ctx: Context): JSONObject = cache ?: run {
+-        val f = file(ctx)
+-        val o = try {
+-            if (f.isFile) JSONObject(f.readText()) else JSONObject()
+-        } catch (_: Exception) {
+-            JSONObject()
+-        }
+-        cache = o
+-        o
++    private fun read(f: File): JSONObject = try {
++        if (f.isFile) JSONObject(f.readText()) else JSONObject()
++    } catch (_: Exception) {
++        JSONObject()
+     }
+ 
+-    @Synchronized
+-    private fun save(ctx: Context, o: JSONObject) {
+-        val f = file(ctx)
++    private fun write(f: File, o: JSONObject) {
+         val tmp = File(f.path + ".tmp")
+         tmp.writeText(o.toString())
+         Os.chmod(tmp.absolutePath, 0b110_000_000)
+-        if (!tmp.renameTo(f)) error("cannot save pins")
++        if (!tmp.renameTo(f)) error("cannot save ${f.name}")
++    }
++
++    @Synchronized
++    private fun load(ctx: Context): JSONObject = cache ?: read(file(ctx)).also { cache = it }
++
++    @Synchronized
++    private fun save(ctx: Context, o: JSONObject) {
++        write(file(ctx), o)
+         cache = o
+     }
+ 
++    @Synchronized
++    private fun loadTombs(ctx: Context): JSONObject = tombCache ?: read(tombFile(ctx)).also { tombCache = it }
++
++    @Synchronized
++    private fun saveTombs(ctx: Context, o: JSONObject) {
++        write(tombFile(ctx), o)
++        tombCache = o
++    }
++
+     fun isPinned(ctx: Context, fp: String) = synchronized(this) { load(ctx).has(fp) }
+ 
+     fun count(ctx: Context) = synchronized(this) { load(ctx).length() }
+@@ -52,10 +73,33 @@ object Pins {
+             val o = JSONObject(load(ctx).toString())
+             o.put(fp, JSONObject().put("name", name.take(64)).put("added", System.currentTimeMillis()))
+             save(ctx, o)
++            if (loadTombs(ctx).has(fp)) saveTombs(ctx, JSONObject(loadTombs(ctx).toString()).also { it.remove(fp) })
+         }
+         changed()
+     }
+ 
++    /** Pinned computers, by name. */
++    fun list(ctx: Context): List<Computer> = synchronized(this) {
++        val o = load(ctx)
++        o.keys().asSequence().map { fp ->
++            val e = o.optJSONObject(fp) ?: JSONObject()
++            Computer(fp, e.optString("name"), e.optLong("added"), e.optLong("seen"))
++        }.sortedBy { it.name.lowercase() }.toList()
++    }
++
++    /** Marks [fp] seen now; written to disk at most once a minute. */
++    fun touch(ctx: Context, fp: String) {
++        synchronized(this) {
++            val e = load(ctx).optJSONObject(fp) ?: return
++            val now = System.currentTimeMillis()
++            if (now - e.optLong("seen") < SEEN_EVERY_MS) return
++            val o = JSONObject(load(ctx).toString())
++            o.getJSONObject(fp).put("seen", now)
++            save(ctx, o)
++        }
++    }
++
++    /** The computer unpaired itself (`link.unpair`): no tombstone, but the removal listeners hear of it. */
+     fun remove(ctx: Context, fp: String) {
+         synchronized(this) {
+             val o = JSONObject(load(ctx).toString())
+@@ -63,14 +107,34 @@ object Pins {
+             save(ctx, o)
+         }
+         changed()
++        removed(fp)
+     }
+ 
+-    fun clear(ctx: Context) {
+-        synchronized(this) { save(ctx, JSONObject()) }
++    /** The phone forgets [fp]: removed, a tombstone left, the removal listeners told. Not pinned: nothing happens. */
++    fun forget(ctx: Context, fp: String) {
++        synchronized(this) {
++            if (!load(ctx).has(fp)) return
++            val o = JSONObject(load(ctx).toString())
++            o.remove(fp)
++            save(ctx, o)
++            val t = JSONObject(loadTombs(ctx).toString()).put(fp, System.currentTimeMillis())
++            while (t.length() > MAX_TOMBSTONES) t.remove(t.keys().asSequence().minBy { t.optLong(it) })
++            saveTombs(ctx, t)
++        }
+         changed()
++        removed(fp)
+     }
+ 
++    fun forgetAll(ctx: Context) = list(ctx).forEach { forget(ctx, it.fp) }
++
++    fun isForgotten(ctx: Context, fp: String) = synchronized(this) { loadTombs(ctx).has(fp) }
++
+     fun onChange(l: () -> Unit) = listeners.add(l)
+     fun removeListener(l: () -> Unit) = listeners.remove(l)
+     private fun changed() = listeners.forEach { runCatching { it() } }
++
++    /** Called with the fingerprint of every computer taken off the list, by [remove] and by [forget]. */
++    fun onRemoved(l: (String) -> Unit) = removalListeners.add(l)
++    fun removeRemovedListener(l: (String) -> Unit) = removalListeners.remove(l)
++    private fun removed(fp: String) = removalListeners.forEach { runCatching { it(fp) } }
+ }
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+index 65f9e7fcf4..1619db0ee7 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+@@ -26,6 +26,7 @@ import app.lawnchair.ui.preferences.components.colorpreference.ColorSelection
+ import app.lawnchair.ui.preferences.components.search.SearchProviderId
+ import app.lawnchair.ui.preferences.components.search.SearchProviderPreferenceScreen
+ import app.lawnchair.omalawn.homarWallpapers
++import app.lawnchair.omalawn.link.homarComputers
+ import app.lawnchair.ui.preferences.destinations.AppDrawerFoldersPreference
+ import app.lawnchair.ui.preferences.destinations.AppDrawerPreferences
+ import app.lawnchair.ui.preferences.destinations.BackupAndRestorePreference
+@@ -145,6 +146,7 @@ fun PreferenceNavigation(
+             deepLinks = getDeepLink(HomeScreen),
+         ) { HomeScreenPreferences() }
+         homarWallpapers() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
++        homarComputers() // Homa Lawn: Computers (patch 0030)
+         composable<HomeScreenGrid>(
+             deepLinks = getDeepLink(HomeScreenGrid),
+         ) { HomeScreenGridPreferences() }

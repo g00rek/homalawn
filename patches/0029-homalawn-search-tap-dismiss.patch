@@ -1,0 +1,151 @@
+From 6deee04b52743fb3dc00b6f40251278d439984a7 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Mon, 19 Oct 2026 17:17:57 +0200
+Subject: [PATCH] homalawn search tap dismiss: a tap on the empty search page
+ goes home
+
+In a "Search (instant)" session, a tap below the last result (or on a page with none),
+not on the search field, goes home. Upstream's search page swallows such taps: the results
+list fills the page and consumes them, and so does the drawer while searching. One hook in
+LauncherAllAppsContainerView.dispatchTouchEvent; the touch is never consumed.
+---
+ .../lawnchair/omalawn/HomarSearchGesture.kt   | 86 ++++++++++++++++++-
+ .../allapps/LauncherAllAppsContainerView.java |  8 ++
+ 2 files changed, 93 insertions(+), 1 deletion(-)
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt b/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
+index 092ef22640..f1c5ae5024 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
+@@ -1,5 +1,10 @@
+ package app.lawnchair.omalawn
+ 
++import android.graphics.Rect
++import android.view.MotionEvent
++import android.view.View
++import android.view.ViewConfiguration
++import android.view.ViewGroup
+ import app.lawnchair.LawnchairLauncher
+ import com.android.launcher3.LauncherState
+ import com.android.launcher3.allapps.ActivityAllAppsContainerView
+@@ -16,7 +21,9 @@ import com.android.launcher3.statemanager.StateManager
+  * is empty the page stays empty (or shows recent searches, if Lawnchair keeps them) instead of
+  * upstream's A-Z list, see [keepSearchPage]. Back from a search opened this way goes home, also
+  * with a query typed (upstream clears the query and drops to the A-Z list). With the keyboard up,
+- * Android's keyboard takes the first Back and only hides itself, as everywhere.
++ * Android's keyboard takes the first Back and only hides itself, as everywhere. A tap on the
++ * page's empty part (below the last result, or where there are none; not the search field) also
++ * goes home, see [onSearchTouch]; upstream's search page swallows such taps.
+  */
+ object HomarSearchGesture {
+     // the launcher whose drawer we opened in search mode, until it leaves ALL_APPS
+@@ -74,6 +81,83 @@ object HomarSearchGesture {
+         return true
+     }
+ 
++    // the tap being followed on the search page: where it went down, and whether it still counts
++    private var tapDownX = 0f
++    private var tapDownY = 0f
++    private var tapOnEmpty = false
++
++    /**
++     * Hook in LauncherAllAppsContainerView.dispatchTouchEvent, for every touch on the drawer (in
++     * the view's own coordinates). Upstream's search page swallows a tap that lands on no result:
++     * the results list fills the page below the field and consumes it, and so does the drawer
++     * itself while searching. In our session a tap (no move past the touch slop, released before
++     * a long press) that went down on the empty part of the page goes home. Never consumes the
++     * event, so scrolling, the swipe down that closes the drawer and taps on results and the
++     * field behave as upstream.
++     */
++    @JvmStatic
++    fun onSearchTouch(appsView: ActivityAllAppsContainerView<*>, ev: MotionEvent) {
++        when (ev.actionMasked) {
++            MotionEvent.ACTION_DOWN -> {
++                tapDownX = ev.x
++                tapDownY = ev.y
++                tapOnEmpty = inSession(appsView) && isOnEmptyPart(appsView, ev.x, ev.y)
++            }
++            MotionEvent.ACTION_MOVE -> if (tapOnEmpty) {
++                val slop = ViewConfiguration.get(appsView.context).scaledTouchSlop
++                if (Math.hypot((ev.x - tapDownX).toDouble(), (ev.y - tapDownY).toDouble()) > slop) {
++                    tapOnEmpty = false
++                }
++            }
++            MotionEvent.ACTION_UP -> {
++                val tap = tapOnEmpty &&
++                    ev.eventTime - ev.downTime < ViewConfiguration.getLongPressTimeout() &&
++                    inSession(appsView)
++                tapOnEmpty = false
++                if (tap) {
++                    val launcher = session ?: return
++                    // after this touch has been delivered, as Back does it
++                    appsView.post {
++                        if (session === launcher) launcher.stateManager.goToState(LauncherState.NORMAL)
++                    }
++                }
++            }
++            MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> tapOnEmpty = false
++        }
++    }
++
++    private fun inSession(appsView: ActivityAllAppsContainerView<*>): Boolean {
++        val launcher = session ?: return false
++        return launcher.appsView === appsView && launcher.isInState(LauncherState.ALL_APPS) &&
++            appsView.isSearching
++    }
++
++    /** Not the search field's bar, and below every result of the list (or off the list). */
++    private fun isOnEmptyPart(appsView: ActivityAllAppsContainerView<*>, x: Float, y: Float): Boolean {
++        val searchBar = appsView.searchView
++        val px = x.toInt()
++        val py = y.toInt()
++        if (searchBar != null && searchBar.isShown && boundsIn(appsView, searchBar).contains(px, py)) {
++            return false
++        }
++        val list = appsView.activeRecyclerView ?: return true
++        if (!list.isShown) return true
++        val listBounds = boundsIn(appsView, list)
++        if (!listBounds.contains(px, py)) return true
++        val yInList = y - listBounds.top
++        for (i in 0 until list.childCount) {
++            val child = list.getChildAt(i)
++            if (child.visibility == View.VISIBLE && yInList < child.bottom + child.translationY) return false
++        }
++        return true
++    }
++
++    private fun boundsIn(ancestor: ViewGroup, view: View): Rect {
++        val rect = Rect(0, 0, view.width, view.height)
++        ancestor.offsetDescendantRectToMyCoords(view, rect)
++        return rect
++    }
++
+     private val watched = mutableSetOf<Int>()
+ 
+     private fun watchSession(launcher: LawnchairLauncher) {
+diff --git a/src/com/android/launcher3/allapps/LauncherAllAppsContainerView.java b/src/com/android/launcher3/allapps/LauncherAllAppsContainerView.java
+index 8d1d3218ab..145a76b9ce 100644
+--- a/src/com/android/launcher3/allapps/LauncherAllAppsContainerView.java
++++ b/src/com/android/launcher3/allapps/LauncherAllAppsContainerView.java
+@@ -17,6 +17,7 @@ package com.android.launcher3.allapps;
+ 
+ import android.content.Context;
+ import android.util.AttributeSet;
++import android.view.MotionEvent;
+ import android.view.WindowInsets;
+ 
+ import com.android.launcher3.Launcher;
+@@ -41,6 +42,13 @@ public class LauncherAllAppsContainerView extends ActivityAllAppsContainerView<L
+         super(context, attrs, defStyleAttr);
+     }
+ 
++    @Override
++    public boolean dispatchTouchEvent(MotionEvent ev) {
++        // Homa Lawn: a tap on the empty part of the "Search (instant)" page goes home
++        app.lawnchair.omalawn.HomarSearchGesture.onSearchTouch(this, ev);
++        return super.dispatchTouchEvent(ev);
++    }
++
+     @Override
+     protected int computeNavBarScrimHeight(WindowInsets insets) {
+         return Utilities.ATLEAST_Q ? insets.getTappableElementInsets().bottom : insets.getStableInsetBottom();

@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in Homa Lawn does not work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please leave out personal data: replace addresses, phone names,
+        serials and paths with placeholders.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or action, what you expected, and what happened instead. Paste the one-line error if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. homalawn ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI
+        - Desktop window / bar icon
+        - Background service (homalawnd)
+        - Wallpaper & style
+        - Agents (MCP)
+        - Pairing / the link
+        - Phone app
+        - Install / update
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - The link
+        - adb
+        - Not sure
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+      placeholder: e.g. Pixel 8, Android 15
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Homa Lawn version
+      description: "`homalawn --version`, and the phone app's build (the phone's Homa Lawn settings › About, or the window's Overview)."
+      placeholder: homalawn 0.1.0, build 325
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl --user -u homalawnd`, `adb logcat | grep -i omalawn`, or the command's output."
+      render: text

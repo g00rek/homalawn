@@ -1,0 +1,157 @@
+From 5693d34e8360b3421ed8bf60d984441dceff426b Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 16 Oct 2026 10:18:12 +0200
+Subject: [PATCH] homar settings icon: a "Homa Lawn" icon in the app drawer
+ opens the settings
+
+An activity-alias of PreferenceActivity (MAIN/LAUNCHER only, never HOME) with the app's own icon
+and name, like Nova's "Nova Settings". Upstream hides its own package from search results, so
+SettingsIcon lets this one alias through (one-line hook in LawnchairSearchAlgorithm).
+
+The launcher's home entry was meant to be hidden from the drawer by filtered_components, but that
+list says app.lawnchair/... without the debug build's ".debug" suffix, so it showed as a second
+"Homa Lawn" that only went home. SettingsIcon.isHomeEntry hides it by the real package name (hook
+in AppFilter), which also keeps it out of launcher.apps_list for the desktop editor.
+
+launcher.app_icons lists the same apps as launcher.apps_list (through AppFilter), so
+the desktop editor gets no icon for the hidden home entry either.
+---
+ lawnchair/AndroidManifest.xml                 | 13 ++++++++
+ .../src/app/lawnchair/omalawn/AppIcons.kt     |  4 ++-
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  5 ++-
+ .../src/app/lawnchair/omalawn/SettingsIcon.kt | 32 +++++++++++++++++++
+ .../algorithms/LawnchairSearchAlgorithm.kt    |  2 +-
+ src/com/android/launcher3/AppFilter.java      |  3 +-
+ 6 files changed, 55 insertions(+), 4 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/SettingsIcon.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index a31ea9d064..41cafb5088 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -94,6 +94,19 @@
+             </intent-filter>
+         </activity>
+ 
++        <!-- Homa Lawn: the app-drawer icon that opens these settings (patch 0018); never HOME -->
++        <activity-alias
++            android:name="app.lawnchair.omalawn.HomaLawnSettings"
++            android:exported="true"
++            android:icon="@drawable/ic_launcher_home"
++            android:label="@string/derived_app_name"
++            android:targetActivity="app.lawnchair.ui.preferences.PreferenceActivity">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity-alias>
++
+         <activity
+             android:label="@string/lawnchair_actions"
+             android:icon="@mipmap/ic_launcher_home"
+diff --git a/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt b/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
+index 021d2e80e5..31e766ca70 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/AppIcons.kt
+@@ -63,7 +63,9 @@ object AppIcons {
+         val want = names(params, "components")
+         val la = ctx.getSystemService(LauncherApps::class.java)!!
+         val user = Process.myUserHandle()
+-        val all = la.getActivityList(null, user)
++        // the apps launcher.apps_list gives: without the launcher's own home entry (patch 0018)
++        val filter = com.android.launcher3.AppFilter(ctx)
++        val all = la.getActivityList(null, user).filter { filter.shouldShowApp(it.componentName) }
+         val acts = if (want == null) {
+             all
+         } else {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index e67a1b1d2b..4f3b3a10d7 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -177,11 +177,14 @@ object OmalawnCommands {
+             .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
+     }
+ 
+-    /** Launchable activities of the current user, as the app drawer sees them. */
++    /** Launchable activities of the current user, as the app drawer sees them: without the
++     *  launcher's own home entry, which the drawer hides too (patch 0018 adds the settings icon). */
+     private fun appsList(ctx: Context): JSONArray {
+         val out = JSONArray()
++        val filter = com.android.launcher3.AppFilter(ctx)
+         ctx.getSystemService(LauncherApps::class.java)!!
+             .getActivityList(null, Process.myUserHandle())
++            .filter { filter.shouldShowApp(it.componentName) }
+             .forEach { a ->
+                 out.put(
+                     JSONObject()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/SettingsIcon.kt b/lawnchair/src/app/lawnchair/omalawn/SettingsIcon.kt
+new file mode 100644
+index 0000000000..aa451a83a0
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/SettingsIcon.kt
+@@ -0,0 +1,32 @@
++package app.lawnchair.omalawn
++
++import android.content.ComponentName
++import app.lawnchair.LawnchairLauncher
++import app.lawnchair.search.adapter.SearchTargetCompat
++import com.android.launcher3.BuildConfig
++
++/**
++ * The "Homa Lawn" icon in the app drawer (patch 0018): an activity-alias of Lawnchair's settings
++ * screen with the app's own icon and name, like Nova's "Nova Settings". It is only MAIN/LAUNCHER,
++ * never HOME, so the default home app stays the launcher itself.
++ *
++ * Lawnchair drops every search result from its own package (it never wanted itself in search);
++ * [shownInSearch] lets this one alias through.
++ *
++ * The launcher's own home entry (also MAIN/LAUNCHER, so other launchers can start it) is meant to be
++ * hidden from the drawer by `filtered_components`, but that list names `app.lawnchair/...` without
++ * the debug build's `.debug` suffix, so on our build it showed as a second "Homa Lawn" that only
++ * went home. [isHomeEntry] hides it by the real package name.
++ */
++object SettingsIcon {
++    /** The alias in AndroidManifest.xml; also what a home-screen item for it points at. */
++    const val ALIAS = "app.lawnchair.omalawn.HomaLawnSettings"
++
++    @JvmStatic
++    fun isHomeEntry(cn: ComponentName): Boolean =
++        cn.packageName == BuildConfig.APPLICATION_ID && cn.className == LawnchairLauncher::class.java.name
++
++    fun shownInSearch(target: SearchTargetCompat): Boolean =
++        target.resultType == SearchTargetCompat.RESULT_TYPE_APPLICATION &&
++            target.extras.getString("class") == ALIAS
++}
+diff --git a/lawnchair/src/app/lawnchair/search/algorithms/LawnchairSearchAlgorithm.kt b/lawnchair/src/app/lawnchair/search/algorithms/LawnchairSearchAlgorithm.kt
+index 1212437cc0..dd4d83f92c 100644
+--- a/lawnchair/src/app/lawnchair/search/algorithms/LawnchairSearchAlgorithm.kt
++++ b/lawnchair/src/app/lawnchair/search/algorithms/LawnchairSearchAlgorithm.kt
+@@ -77,7 +77,7 @@ sealed class LawnchairSearchAlgorithm(
+     protected fun transformSearchResults(results: List<SearchTargetCompat>): List<SearchAdapterItem> {
+         val filtered = results
+             .asSequence()
+-            .filter { it.packageName != BuildConfig.APPLICATION_ID }
++            .filter { it.packageName != BuildConfig.APPLICATION_ID || app.lawnchair.omalawn.SettingsIcon.shownInSearch(it) } // patch 0018
+             .filter { LawnchairSearchAdapterProvider.viewTypeMap[it.layoutType] != null }
+             .removeDuplicateDividers()
+             .toList()
+diff --git a/src/com/android/launcher3/AppFilter.java b/src/com/android/launcher3/AppFilter.java
+index b0b21837fa..8bab757d50 100644
+--- a/src/com/android/launcher3/AppFilter.java
++++ b/src/com/android/launcher3/AppFilter.java
+@@ -15,6 +15,7 @@ import java.util.stream.Collectors;
+ 
+ import javax.inject.Inject;
+ 
++import app.lawnchair.omalawn.SettingsIcon;
+ import app.lawnchair.preferences2.PreferenceManager2;
+ 
+ /**
+@@ -33,6 +34,6 @@ public class AppFilter {
+     }
+ 
+     public boolean shouldShowApp(ComponentName app) {
+-        return !mFilteredComponents.contains(app);
++        return !mFilteredComponents.contains(app) && !SettingsIcon.isHomeEntry(app); // patch 0018
+     }
+ }

@@ -1,0 +1,42 @@
+From 73f77b2e3634853074f1a82d04685270e09c2878 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 20:19:26 +0200
+Subject: [PATCH] homalawn system monochrome: themed icons without an icon pack
+
+Lawnchair switched "themed icons" off at every launcher start when no
+themed icon pack (Lawnicons) was installed, a migration from 12 Alpha 4.
+Launcher3's own mono theme draws the monochrome layer apps ship in their
+adaptive icons (Android 13+) and needs no pack, so the switch now stays on.
+The "Themed icons" choice in Lawnchair's icon settings is enabled without a
+pack too (the pack grid still shows only when a pack is installed).
+---
+ lawnchair/src/app/lawnchair/LawnchairLauncher.kt | 9 +--------
+ 1 file changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index 70f36dc061..3d5546ad5a 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -48,7 +48,6 @@ import app.lawnchair.root.RootNotAvailableException
+ import app.lawnchair.theme.ThemeProvider
+ import app.lawnchair.ui.popup.LauncherOptionsPopup
+ import app.lawnchair.ui.popup.LawnchairShortcut
+-import app.lawnchair.util.getThemedIconPacksInstalled
+ import app.lawnchair.util.unsafeLazy
+ import app.lawnchair.views.LawnchairFloatingSurfaceView
+ import com.android.launcher3.AbstractFloatingView
+@@ -239,13 +238,7 @@ class LawnchairLauncher : QuickstepLauncher() {
+         LauncherOptionsPopup.restoreMissingPopupOptions(launcher)
+         LauncherOptionsPopup.migrateLegacyPreferences(launcher)
+ 
+-        // Handle update from version 12 Alpha 4 to version 12 Alpha 5.
+-        if (
+-            prefs.themedIcons.get() &&
+-            packageManager.getThemedIconPacksInstalled(this).isEmpty()
+-        ) {
+-            prefs.themedIcons.set(newValue = false)
+-        }
++        // Homa Lawn: themed icons stay on without an icon pack; apps' own monochrome layer is used.
+ 
+         colorScheme = themeProvider.colorScheme
+ 

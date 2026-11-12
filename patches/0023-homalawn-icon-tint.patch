@@ -1,0 +1,185 @@
+From 93d48dfe9e544895fcc4e743444af2696177ec24 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 21:18:42 +0200
+Subject: [PATCH] homalawn icon tint: themed icons follow colour changes;
+ desktop icon colours
+
+Themed icon colours come from Lawnchair's accent when an icon is drawn,
+but nothing told the icon machinery the colours had changed, and icons
+that bake the colours in (icon-pack and clock icons) kept the old tint in
+the icon cache across restarts. The accent's swatches, the light/dark
+choice and two new settings now go into the launcher's icon state, so a
+change reloads the icons at once (ThemeProvider, the settings and the
+night-mode configuration trigger the check).
+
+homalawn_icon_color and homalawn_icon_bg_color (shared, "#rrggbb")
+override the symbol and plate colours; empty keeps the accent's colour.
+---
+ .../lawnchair/LawnchairProcessInitializer.kt  |  4 +-
+ .../lawnchair/icons/LawnchairThemeManager.kt  |  5 +-
+ .../app/lawnchair/omalawn/HomarIconTint.kt    | 91 +++++++++++++++++++
+ .../src/app/lawnchair/theme/ThemeProvider.kt  |  1 +
+ 4 files changed, 99 insertions(+), 2 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomarIconTint.kt
+
+diff --git a/lawnchair/src/app/lawnchair/LawnchairProcessInitializer.kt b/lawnchair/src/app/lawnchair/LawnchairProcessInitializer.kt
+index 570a6c2348..1879b75042 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairProcessInitializer.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairProcessInitializer.kt
+@@ -3,6 +3,7 @@ package app.lawnchair
+ import android.content.Context
+ import androidx.annotation.Keep
+ import app.lawnchair.bugreport.LawnchairBugReporter
++import app.lawnchair.omalawn.HomarIconTint
+ import app.lawnchair.theme.color.tokens.ColorTokens
+ import com.android.launcher3.Utilities
+ import com.android.launcher3.icons.mono.ThemedIconDrawable
+@@ -13,7 +14,8 @@ class LawnchairProcessInitializer(context: Context) : QuickstepProcessInitialize
+ 
+     override fun init(context: Context) {
+         LawnchairBugReporter.INSTANCE.get(context)
+-        ThemedIconDrawable.COLORS_LOADER = {
++        // Homa Lawn: icon colours chosen on the desktop override the accent's (HomarIconTint).
++        ThemedIconDrawable.COLORS_LOADER = HomarIconTint.wrap {
+             if (Utilities.isDarkTheme(it)) {
+                 intArrayOf(
+                     ColorTokens.Accent2_800.resolveColor(it),
+diff --git a/lawnchair/src/app/lawnchair/icons/LawnchairThemeManager.kt b/lawnchair/src/app/lawnchair/icons/LawnchairThemeManager.kt
+index 09724cab07..e1be92b229 100644
+--- a/lawnchair/src/app/lawnchair/icons/LawnchairThemeManager.kt
++++ b/lawnchair/src/app/lawnchair/icons/LawnchairThemeManager.kt
+@@ -4,6 +4,7 @@ import android.content.Context
+ import android.util.Log
+ import app.lawnchair.icons.shape.IconShape
+ import app.lawnchair.icons.shape.PathShapeDelegate
++import app.lawnchair.omalawn.HomarIconTint
+ import app.lawnchair.preferences.PreferenceChangeListener
+ import app.lawnchair.preferences.PreferenceManager
+ import app.lawnchair.preferences2.PreferenceManager2
+@@ -106,6 +107,8 @@ constructor(
+         displayController.addChangeListener(displayInfoChangeListener)
+ 
+         statePrefs1.forEach { it.addListener(prefListener) }
++        // Homa Lawn: new themed icon colours rebuild the icons (HomarIconTint)
++        HomarIconTint.watch(context) { uiExecutor.execute { verifyIconState() } }
+ 
+         lifecycle.addCloseable {
+             colorSchemeChangeListener.destroy()
+@@ -156,7 +159,7 @@ constructor(
+             } else {
+                 ""
+             }
+-        val combinedKey = "$appShapeKey:$folderShapeKey:$themedColorsKey"
++        val combinedKey = "$appShapeKey:$folderShapeKey:$themedColorsKey:${HomarIconTint.stateKey(context)}"
+ 
+         val appShape =
+             if (oldState != null && (oldState.iconShape as? PathShapeDelegate)?.iconShape == currentAppShape) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomarIconTint.kt b/lawnchair/src/app/lawnchair/omalawn/HomarIconTint.kt
+new file mode 100644
+index 0000000000..971e686cab
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomarIconTint.kt
+@@ -0,0 +1,91 @@
++package app.lawnchair.omalawn
++
++import android.content.ComponentCallbacks
++import android.content.Context
++import android.content.SharedPreferences
++import android.content.res.Configuration
++import android.graphics.Color
++import app.lawnchair.theme.color.tokens.ColorTokens
++import com.android.launcher3.LauncherPrefs
++import com.android.launcher3.Utilities
++import java.util.concurrent.CopyOnWriteArrayList
++
++/**
++ * The colours of themed (monochrome) icons, and when they change.
++ *
++ * Lawnchair tints themed icons from its accent (ColorTokens) when an icon is drawn, but nothing
++ * told the icon machinery that the colours had changed: home-screen icons kept the old tint until
++ * something else rebuilt them, and icons that bake the colours in (icon-pack and clock icons) kept
++ * it in the icon cache, across restarts. [stateKey] goes into the launcher's icon state, so a new
++ * accent, colour style, light/dark mode or icon colour makes Launcher3 drop its cached icons and
++ * reload the home screen at once ([onChange] asks it to look).
++ *
++ * Two shared settings, written by the desktop ("#rrggbb", or "#aarrggbb"), override the colours;
++ * empty or missing keeps Lawnchair's accent-derived colour for that part:
++ * `homalawn_icon_color` the symbol, `homalawn_icon_bg_color` the plate behind it.
++ */
++object HomarIconTint {
++    // named like Lawnchair's shared settings, so scripts/gen-prefs-catalog.py lists them
++    private fun StringPref(key: String) = key
++    val KEY_ICON = StringPref("homalawn_icon_color")
++    val KEY_BG = StringPref("homalawn_icon_bg_color")
++    private const val KEY_THEME = "pref_launcherTheme"
++
++    private val listeners = CopyOnWriteArrayList<() -> Unit>()
++    private var watched = false
++
++    // held here: SharedPreferences keeps its listeners only weakly
++    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
++        if (key == KEY_ICON || key == KEY_BG || key == KEY_THEME) onChange()
++    }
++
++    /** ThemedIconDrawable.COLORS_LOADER: [base]'s (plate, symbol), with our overrides on top. */
++    fun wrap(base: (Context) -> IntArray): (Context) -> IntArray = { ctx ->
++        val colors = base(ctx)
++        val prefs = LauncherPrefs.getPrefs(ctx)
++        parse(prefs.getString(KEY_BG, null))?.let { colors[0] = it }
++        parse(prefs.getString(KEY_ICON, null))?.let { colors[1] = it }
++        colors
++    }
++
++    /** Everything the themed colours depend on, for the icon state's unique id. */
++    fun stateKey(context: Context): String {
++        val ctx = context.applicationContext ?: context
++        val prefs = LauncherPrefs.getPrefs(ctx)
++        val accents = listOf(
++            ColorTokens.Accent1_100, ColorTokens.Accent1_200, ColorTokens.Accent1_700, ColorTokens.Accent2_800,
++        ).joinToString(",") { Integer.toHexString(it.resolveColor(ctx)) }
++        return "tint:$accents;dark=${Utilities.isDarkTheme(ctx)};" +
++            "${prefs.getString(KEY_ICON, "")};${prefs.getString(KEY_BG, "")}"
++    }
++
++    /** Runs [listener] (on any thread) whenever [stateKey] may have changed. */
++    fun watch(context: Context, listener: () -> Unit) {
++        listeners.add(listener)
++        synchronized(this) {
++            if (watched) return
++            watched = true
++        }
++        val app = context.applicationContext ?: context
++        LauncherPrefs.getPrefs(app).registerOnSharedPreferenceChangeListener(prefListener)
++        app.registerComponentCallbacks(object : ComponentCallbacks {
++            override fun onConfigurationChanged(newConfig: Configuration) = onChange() // night mode
++            @Deprecated("Deprecated in Java")
++            override fun onLowMemory() = Unit
++        })
++    }
++
++    /** Hook in ThemeProvider: the accent, colour style or wallpaper colours changed. */
++    fun onChange() {
++        listeners.forEach { it() }
++    }
++
++    private fun parse(s: String?): Int? {
++        if (s.isNullOrBlank()) return null
++        return try {
++            Color.parseColor(s.trim())
++        } catch (_: IllegalArgumentException) {
++            null
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/theme/ThemeProvider.kt b/lawnchair/src/app/lawnchair/theme/ThemeProvider.kt
+index cb10235589..14af9f0825 100644
+--- a/lawnchair/src/app/lawnchair/theme/ThemeProvider.kt
++++ b/lawnchair/src/app/lawnchair/theme/ThemeProvider.kt
+@@ -139,6 +139,7 @@ class ThemeProvider @Inject constructor(
+     private fun notifyColorSchemeChanged() {
+         if (isClosed) return
+         listeners.forEach(ColorSchemeChangeListener::onColorSchemeChanged)
++        app.lawnchair.omalawn.HomarIconTint.onChange() // Homa Lawn: themed icons take the new colours
+     }
+ 
+     override fun close() {

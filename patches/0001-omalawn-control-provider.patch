@@ -1,0 +1,408 @@
+From e07bb106c49678b8274386048bb20f5bcafecca1 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Fri, 2 Oct 2026 09:55:46 +0200
+Subject: [PATCH] omalawn control provider
+
+---
+ lawnchair/AndroidManifest.xml                 |   5 +
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  | 294 ++++++++++++++++++
+ .../omalawn/OmalawnControlProvider.kt         |  73 +++++
+ 3 files changed, 372 insertions(+)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index be6d5d96d3..4b00c3eff8 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -165,6 +165,11 @@
+                 android:resource="@xml/provider_paths" />
+         </provider>
+ 
++        <provider
++            android:name="app.lawnchair.omalawn.OmalawnControlProvider"
++            android:authorities="${applicationId}.omalawn"
++            android:exported="true" />
++
+         <provider
+             android:name="app.lawnchair.search.LawnchairRecentSuggestionProvider"
+             android:authorities="${applicationId}.search.LawnchairRecentSuggestionProvider"
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+new file mode 100644
+index 0000000000..1b964a1f35
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -0,0 +1,294 @@
++package app.lawnchair.omalawn
++
++import android.app.WallpaperManager
++import android.appwidget.AppWidgetManager
++import android.content.Context
++import android.content.Intent
++import android.os.Handler
++import android.os.Looper
++import android.system.Os
++import androidx.datastore.preferences.core.booleanPreferencesKey
++import androidx.datastore.preferences.core.edit
++import androidx.datastore.preferences.core.floatPreferencesKey
++import androidx.datastore.preferences.core.intPreferencesKey
++import androidx.datastore.preferences.core.stringPreferencesKey
++import app.lawnchair.preferences2.PreferenceManager2
++import app.lawnchair.preferences2.ReloadHelper
++import com.android.launcher3.LauncherAppState
++import com.android.launcher3.widget.LauncherAppWidgetProviderInfo
++import java.io.File
++import kotlin.math.roundToInt
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.runBlocking
++import org.json.JSONArray
++import org.json.JSONObject
++
++/** A command failure with a stable machine code; [message] is what the caller shows. */
++class OmalawnError(val code: String, message: String) : Exception(message)
++
++/**
++ * Every omalawn command, shared by the shell-only [OmalawnControlProvider] and the link server.
++ * Callers do their own authentication; this object only executes. Results are JSONObject,
++ * JSONArray or ByteArray. Every failure surfaces as [OmalawnError].
++ */
++object OmalawnCommands {
++
++    fun dispatch(ctx: Context, method: String, params: JSONObject): Any = try {
++        when (method) {
++            "launcher.ping" -> ping(ctx)
++            "launcher.prefs_list" -> prefsList(ctx)
++            "launcher.pref_set" -> {
++                prefSet(ctx, params)
++                JSONObject()
++            }
++            "launcher.prefs_set_many" -> {
++                prefSetMany(ctx, writes(params))
++                JSONObject()
++            }
++            "launcher.wallpaper_info" -> wallpaperInfo(ctx)
++            "launcher.wallpaper_backup" -> wallpaperBackup(ctx)
++            "launcher.wallpaper_set" -> {
++                wallpaperSet(ctx, str(params, "path") ?: error("path required"))
++                JSONObject()
++            }
++            "launcher.widgets_list" -> widgetsList(ctx)
++            "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
++            else -> throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
++        }
++    } catch (e: OmalawnError) {
++        throw e
++    } catch (e: Exception) {
++        throw OmalawnError("failed", "${e.javaClass.simpleName}: ${e.message}")
++    }
++
++    const val UNKNOWN_METHOD = "unknown_method"
++
++    /** files/omalawn/, private to Lawnchair (0700). */
++    fun privateDir(ctx: Context): File {
++        val dir = File(ctx.filesDir, "omalawn")
++        dir.mkdirs()
++        Os.chmod(dir.absolutePath, 0b111_000_000) // 0700
++        return dir
++    }
++
++    private fun private600(f: File) = Os.chmod(f.absolutePath, 0b110_000_000) // 0600
++
++    /** A missing or JSON-null value reads as null; numbers and booleans read as their text. */
++    private fun str(p: JSONObject, k: String): String? = if (p.isNull(k)) null else p.get(k).toString()
++
++    /** `writes` as a JSON array, or as its text (the provider passes the raw `arg`). */
++    private fun writes(p: JSONObject): JSONArray = when (val w = if (p.isNull("writes")) null else p.get("writes")) {
++        null -> error("json array required")
++        is JSONArray -> w
++        else -> JSONArray(w.toString())
++    }
++
++    private fun ping(ctx: Context) = JSONObject()
++        .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
++        .put("package", ctx.packageName)
++        .put("db", LauncherAppState.getIDP(ctx).dbFile)
++        // true once the workspace has been loaded from the DB (LoaderTask finished); false while
++        // the launcher is starting, loading, or has never been started in this process
++        .put("model_loaded", LauncherAppState.getInstance(ctx).model.isModelLoaded())
++        .put(
++            "default_home",
++            ctx.packageManager.resolveActivity(
++                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
++                0,
++            )?.activityInfo?.packageName == ctx.packageName,
++        )
++
++    private fun typed(v: Any?): JSONObject = JSONObject()
++        .put(
++            "type",
++            when (v) {
++                is Boolean -> "bool"
++                is Int, is Long -> "int"
++                is Float, is Double -> "float"
++                is Set<*> -> "stringset"
++                else -> "string"
++            },
++        )
++        .put("value", if (v is Set<*>) JSONArray(v.toList()) else v)
++
++    private fun prefsList(ctx: Context): JSONObject {
++        val ds = JSONObject()
++        val prefs = runBlocking { PreferenceManager2.getInstance(ctx).preferencesDataStore.data.first() }
++        prefs.asMap().forEach { (k, v) -> ds.put(k.name, typed(v)) }
++        val sh = JSONObject()
++        sharedPrefs(ctx).all.forEach { (k, v) -> sh.put(k, typed(v)) }
++        return JSONObject().put("datastore", ds).put("shared", sh)
++    }
++
++    private fun prefSet(ctx: Context, x: JSONObject) {
++        applyPrefs(
++            ctx,
++            listOf(
++                PrefWrite(
++                    str(x, "store") ?: error("store required"),
++                    str(x, "key") ?: error("key required"),
++                    str(x, "type") ?: error("type required"),
++                    str(x, "value") ?: error("value required"),
++                ),
++            ),
++        )
++    }
++
++    /** Several keys in one commit and a single reload, like Lawnchair's own grid screen (batchEdit). */
++    private fun prefSetMany(ctx: Context, arr: JSONArray) {
++        applyPrefs(
++            ctx,
++            (0 until arr.length()).map {
++                val o = arr.getJSONObject(it)
++                if (o.optBoolean("remove")) {
++                    PrefWrite(o.getString("store"), o.getString("key"), "remove", "")
++                } else {
++                    PrefWrite(o.getString("store"), o.getString("key"), o.getString("type"), o.getString("value"))
++                }
++            },
++        )
++    }
++
++    private class PrefWrite(val store: String, val key: String, val type: String, val value: String)
++
++    private fun applyPrefs(ctx: Context, writes: List<PrefWrite>) {
++        // Parse everything first so a bad entry changes nothing.
++        writes.forEach {
++            when (it.type) {
++                "bool" -> it.value.toBooleanStrict()
++                "int" -> it.value.toInt()
++                "float" -> it.value.toFloat()
++                "string", "remove" -> Unit
++                else -> error("bad type ${it.type}")
++            }
++            if (it.store != "datastore" && it.store != "shared") error("bad store ${it.store}")
++        }
++        val ds = writes.filter { it.store == "datastore" }
++        if (ds.isNotEmpty()) {
++            runBlocking {
++                PreferenceManager2.getInstance(ctx).preferencesDataStore.edit { p ->
++                    ds.forEach {
++                        when (it.type) {
++                            // Preferences.Key equality is by name only, so any typed key removes it
++                            "remove" -> p.remove(stringPreferencesKey(it.key))
++                            "bool" -> p[booleanPreferencesKey(it.key)] = it.value.toBooleanStrict()
++                            "int" -> p[intPreferencesKey(it.key)] = it.value.toInt()
++                            "float" -> p[floatPreferencesKey(it.key)] = it.value.toFloat()
++                            else -> p[stringPreferencesKey(it.key)] = it.value
++                        }
++                    }
++                    Unit
++                }
++            }
++        }
++        val sh = writes.filter { it.store == "shared" }
++        if (sh.isNotEmpty()) {
++            val ed = sharedPrefs(ctx).edit()
++            sh.forEach {
++                when (it.type) {
++                    "remove" -> ed.remove(it.key)
++                    "bool" -> ed.putBoolean(it.key, it.value.toBooleanStrict())
++                    "int" -> ed.putInt(it.key, it.value.toInt())
++                    "float" -> ed.putFloat(it.key, it.value.toFloat())
++                    else -> ed.putString(it.key, it.value)
++                }
++            }
++            if (!ed.commit()) error("commit failed")
++        }
++        onMain { ReloadHelper(ctx).restart() }
++    }
++
++    private fun wallpaperInfo(ctx: Context): JSONObject {
++        val wm = WallpaperManager.getInstance(ctx)
++        return JSONObject()
++            .put("system_id", wm.getWallpaperId(WallpaperManager.FLAG_SYSTEM))
++            .put("lock_id", wm.getWallpaperId(WallpaperManager.FLAG_LOCK))
++            .put("live", wm.wallpaperInfo != null)
++    }
++
++    /** Saves the current system wallpaper as PNG under files/omalawn/ and returns its path. */
++    private fun wallpaperBackup(ctx: Context): JSONObject {
++        val dir = privateDir(ctx)
++        val now = System.currentTimeMillis()
++        // A backup is read and deleted by the desktop right after this call; any older one is
++        // left over from an interrupted run.
++        dir.listFiles()?.forEach { f ->
++            val t = f.name.removePrefix("wp-backup-").removeSuffix(".png").toLongOrNull()
++            if (f.name.startsWith("wp-backup-") && t != null && t < now) f.delete()
++        }
++        val out = File(dir, "wp-backup-$now.png")
++        val wm = WallpaperManager.getInstance(ctx)
++        if (wm.wallpaperInfo != null) error("live wallpaper: the current wallpaper is a live wallpaper and cannot be saved")
++        val failures = mutableListOf<String>()
++        try {
++            val pfd = wm.getWallpaperFile(WallpaperManager.FLAG_SYSTEM)
++            if (pfd == null) {
++                failures.add("getWallpaperFile returned null")
++            } else {
++                java.io.FileInputStream(pfd.fileDescriptor).use { i -> out.outputStream().use { o -> i.copyTo(o) } }
++                pfd.close()
++                private600(out)
++                if (out.length() > 0) return JSONObject().put("path", out.absolutePath).put("how", "file")
++            }
++        } catch (e: Exception) {
++            failures.add("getWallpaperFile: ${e.javaClass.simpleName}: ${e.message}")
++        }
++        try {
++            val d = wm.drawable ?: error("no drawable")
++            val bmp = android.graphics.Bitmap.createBitmap(
++                d.intrinsicWidth.coerceAtLeast(1),
++                d.intrinsicHeight.coerceAtLeast(1),
++                android.graphics.Bitmap.Config.ARGB_8888,
++            )
++            d.setBounds(0, 0, bmp.width, bmp.height)
++            d.draw(android.graphics.Canvas(bmp))
++            out.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
++            private600(out)
++            if (out.length() > 0) return JSONObject().put("path", out.absolutePath).put("how", "drawable")
++        } catch (e: Exception) {
++            failures.add("drawable: ${e.javaClass.simpleName}: ${e.message}")
++        }
++        out.delete()
++        error("cannot back up the current wallpaper (${failures.joinToString("; ")})")
++    }
++
++    private fun wallpaperSet(ctx: Context, path: String) {
++        // The desktop copies the image in with run-as (umask 0): lock it down before reading it.
++        privateDir(ctx)
++        File(path).takeIf { it.parentFile?.canonicalFile == File(ctx.filesDir, "omalawn").canonicalFile }
++            ?.let { if (it.exists()) private600(it) }
++        // Home wallpaper only: the lock screen is never touched (and never backed up).
++        File(path).inputStream().use {
++            WallpaperManager.getInstance(ctx).setStream(it, null, true, WallpaperManager.FLAG_SYSTEM)
++        }
++    }
++
++    private fun widgetsList(ctx: Context): JSONArray {
++        val out = JSONArray()
++        // AppWidgetProviderInfo sizes are pixels; the contract reports dp.
++        val density = ctx.resources.displayMetrics.density
++        AppWidgetManager.getInstance(ctx).installedProviders.forEach { p ->
++            val info = LauncherAppWidgetProviderInfo.fromProviderInfo(ctx, p)
++            out.put(
++                JSONObject()
++                    .put("provider", p.provider.flattenToShortString())
++                    .put("label", p.loadLabel(ctx.packageManager))
++                    .put("minW", (p.minWidth / density).roundToInt())
++                    .put("minH", (p.minHeight / density).roundToInt())
++                    .put("cells", JSONArray(listOf(info.spanX, info.spanY))),
++            )
++        }
++        return out
++    }
++
++    private fun widgetStatus(ctx: Context, id: Int) = JSONObject()
++        .put("appWidgetId", id)
++        .put("bound", AppWidgetManager.getInstance(ctx).getAppWidgetInfo(id) != null)
++
++    /** Same SharedPreferences file that Lawnchair's BasePreferenceManager uses. */
++    private fun sharedPrefs(ctx: Context) = com.android.launcher3.LauncherPrefs.getPrefs(ctx)
++
++    private fun onMain(block: () -> Unit) {
++        Handler(Looper.getMainLooper()).post(block)
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+new file mode 100644
+index 0000000000..79ad751192
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -0,0 +1,73 @@
++package app.lawnchair.omalawn
++
++import android.content.ContentProvider
++import android.content.ContentValues
++import android.database.Cursor
++import android.net.Uri
++import android.os.Binder
++import android.os.Bundle
++import android.os.Process
++import org.json.JSONObject
++
++/**
++ * Desktop control surface for the omalawn CLI over adb. Only adb shell (uid 2000) or root may call
++ * it. Each provider method `x` is the command `launcher.x` in [OmalawnCommands]; `arg` and string
++ * extras become its params.
++ */
++class OmalawnControlProvider : ContentProvider() {
++
++    override fun onCreate(): Boolean {
++        // Repairs a files/omalawn/ made world-writable by an older build or by run-as mkdir.
++        try {
++            OmalawnCommands.privateDir(context!!)
++        } catch (_: Exception) {
++        }
++        return true
++    }
++
++    override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
++        val uid = Binder.getCallingUid()
++        if (uid != Process.SHELL_UID && uid != Process.ROOT_UID) return fail("forbidden uid $uid")
++        val ctx = context!!.applicationContext
++        return try {
++            when (val r = OmalawnCommands.dispatch(ctx, "launcher.$method", params(method, arg, extras))) {
++                is ByteArray -> fail("$method returns binary data, which this provider cannot carry")
++                else -> ok(r)
++            }
++        } catch (e: OmalawnError) {
++            fail(if (e.code == OmalawnCommands.UNKNOWN_METHOD) "unknown method $method" else e.message ?: e.code)
++        } catch (e: Exception) {
++            fail("${e.javaClass.simpleName}: ${e.message}")
++        }
++    }
++
++    /** The provider's positional `arg` gets the name each command reads it under. */
++    private fun params(method: String, arg: String?, extras: Bundle?): JSONObject {
++        val p = JSONObject()
++        extras?.keySet()?.forEach { k -> extras.getString(k)?.let { p.put(k, it) } }
++        val argName = when (method) {
++            "prefs_set_many" -> "writes"
++            "wallpaper_set" -> "path"
++            "widget_status" -> "id"
++            else -> null
++        }
++        if (argName != null && arg != null) p.put(argName, arg)
++        return p
++    }
++
++    private fun ok(r: Any) = Bundle().apply {
++        putBoolean("ok", true)
++        putString("result", r.toString())
++    }
++
++    private fun fail(m: String) = Bundle().apply {
++        putBoolean("ok", false)
++        putString("error", m)
++    }
++
++    override fun query(u: Uri, p: Array<String>?, s: String?, a: Array<String>?, o: String?): Cursor? = null
++    override fun getType(u: Uri): String? = null
++    override fun insert(u: Uri, v: ContentValues?): Uri? = null
++    override fun delete(u: Uri, s: String?, a: Array<String>?) = 0
++    override fun update(u: Uri, v: ContentValues?, s: String?, a: Array<String>?) = 0
++}

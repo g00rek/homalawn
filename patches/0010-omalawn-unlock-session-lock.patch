@@ -1,0 +1,83 @@
+From 9b591a0b4077bfdf2d29adc64f8c7adab1941863 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Fri, 16 Oct 2026 13:07:45 +0200
+Subject: [PATCH] omalawn: deferred update after a restart prepares its session
+ under the update lock
+
+The restart-after-unlock path of OmalawnUpdate.onUnlock prepared its install session outside
+the lock that offer() holds; prepareSession abandons every own session, so a concurrent offer
+could lose its session or have the wrong one committed. Now it prepares under the lock, steps
+aside when a newer offer holds a session, and commits the session it took. KDoc names the
+notification action by its current label, "Set as home".
+---
+ .../src/app/lawnchair/LawnchairLauncher.kt    |  2 +-
+ .../src/app/lawnchair/omalawn/HomeRole.kt     |  2 +-
+ .../app/lawnchair/omalawn/OmalawnUpdate.kt    | 28 +++++++++++++------
+ 3 files changed, 21 insertions(+), 11 deletions(-)
+
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index bab4dc1b2a..c61faa16db 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -161,7 +161,7 @@ class LawnchairLauncher : QuickstepLauncher() {
+     override fun onCreate(savedInstanceState: Bundle?) {
+         layoutInflater.factory2 = LawnchairLayoutFactory(this)
+         super.onCreate(savedInstanceState)
+-        // "Make Homa Lawn your home screen" in the link notification; a recreated activity keeps
++        // "Set as home" in the link notification; a recreated activity keeps
+         // its intent, so only a fresh start counts
+         if (savedInstanceState == null) omalawnHomeAsked = intent?.action == app.lawnchair.omalawn.HomeRole.ACTION_REQUEST_HOME
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+index 2763ebc8db..3a466ca193 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+@@ -13,7 +13,7 @@ import com.android.launcher3.util.ApiWrapper
+  * First run as the default home screen. On a fresh install the launcher shows Android's own
+  * "set as default home app" dialog once (upstream's [ApiWrapper.assignDefaultHomeRole], which
+  * also toasts where to change it if the person declines). After that it asks again only when the
+- * person taps "Make Homa Lawn your home screen" in the link notification, which opens the launcher
++ * person taps "Set as home" in the link notification, which opens the launcher
+  * with [ACTION_REQUEST_HOME].
+  */
+ object HomeRole {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+index b9d88c88d6..30cce86079 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+@@ -368,16 +368,26 @@ object OmalawnUpdate {
+                     return@Thread
+                 }
+                 val (sha, version, computer) = saved!!
+-                val apk = pending(app, sha)
+-                if (apk == null) {
+-                    Log.w(TAG, "phone unlocked: the deferred update $version is no longer on the phone")
+-                    record(app, FAILED, version, sha, "the update waiting for the unlock was lost; send it again")
+-                    return@Thread
++                // under the same lock as offer(): prepareSession abandons every session of ours, so
++                // it must not run while an offer writes or holds its own; the prepared session is
++                // taken out of pendingCommit here, so no other path commits it
++                val q = synchronized(lock) {
++                    if (pendingCommit != null) {
++                        Log.i(TAG, "phone unlocked: a newer update arrived meanwhile; the deferred $version is dropped")
++                        return@Thread
++                    }
++                    val apk = pending(app, sha)
++                    if (apk == null) {
++                        Log.w(TAG, "phone unlocked: the deferred update $version is no longer on the phone")
++                        record(app, FAILED, version, sha, "the update waiting for the unlock was lost; send it again")
++                        return@Thread
++                    }
++                    Log.i(TAG, "phone unlocked: installing the deferred update $version again (new session)")
++                    val info = check(app, apk)
++                    prepareSession(app, apk, sha, info, computer)
++                    pendingCommit!!.also { pendingCommit = null }
+                 }
+-                Log.i(TAG, "phone unlocked: installing the deferred update $version again (new session)")
+-                val info = check(app, apk)
+-                prepareSession(app, apk, sha, info, computer)
+-                commitPending(app)
++                commit(app, q)
+             } catch (e: Throwable) {
+                 Log.w(TAG, "the deferred update could not be installed", e)
+                 val (sha, version, computer) = saved ?: Triple(p!!.sha, p.version, p.computer)

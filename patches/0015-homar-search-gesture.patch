@@ -1,0 +1,255 @@
+From dc61094b3e983e5f9ef73e607c6e09d035cdadfe Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Thu, 15 Oct 2026 07:58:01 +0200
+Subject: [PATCH] homar search gesture: app search with the keyboard at once
+
+Upstream's "Open app search" gesture slides up the A-Z drawer and only
+then focuses the search field, so the icon grid shows first; and an
+empty query (Lawnchair's zero state) answers with the A-Z list anyway.
+
+New gesture option "Search (instant)", serial name homarSearch
+(swipe_down_gesture_handler = {"type":"homarSearch"}), logic in
+app/lawnchair/omalawn/HomarSearchGesture.kt:
+- puts the drawer into search mode while off-screen (an empty result
+  list; upstream's search transition takes 0 ms), shows ALL_APPS
+  without the slide and focuses the field, raising the keyboard;
+- while the query is empty the drawer keeps its empty search page
+  (hook in AllAppsSearchInput.clearSearchResult);
+- Back goes home, also with a query typed (upstream clears the query
+  and drops to the A-Z list).
+
+Hooks: the config object in GestureHandlerConfig (search icon), the
+option in GestureHandlerOption and in the gesture option list of
+GestureHandlerOptions.kt (left out with the deck layout, like upstream's
+drawer gestures), and a three-line
+GestureHandler subclass next to OpenAppSearchGestureHandler (the base
+class is sealed to that package). The label is in
+res/values/homar_strings.xml.
+
+On Lawnchair 16 the search field loses focus when the keyboard goes
+down, so the next Back reaches LawnchairLauncher.onStateBack, which
+resets the search; with our empty search page kept, every Back would do
+that again and the drawer stayed open. A one-line hook there sends Back
+from our session home (HomarSearchGesture.onStateBack).
+---
+ lawnchair/res/values/homar_strings.xml        |  5 ++
+ .../src/app/lawnchair/LawnchairLauncher.kt    |  1 +
+ .../lawnchair/allapps/AllAppsSearchInput.kt   |  2 +
+ .../gestures/config/GestureHandlerConfig.kt   |  7 ++
+ .../gestures/config/GestureHandlerOption.kt   |  1 +
+ .../gestures/config/GestureHandlerOptions.kt  |  2 +
+ .../handlers/OpenAppSearchGestureHandler.kt   |  6 ++
+ .../lawnchair/omalawn/HomarSearchGesture.kt   | 89 +++++++++++++++++++
+ 8 files changed, 113 insertions(+)
+ create mode 100644 lawnchair/res/values/homar_strings.xml
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
+
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+new file mode 100644
+index 0000000000..a245a80481
+--- /dev/null
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- gesture option: app search screen with the keyboard at once, without the app drawer first -->
++    <string name="homar_gesture_search">Search (instant)</string>
++</resources>
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index c61faa16db..4d4fa2b9b4 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -301,6 +301,7 @@ class LawnchairLauncher : QuickstepLauncher() {
+     }
+ 
+     override fun onStateBack() {
++        if (app.lawnchair.omalawn.HomarSearchGesture.onStateBack(this)) return // Homa Lawn: Back from "Search (instant)" goes home
+         val searchInput = mAppsView?.searchUiManager?.editText
+         val isSearching = mAppsView?.isSearching == true || searchInput?.hasFocus() == true
+         if (isSearching) {
+diff --git a/lawnchair/src/app/lawnchair/allapps/AllAppsSearchInput.kt b/lawnchair/src/app/lawnchair/allapps/AllAppsSearchInput.kt
+index 8dc6a83204..c7d31f63e4 100644
+--- a/lawnchair/src/app/lawnchair/allapps/AllAppsSearchInput.kt
++++ b/lawnchair/src/app/lawnchair/allapps/AllAppsSearchInput.kt
+@@ -505,6 +505,8 @@ class AllAppsSearchInput(context: Context, attrs: AttributeSet?) :
+         searchQueryBuilder.clear()
+         searchQueryBuilder.clearSpans()
+         Selection.setSelection(searchQueryBuilder, 0)
++        // Homa Lawn: a search opened by the instant-search gesture stays on its (empty) search page
++        if (app.lawnchair.omalawn.HomarSearchGesture.keepSearchPage(appsView)) return
+         appsView.onClearSearchResult()
+         appsView.floatingHeaderView?.setFloatingRowsCollapsed(false)
+     }
+diff --git a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerConfig.kt b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerConfig.kt
+index 9a6bc0ebb8..31258f743e 100644
+--- a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerConfig.kt
++++ b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerConfig.kt
+@@ -8,6 +8,7 @@ import androidx.annotation.DrawableRes
+ import androidx.appcompat.content.res.AppCompatResources
+ import androidx.core.graphics.createBitmap
+ import app.lawnchair.gestures.handlers.GestureHandler
++import app.lawnchair.gestures.handlers.HomarSearchGestureHandler
+ import app.lawnchair.gestures.handlers.NoOpGestureHandler
+ import app.lawnchair.gestures.handlers.OpenAppDrawerGestureHandler
+ import app.lawnchair.gestures.handlers.OpenAppGestureHandler
+@@ -115,6 +116,12 @@ sealed class GestureHandlerConfig {
+         override fun isExternallyInvokable() = true
+     }
+ 
++    @Serializable
++    @SerialName("homarSearch")
++    data object HomarSearch : Simple(R.string.homar_gesture_search, ::HomarSearchGestureHandler) {
++        override val iconRes = R.drawable.ic_search
++    }
++
+     @Serializable
+     @SerialName("openSearch")
+     data object OpenSearch :
+diff --git a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOption.kt b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOption.kt
+index 833f4fc38d..192167a19c 100644
+--- a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOption.kt
++++ b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOption.kt
+@@ -29,6 +29,7 @@ sealed class GestureHandlerOption(
+     data object OpenQuickSettings : Simple(GestureHandlerConfig.OpenQuickSettings)
+     data object OpenAppDrawer : Simple(GestureHandlerConfig.OpenAppDrawer)
+     data object OpenAppSearch : Simple(GestureHandlerConfig.OpenAppSearch)
++    data object HomarSearch : Simple(GestureHandlerConfig.HomarSearch)
+     data object OpenSearch : Simple(GestureHandlerConfig.OpenSearch)
+     data object OpenAssistant : Simple(GestureHandlerConfig.OpenAssistant)
+ 
+diff --git a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOptions.kt b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOptions.kt
+index 0d487c039a..0198794312 100644
+--- a/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOptions.kt
++++ b/lawnchair/src/app/lawnchair/gestures/config/GestureHandlerOptions.kt
+@@ -11,6 +11,7 @@ val gestureHandlerOptions = listOf(
+     GestureHandlerOption.OpenQuickSettings,
+     GestureHandlerOption.OpenAppDrawer,
+     GestureHandlerOption.OpenAppSearch,
++    GestureHandlerOption.HomarSearch,
+     GestureHandlerOption.OpenSearch,
+     GestureHandlerOption.OpenApp,
+     GestureHandlerOption.OpenAssistant,
+@@ -19,6 +20,7 @@ val gestureHandlerOptions = listOf(
+ private val optionsDisabledInDeckLayout = setOf(
+     GestureHandlerOption.OpenAppDrawer,
+     GestureHandlerOption.OpenAppSearch,
++    GestureHandlerOption.HomarSearch,
+ )
+ 
+ fun filterGestureHandlerOptions(deckLayoutEnabled: Boolean): List<GestureHandlerOption> {
+diff --git a/lawnchair/src/app/lawnchair/gestures/handlers/OpenAppSearchGestureHandler.kt b/lawnchair/src/app/lawnchair/gestures/handlers/OpenAppSearchGestureHandler.kt
+index b0dfea79c9..77f39ba636 100644
+--- a/lawnchair/src/app/lawnchair/gestures/handlers/OpenAppSearchGestureHandler.kt
++++ b/lawnchair/src/app/lawnchair/gestures/handlers/OpenAppSearchGestureHandler.kt
+@@ -3,6 +3,7 @@ package app.lawnchair.gestures.handlers
+ import android.content.Context
+ import app.lawnchair.LawnchairLauncher
+ import app.lawnchair.animateToAllApps
++import app.lawnchair.omalawn.HomarSearchGesture
+ 
+ class OpenAppSearchGestureHandler(context: Context) : GestureHandler(context) {
+ 
+@@ -13,3 +14,8 @@ class OpenAppSearchGestureHandler(context: Context) : GestureHandler(context) {
+         launcher.animateToAllApps()
+     }
+ }
++
++// Homa Lawn: GestureHandler is sealed to this package; the behaviour lives in omalawn/HomarSearchGesture.kt
++class HomarSearchGestureHandler(context: Context) : GestureHandler(context) {
++    override suspend fun onTrigger(launcher: LawnchairLauncher) = HomarSearchGesture.open(launcher)
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt b/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
+new file mode 100644
+index 0000000000..092ef22640
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomarSearchGesture.kt
+@@ -0,0 +1,89 @@
++package app.lawnchair.omalawn
++
++import app.lawnchair.LawnchairLauncher
++import com.android.launcher3.LauncherState
++import com.android.launcher3.allapps.ActivityAllAppsContainerView
++import com.android.launcher3.statemanager.StateManager
++
++/**
++ * "Search (instant)" gesture (serial name `homarSearch`): the app search screen and keyboard at
++ * once, Nova-style, instead of upstream's "Open app search", which slides up the A-Z drawer first
++ * and focuses the search field only after it.
++ *
++ * The drawer is switched into its search mode while it is still off-screen (an empty result list
++ * makes it show the search results page; upstream's search transition is instant), then shown
++ * without the slide, and the search field is focused, which raises the keyboard. While the query
++ * is empty the page stays empty (or shows recent searches, if Lawnchair keeps them) instead of
++ * upstream's A-Z list, see [keepSearchPage]. Back from a search opened this way goes home, also
++ * with a query typed (upstream clears the query and drops to the A-Z list). With the keyboard up,
++ * Android's keyboard takes the first Back and only hides itself, as everywhere.
++ */
++object HomarSearchGesture {
++    // the launcher whose drawer we opened in search mode, until it leaves ALL_APPS
++    private var session: LawnchairLauncher? = null
++
++    fun open(launcher: LawnchairLauncher) {
++        val appsView = launcher.appsView
++        val input = appsView.searchUiManager.editText
++        if (input == null) {
++            // the drawer's search bar is hidden or not ours: behave like "Open app drawer"
++            launcher.stateManager.goToState(LauncherState.ALL_APPS)
++            return
++        }
++        if (!appsView.isSearching) appsView.setSearchResults(ArrayList())
++        session = launcher
++        launcher.stateManager.goToState(LauncherState.ALL_APPS, false)
++        watchSession(launcher)
++        // Upstream's controller sets the listener once; ours repeats its rule (a query is
++        // cleared) for searches not opened by this gesture, so it can stay installed.
++        input.setOnBackKeyListener {
++            if (session === launcher) {
++                launcher.stateManager.goToState(LauncherState.NORMAL)
++                true
++            } else if (input.text.isNullOrBlank()) {
++                false
++            } else {
++                appsView.searchUiManager.resetSearch()
++                true
++            }
++        }
++        input.showKeyboard()
++    }
++
++    /**
++     * Hook in LawnchairLauncher.onStateBack: Back once the search field has lost focus (the
++     * keyboard is down) reaches the launcher, not the field. Upstream would reset the search,
++     * which in our session keeps the empty search page, so every further Back would do the same.
++     * In our session Back goes home. Returns true when it did.
++     */
++    fun onStateBack(launcher: LawnchairLauncher): Boolean {
++        if (session !== launcher || !launcher.isInState(LauncherState.ALL_APPS)) return false
++        launcher.stateManager.goToState(LauncherState.NORMAL)
++        return true
++    }
++
++    /**
++     * Hook in AllAppsSearchInput.clearSearchResult: upstream answers an empty query (the zero
++     * state, or a query deleted back to nothing) with the A-Z list. In our session the drawer
++     * shows its empty search page instead. Returns true when it did, so the A-Z list is skipped.
++     */
++    fun keepSearchPage(appsView: ActivityAllAppsContainerView<*>): Boolean {
++        val launcher = session ?: return false
++        if (launcher.appsView !== appsView || !launcher.isInState(LauncherState.ALL_APPS)) return false
++        appsView.setSearchResults(ArrayList())
++        return true
++    }
++
++    private val watched = mutableSetOf<Int>()
++
++    private fun watchSession(launcher: LawnchairLauncher) {
++        if (!watched.add(System.identityHashCode(launcher))) return
++        launcher.stateManager.addStateListener(
++            object : StateManager.StateListener<LauncherState> {
++                override fun onStateTransitionComplete(finalState: LauncherState) {
++                    if (finalState != LauncherState.ALL_APPS && session === launcher) session = null
++                }
++            },
++        )
++    }
++}

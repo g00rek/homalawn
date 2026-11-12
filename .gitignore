@@ -1,0 +1,7 @@
+lawnchair/
+.venv/
+__pycache__/
+*.apk
+build/
+.superpowers/
+.claude/

@@ -1,0 +1,167 @@
+From e7130505fff6fbd28c086093570f65c948cab732 Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Tue, 13 Oct 2026 23:00:00 +0200
+Subject: [PATCH] omalawn home role: ask to be the default home app on first
+ run and from the link notification
+
+---
+ .../src/app/lawnchair/LawnchairLauncher.kt    | 12 ++++-
+ .../src/app/lawnchair/omalawn/HomeRole.kt     | 52 +++++++++++++++++++
+ .../app/lawnchair/omalawn/link/LinkService.kt | 23 ++++++--
+ 3 files changed, 81 insertions(+), 6 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index 41533fb5aa..bab4dc1b2a 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -154,12 +154,16 @@ class LawnchairLauncher : QuickstepLauncher() {
+ 
+     private lateinit var colorScheme: ColorScheme
+     private var hasBackGesture = false
++    private var omalawnHomeAsked = false // HomeRole: the next resume shows the default-home dialog
+ 
+     val gestureController by unsafeLazy { GestureController(this) }
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         layoutInflater.factory2 = LawnchairLayoutFactory(this)
+         super.onCreate(savedInstanceState)
++        // "Make Homa Lawn your home screen" in the link notification; a recreated activity keeps
++        // its intent, so only a fresh start counts
++        if (savedInstanceState == null) omalawnHomeAsked = intent?.action == app.lawnchair.omalawn.HomeRole.ACTION_REQUEST_HOME
+ 
+         prefs.launcherTheme.subscribeChanges(this, ::updateTheme)
+         prefs.feedProvider.subscribeChanges(this, defaultOverlay::reconnect)
+@@ -262,6 +266,7 @@ class LawnchairLauncher : QuickstepLauncher() {
+         }
+ 
+         super.onNewIntent(intent)
++        if (intent?.action == app.lawnchair.omalawn.HomeRole.ACTION_REQUEST_HOME) omalawnHomeAsked = true // Homa Lawn: "Set as home"
+     }
+ 
+     override fun collectStateHandlers(out: MutableList<StateHandler<LauncherState>>) {
+@@ -472,9 +477,14 @@ class LawnchairLauncher : QuickstepLauncher() {
+         restartIfPending()
+         refreshPredictionContainersFromModel()
+         app.lawnchair.omalawn.link.PairingGate.launcherResumed(true) // the home screen takes pair requests
++        // first run (once per install) or the notification's action: Android's default-home dialog;
++        // other prompts wait for the resume after it
++        val explicitHome = omalawnHomeAsked
++        omalawnHomeAsked = false
++        val askingHome = app.lawnchair.omalawn.HomeRole.maybeAsk(this, explicitHome)
+         // visible, so Android always allows the start; a no-op when the link already runs. Then
+         // make sure its notification can be seen (asks at most once per version).
+-        if (app.lawnchair.omalawn.link.LinkService.start(this)) {
++        if (app.lawnchair.omalawn.link.LinkService.start(this) && !askingHome) {
+             app.lawnchair.omalawn.link.NotifyPermission.maybeAsk(this)
+         }
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+new file mode 100644
+index 0000000000..2763ebc8db
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomeRole.kt
+@@ -0,0 +1,52 @@
++package app.lawnchair.omalawn
++
++import android.app.Activity
++import android.app.role.RoleManager
++import android.content.Context
++import android.content.Intent
++import android.os.Build
++import android.util.Log
++import app.lawnchair.LawnchairLauncher
++import com.android.launcher3.util.ApiWrapper
++
++/**
++ * First run as the default home screen. On a fresh install the launcher shows Android's own
++ * "set as default home app" dialog once (upstream's [ApiWrapper.assignDefaultHomeRole], which
++ * also toasts where to change it if the person declines). After that it asks again only when the
++ * person taps "Make Homa Lawn your home screen" in the link notification, which opens the launcher
++ * with [ACTION_REQUEST_HOME].
++ */
++object HomeRole {
++    private const val TAG = "OmalawnHome"
++    private const val PREFS = "omalawn_home"
++    private const val KEY_ASKED = "home_role_asked" // kept across updates, gone with an uninstall
++    const val ACTION_REQUEST_HOME = "app.lawnchair.omalawn.REQUEST_HOME"
++
++    /** The HOME role exists on this phone and another app holds it (or none does). */
++    fun missing(ctx: Context): Boolean {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
++        val rm = ctx.getSystemService(RoleManager::class.java) ?: return false
++        return rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)
++    }
++
++    /**
++     * Called when the launcher comes to the front. Shows the dialog when this install has not
++     * asked yet ([explicit] = false) or the person asked for it ([explicit] = true). Returns true
++     * when the dialog is on its way, so the caller leaves other prompts for the next resume.
++     */
++    fun maybeAsk(activity: Activity, explicit: Boolean): Boolean {
++        if (!missing(activity)) return false
++        val p = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        if (!explicit && p.getBoolean(KEY_ASKED, false)) return false
++        // recorded before asking: the dialog pauses and resumes the launcher, which must not ask again
++        p.edit().putBoolean(KEY_ASKED, true).commit()
++        Log.i(TAG, "asking to become the default home app (${if (explicit) "from the notification" else "first run"})")
++        ApiWrapper.INSTANCE.get(activity).assignDefaultHomeRole(activity)
++        return true
++    }
++
++    /** The notification action's intent: brings the launcher forward, which then asks. */
++    fun requestIntent(ctx: Context): Intent = Intent(ctx, LawnchairLauncher::class.java)
++        .setAction(ACTION_REQUEST_HOME)
++        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+index 2760a9835a..f4cf60c3d8 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+@@ -21,6 +21,7 @@ import android.os.SystemClock
+ import android.provider.Settings
+ import android.util.Log
+ import androidx.core.app.NotificationCompat
++import app.lawnchair.omalawn.HomeRole
+ import app.lawnchair.omalawn.LayoutIo
+ import com.android.launcher3.BuildConfig
+ import com.android.launcher3.R
+@@ -206,14 +207,17 @@ class LinkService : Service() {
+             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+         )
+         b.addAction(0, "Pair a computer", open)
+-        if (n > 0) {
+-            val forget = PendingIntent.getService(
++        // Android shows three actions at most: "Forget all computers" goes last, so it is the one
++        // left out while both setup actions still show
++        if (HomeRole.missing(this)) {
++            val home = PendingIntent.getActivity(
+                 this,
+-                1,
+-                Intent(this, LinkService::class.java).setAction(ACTION_FORGET_ALL),
++                4,
++                HomeRole.requestIntent(this),
+                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+             )
+-            b.addAction(0, "Forget all computers", forget)
++            b.addAction(0, "Make Homa Lawn your home screen", home)
++            lines.add("Homa Lawn is not your home screen yet")
+         }
+         val pm = getSystemService(PowerManager::class.java)!!
+         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+@@ -223,6 +227,15 @@ class LinkService : Service() {
+             b.addAction(0, "Keep connected", keep)
+             lines.add("Tap \"Keep connected\" so the phone stays reachable while asleep")
+         }
++        if (n > 0) {
++            val forget = PendingIntent.getService(
++                this,
++                1,
++                Intent(this, LinkService::class.java).setAction(ACTION_FORGET_ALL),
++                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++            )
++            b.addAction(0, "Forget all computers", forget)
++        }
+         if (lines.isNotEmpty()) {
+             b.setContentText(lines.first())
+             b.setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))

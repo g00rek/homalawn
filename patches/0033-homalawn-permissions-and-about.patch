@@ -1,0 +1,1374 @@
+From 8dac0c19491b6a9b04b368892d800746dd11eb96 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:09:08 +0100
+Subject: [PATCH] Homa Lawn: settings in three groups, Permissions,
+ notification channels, About (patch 0033)
+
+---
+ homalawn.gradle                               |  15 ++
+ .../res/drawable/homalawn_ic_notification.xml |  16 ++
+ .../res/drawable/homalawn_ic_permissions.xml  |  12 ++
+ lawnchair/res/values/homar_strings.xml        |  28 ++-
+ lawnchair/res/values/strings.xml              |   4 +-
+ .../app/lawnchair/omalawn/HomaLawnAbout.kt    | 186 +++++++++--------
+ .../lawnchair/omalawn/HomaLawnDashboard.kt    | 136 ++++++++++++
+ .../omalawn/HomaLawnNotifications.kt          |  57 +++++
+ .../lawnchair/omalawn/HomaLawnPermissions.kt  | 194 ++++++++++++++++++
+ .../app/lawnchair/omalawn/MediaPermission.kt  |  12 +-
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  11 +-
+ .../app/lawnchair/omalawn/OmalawnUpdate.kt    |  20 +-
+ .../omalawn/ThemeWallpapersScreen.kt          |  14 --
+ .../lawnchair/omalawn/link/ComputersEntry.kt  |  24 ---
+ .../app/lawnchair/omalawn/link/LinkAsks.kt    |  59 +++---
+ .../omalawn/link/NotifyPermission.kt          |  14 +-
+ .../src/app/lawnchair/omalawn/link/Pairing.kt |  20 +-
+ .../omalawn/screen/ScreenCommands.kt          |   4 +-
+ .../destinations/PreferencesDashboard.kt      |  12 +-
+ .../navigation/PreferenceNavigation.kt        |   2 +
+ 20 files changed, 624 insertions(+), 216 deletions(-)
+ create mode 100644 lawnchair/res/drawable/homalawn_ic_notification.xml
+ create mode 100644 lawnchair/res/drawable/homalawn_ic_permissions.xml
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
+ delete mode 100644 lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+
+diff --git a/homalawn.gradle b/homalawn.gradle
+index c390a4649b..92554e3423 100644
+--- a/homalawn.gradle
++++ b/homalawn.gradle
+@@ -15,6 +15,9 @@
+ //   (BRAND_KEYS); credits, the About screen and upstream's own statements stay as they are.
+ // - Homa Lawn's own defaults for upstream settings, in homalawn/res (patch 0026): no Lawnchair
+ //   announcements at the top of the settings.
++// - The test build is called "Homa Lawn Test" wherever Android lists it (launcher label, the
++//   settings icon, the accessibility service), so it can be told from the release next to it
++//   (patch 0033); BuildConfig.HOMALAWN_BUILD is the build number the settings show.
+ //
+ // Upstream's flavors, build types and signing are left untouched.
+ 
+@@ -78,6 +81,17 @@ file("lawnchair/res").eachDirMatch(~/values(-.+)?/) { dir ->
+ }
+ 
+ android {
++    defaultConfig {
++        buildConfigField "int", "HOMALAWN_BUILD", "0" // upstream's own flavors
++    }
++
++    buildTypes {
++        // the test build's name (patch 0033); the release build stays "Homa Lawn" (build.gradle)
++        debug {
++            resValue("string", "derived_app_name", "Homa Lawn Test")
++        }
++    }
++
+     if (hlHaveKey) {
+         signingConfigs {
+             homalawnRelease {
+@@ -96,6 +110,7 @@ android {
+             versionCode hlVersionCode
+             versionName hlVersionName
+             buildConfigField "String", "VERSION_DISPLAY_NAME", "\"${hlVersionName}\""
++            buildConfigField "int", "HOMALAWN_BUILD", "${hlBuild}"
+             // the launcher's Recents integration on every Android version, as in the debug builds
+             // our phones ran before (upstream limits its own release builds to the versions it tests)
+             manifestPlaceholders.quickstepMinSdk = "0"
+diff --git a/lawnchair/res/drawable/homalawn_ic_notification.xml b/lawnchair/res/drawable/homalawn_ic_notification.xml
+new file mode 100644
+index 0000000000..5588c33e81
+--- /dev/null
++++ b/lawnchair/res/drawable/homalawn_ic_notification.xml
+@@ -0,0 +1,16 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++
++    <!-- Homa Lawn's status icon: the phone mark (outline and app square, as assets/homalawn-mark.png),
++         one small icon for every Homa Lawn notification -->
++    <path
++        android:fillColor="@android:color/white"
++        android:fillType="evenOdd"
++        android:pathData="M8.25,1.5H15.75A1.75,1.75 0 0 1 17.5,3.25V20.75A1.75,1.75 0 0 1 15.75,22.5H8.25A1.75,1.75 0 0 1 6.5,20.75V3.25A1.75,1.75 0 0 1 8.25,1.5Z M8.5,3H15.5A0.5,0.5 0 0 1 16,3.5V20.5A0.5,0.5 0 0 1 15.5,21H8.5A0.5,0.5 0 0 1 8,20.5V3.5A0.5,0.5 0 0 1 8.5,3Z" />
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M11.85,4.5H14.15A0.6,0.6 0 0 1 14.75,5.1V7.4A0.6,0.6 0 0 1 14.15,8H11.85A0.6,0.6 0 0 1 11.25,7.4V5.1A0.6,0.6 0 0 1 11.85,4.5Z" />
++</vector>
+diff --git a/lawnchair/res/drawable/homalawn_ic_permissions.xml b/lawnchair/res/drawable/homalawn_ic_permissions.xml
+new file mode 100644
+index 0000000000..a4da2244d6
+--- /dev/null
++++ b/lawnchair/res/drawable/homalawn_ic_permissions.xml
+@@ -0,0 +1,12 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="#000000"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++
++    <!-- Material "verified user" icon, outlined (Apache 2.0): the Permissions row -->
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12 5.16,-1.26 9,-6.45 9,-12V5l-9,-4zM19,11c0,4.52 -2.98,8.69 -7,9.93 -4.02,-1.24 -7,-5.41 -7,-9.93V6.3l7,-3.11 7,3.11V11zM7.41,11.59L6,13l4,4 8,-8 -1.41,-1.42L10,14.17z" />
++</vector>
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index 1c0041b1ac..cdc971b50d 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -4,16 +4,14 @@
+     <string name="homar_gesture_search">Search (instant)</string>
+     <!-- settings: the paired computers, pairing another and forgetting them (patch 0030) -->
+     <string name="homar_computers_label">Computers</string>
+-    <string name="homar_computers_description">See the computers paired with this phone, pair another or forget one</string>
+-    <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017) -->
+-    <string name="homar_wallpapers_label">Wallpaper from Omarchy</string>
+-    <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
++    <!-- settings: the wallpaper picked from the computer's Omarchy theme (patch 0017; named Wallpaper & style since 0033) -->
++    <string name="homar_wallpapers_label">Wallpaper &amp; style</string>
+     <string name="homar_wallpapers_theme">Omarchy theme: %1$s</string>
+     <string name="homar_wallpapers_sync_off">Wallpaper sync is off for this phone. Turn it on in Homa Lawn on your computer.</string>
+     <string name="homar_wallpapers_book_unreadable">The looks stored on this phone can\'t be read. Forget all computers to clear them.</string>
+     <string name="homar_wallpapers_update_computer">Update Homa Lawn on your computer to choose the lock screen and home screen wallpapers here.</string>
+     <string name="homar_wallpapers_empty">This theme has no wallpapers.</string>
+-    <string name="homar_wallpapers_no_gradients">This theme has no colours to make gradients from.</string>
++    <string name="homar_wallpapers_no_gradients">This theme has no colors to make gradients from.</string>
+     <string name="homar_wallpapers_from">From %1$s</string>
+     <string name="homar_wallpapers_changed_last">(changed last)</string>
+     <string name="homar_wallpapers_not_sent">%1$s has not sent its wallpapers yet.</string>
+@@ -43,20 +41,30 @@
+     <string name="homar_wallpapers_on_home">on the home screen</string>
+     <string name="homar_wallpapers_gradient">gradient</string>
+     <string name="homar_wallpapers_unreachable">Computer not reachable — your choice is applied when it is.</string>
+-    <!-- settings › About (patch 0026) -->
++    <!-- settings › About (patch 0026; rows, credits and en-US spelling since 0033) -->
++    <string name="homalawn_about_build">build %1$d</string>
++    <string name="homalawn_about_project_github">Homa Lawn on GitHub</string>
++    <string name="homalawn_about_project_github_description">github.com/g00rek/homalawn</string>
++    <string name="homalawn_about_report">Report a problem</string>
++    <string name="homalawn_about_report_description">Open an issue on GitHub</string>
++    <string name="homalawn_about_credits">Licenses</string>
++    <string name="homalawn_about_bip39">BIP-39 English word list</string>
++    <string name="homalawn_about_bip39_description">The four pairing words come from this list</string>
++    <string name="homalawn_about_close">Close</string>
+     <string name="homalawn_about_built_on">Built on Lawnchair</string>
+     <string name="homalawn_about_lawnchair">Lawnchair</string>
+     <string name="homalawn_about_lawnchair_description">lawnchair.app</string>
+     <!-- settings › About (patch 0027): what Homa Lawn is for, and what it is on top of Lawnchair -->
+     <string name="homalawn_about_what">What Homa Lawn is</string>
+-    <string name="homalawn_about_what_text">Homa Lawn makes your Android phone part of your Omarchy desktop. Omarchy is a Linux setup built on Arch and Hyprland, where one theme sets the look of everything.\n\nWith Homa Lawn the phone follows that theme: when you switch themes on the computer, the phone\'s wallpapers, colours and icon tint follow. From the computer you can also arrange this home screen, move apps and widgets, and let AI assistants on the computer read and operate the phone, after you allow it here.\n\nThe phone and the computer talk to each other directly, over your own network (or your Tailscale network); there is no Homa Lawn server in between.</string>
++    <string name="homalawn_about_what_text">Homa Lawn makes your Android phone part of your Omarchy desktop. Omarchy is a Linux setup built on Arch and Hyprland, where one theme sets the look of everything.\n\nWith Homa Lawn the phone follows that theme: when you switch themes on the computer, the phone\'s wallpapers, colors and icon tint follow. From the computer you can also arrange this home screen, move apps and widgets, and let AI assistants on the computer read and operate the phone, once you turn on Permissions › Screen control here.\n\nThe phone and the computer talk to each other directly, over your own network (or your Tailscale network); there is no Homa Lawn server in between.</string>
+     <string name="homalawn_about_omarchy">Omarchy</string>
+     <string name="homalawn_about_omarchy_description">omarchy.org</string>
+     <string name="homalawn_about_omarchy_github">Omarchy on GitHub</string>
+     <string name="homalawn_about_omarchy_github_description">omacom/omarchy</string>
+-    <string name="homalawn_about_layer">Homa Lawn is Lawnchair with a layer on top. Lawnchair is a free, open-source Android launcher made by the Lawnchair team and its contributors: the home screen, the app drawer, the icons and most of the settings here are their work.\n\nHoma Lawn adds what ties this phone to your computer: pairing, wallpapers and colours from your Omarchy theme, and letting the Homa Lawn app on the computer arrange this home screen.\n\nHoma Lawn is not made by the Lawnchair team. Report Homa Lawn problems to us, not to them.</string>
++    <string name="homalawn_about_layer">Homa Lawn is Lawnchair with a layer on top. Lawnchair is a free, open-source Android launcher made by the Lawnchair team and its contributors: the home screen, the app drawer, the icons and most of the settings here are their work.\n\nHoma Lawn adds what ties this phone to your computer: pairing, wallpapers and colors from your Omarchy theme, and letting the Homa Lawn app on the computer arrange this home screen.\n\nHoma Lawn is not made by the Lawnchair team. Report Homa Lawn problems to us, not to them.</string>
+     <string name="homalawn_about_github">Lawnchair on GitHub</string>
+     <string name="homalawn_about_github_description">Source code and the people who made it</string>
+-    <string name="homalawn_about_licences">Open-source licences</string>
+-    <string name="homalawn_about_flux">Flux — MIT License</string>
++    <string name="homalawn_about_licences">Open-source licenses</string>
++    <string name="homalawn_about_flux">Flux (MIT License)</string>
++    <string name="homalawn_about_flux_description">Code adapted in the Computers screen and in Wallpaper &amp; style</string>
+ </resources>
+diff --git a/lawnchair/res/values/strings.xml b/lawnchair/res/values/strings.xml
+index 1afc558226..21cfad6a83 100644
+--- a/lawnchair/res/values/strings.xml
++++ b/lawnchair/res/values/strings.xml
+@@ -162,8 +162,8 @@
+     <string name="sort_active_items_action">Sort active items</string>
+ 
+     <!-- Homa Lawn: what the accessibility service really does (English only on purpose) -->
+-    <string name="omalawn_accessibility_service_summary" translatable="false">Lets Homa Lawn on your paired computer read and operate this screen</string>
+-    <string name="omalawn_accessibility_service_description" translatable="false">This lets Homa Lawn on a computer you paired with this phone read what is on the screen, take screenshots, and tap, swipe, type and press Back, Home or Recents for you. It works only while the computer is connected over the Homa Lawn link; computers you have not paired cannot use it. Lawnchair also uses it to lock the phone and open Recents from home screen gestures.\n\nTurn it off here at any time, or remove a computer with \"Forget all computers\" in the Homa Lawn notification.</string>
++    <string name="omalawn_accessibility_service_summary" translatable="false">Screen control from your paired computer, and the lock and Recents gestures</string>
++    <string name="omalawn_accessibility_service_description" translatable="false">This lets Homa Lawn on a computer you paired with this phone read what is on the screen, take screenshots, and tap, swipe, type and press Back, Home or Recents for you. It works only while the computer is connected over the Homa Lawn link; computers you have not paired cannot use it. The home screen also uses it to lock the phone and open Recents from its gestures.\n\nTurn it off here at any time, or forget a computer in Homa Lawn\'s settings › Computers.</string>
+     <!-- A11y description -->
+     <string name="accessibility_service_description">To perform certain actions when you use a gesture, such as locking your phone, Lawnchair requires accessibility access.\n\nLawnchair doesn\'t watch your actions, though all accessibility services require this privilege. Lawnchair discards any event sent by the system.\n\nTo lock your phone or open the Recents screen, Lawnchair uses the performGlobalAction accessibility service.</string>
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+index 28ef75a717..5dfb2189f3 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+@@ -2,17 +2,24 @@ package app.lawnchair.omalawn
+ 
+ import android.content.Intent
+ import androidx.compose.foundation.Image
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.AlertDialog
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.asImageBitmap
+ import androidx.compose.ui.platform.LocalContext
+@@ -25,20 +32,22 @@ import app.lawnchair.preferences.PreferenceManager
+ import app.lawnchair.ui.preferences.LocalIsExpandedScreen
+ import app.lawnchair.ui.preferences.components.NavigationActionPreference
+ import app.lawnchair.ui.preferences.components.controls.ClickablePreference
+-import app.lawnchair.ui.preferences.components.layout.PreferenceGroupHeading
+-import app.lawnchair.ui.preferences.components.layout.PreferenceGroupItem
+-import app.lawnchair.ui.preferences.components.layout.PreferenceLayoutLazyColumn
++import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
++import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
++import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
+ import app.lawnchair.ui.preferences.navigation.AboutLicenses
+ import com.android.launcher3.BuildConfig
+ import com.android.launcher3.R
+ 
+ /**
+- * Homa Lawn's About screen (patch 0026), in place of Lawnchair's: the app's own icon (the one
+- * the launcher and Android's Settings show), its name and version, then (patch 0027) "What Homa
+- * Lawn is" (what it is for, with Omarchy's site and repository) and "Built on Lawnchair" (what
+- * Homa Lawn adds on top of Lawnchair and who made what, with lawnchair.app and Lawnchair's
+- * GitHub), and the open-source licences. Lawnchair's links, team list,
+- * nightly updater and privacy policy are Lawnchair's, not ours, so they are not shown here.
++ * Homa Lawn's About screen (patch 0026, reworked in 0033), in place of Lawnchair's: the app's own
++ * icon (the one the launcher and Android's Settings show), "Homa Lawn 16" with the build number
++ * and the full version; rows to Homa Lawn on GitHub and to report a problem; "What Homa Lawn is"
++ * (what it is for, with Omarchy's site and repository) and "Built on Lawnchair" (what Homa Lawn
++ * adds and who made what, with lawnchair.app and Lawnchair's GitHub); then the licenses:
++ * Lawnchair's open-source licenses screen, Flux's MIT License in full (a dialog), and the BIP-39
++ * English word list the pairing words come from. Lawnchair's links, team list, nightly updater and
++ * privacy policy are Lawnchair's, not ours, so they are not shown here.
+  */
+ @Composable
+ fun HomaLawnAbout(modifier: Modifier = Modifier) {
+@@ -47,97 +56,94 @@ fun HomaLawnAbout(modifier: Modifier = Modifier) {
+     val icon = remember {
+         context.packageManager.getApplicationIcon(context.packageName).toBitmap(288, 288).asImageBitmap()
+     }
++    var flux by remember { mutableStateOf(false) }
+ 
+-    PreferenceLayoutLazyColumn(
++    PreferenceLayout(
+         label = stringResource(id = R.string.about_label),
+         modifier = modifier,
+         backArrowVisible = !LocalIsExpandedScreen.current,
+     ) {
+-        item { Spacer(Modifier.padding(top = 8.dp)) }
+-        item {
+-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+-                Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(72.dp))
+-            }
+-        }
+-        item { Spacer(modifier = Modifier.height(12.dp)) }
+-        item {
++        Column(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
++            Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(72.dp))
++            Spacer(modifier = Modifier.height(12.dp))
+             Text(
+-                text = stringResource(id = R.string.derived_app_name),
++                text = "${stringResource(id = R.string.derived_app_name)} ${BuildConfig.MAJOR_VERSION}",
+                 style = MaterialTheme.typography.titleLarge,
+                 textAlign = TextAlign.Center,
+-                modifier = Modifier.fillMaxWidth(),
+             )
++            if (prefs.hideVersionInfo.get()) {
++                Secondary(prefs.pseudonymVersion.get() + " (pseudonym)", MaterialTheme.typography.bodyLarge)
++            } else {
++                Secondary(stringResource(R.string.homalawn_about_build, BuildConfig.HOMALAWN_BUILD), MaterialTheme.typography.bodyLarge)
++                Secondary(BuildConfig.VERSION_DISPLAY_NAME, MaterialTheme.typography.bodySmall)
++            }
+         }
+-        item {
+-            Text(
+-                text = if (prefs.hideVersionInfo.get()) {
+-                    prefs.pseudonymVersion.get() + " (pseudonym)"
+-                } else {
+-                    BuildConfig.VERSION_DISPLAY_NAME
+-                },
+-                style = MaterialTheme.typography.bodyLarge,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                textAlign = TextAlign.Center,
+-                modifier = Modifier.fillMaxWidth(),
++        PreferenceGroup {
++            LinkRow(R.string.homalawn_about_project_github, R.string.homalawn_about_project_github_description, HOMALAWN_GITHUB)
++            LinkRow(R.string.homalawn_about_report, R.string.homalawn_about_report_description, HOMALAWN_ISSUES)
++        }
++        PreferenceGroup(heading = stringResource(R.string.homalawn_about_what)) {
++            Paragraph(R.string.homalawn_about_what_text)
++            LinkRow(R.string.homalawn_about_omarchy, R.string.homalawn_about_omarchy_description, OMARCHY_SITE)
++            LinkRow(R.string.homalawn_about_omarchy_github, R.string.homalawn_about_omarchy_github_description, OMARCHY_GITHUB)
++        }
++        PreferenceGroup(heading = stringResource(R.string.homalawn_about_built_on)) {
++            Paragraph(R.string.homalawn_about_layer)
++            LinkRow(R.string.homalawn_about_lawnchair, R.string.homalawn_about_lawnchair_description, LAWNCHAIR_SITE)
++            LinkRow(R.string.homalawn_about_github, R.string.homalawn_about_github_description, LAWNCHAIR_GITHUB)
++        }
++        PreferenceGroup(heading = stringResource(R.string.homalawn_about_credits)) {
++            NavigationActionPreference(
++                label = stringResource(R.string.homalawn_about_licences),
++                destination = AboutLicenses,
+             )
++            ClickablePreference(
++                label = stringResource(R.string.homalawn_about_flux),
++                subtitle = stringResource(R.string.homalawn_about_flux_description),
++                onClick = { flux = true },
++            )
++            LinkRow(R.string.homalawn_about_bip39, R.string.homalawn_about_bip39_description, BIP39_LIST)
+         }
+-        item { Spacer(modifier = Modifier.height(16.dp)) }
+-        item { PreferenceGroupHeading(stringResource(R.string.homalawn_about_what)) }
+-        item { Paragraph(R.string.homalawn_about_what_text) }
+-        item {
+-            PreferenceGroupItem(cutTop = false, cutBottom = true) {
+-                LinkRow(R.string.homalawn_about_omarchy, R.string.homalawn_about_omarchy_description, OMARCHY_SITE)
+-            }
+-        }
+-        item { Spacer(Modifier.height(3.dp)) }
+-        item {
+-            PreferenceGroupItem(cutTop = true, cutBottom = false) {
+-                LinkRow(R.string.homalawn_about_omarchy_github, R.string.homalawn_about_omarchy_github_description, OMARCHY_GITHUB)
+-            }
+-        }
+-        item { Spacer(Modifier.height(8.dp)) }
+-        item { PreferenceGroupHeading(stringResource(R.string.homalawn_about_built_on)) }
+-        item { Paragraph(R.string.homalawn_about_layer) }
+-        item {
+-            PreferenceGroupItem(cutTop = false, cutBottom = true) {
+-                LinkRow(R.string.homalawn_about_lawnchair, R.string.homalawn_about_lawnchair_description, LAWNCHAIR_SITE)
+-            }
+-        }
+-        item { Spacer(Modifier.height(3.dp)) }
+-        item {
+-            PreferenceGroupItem(cutTop = true, cutBottom = true) {
+-                LinkRow(R.string.homalawn_about_github, R.string.homalawn_about_github_description, LAWNCHAIR_GITHUB)
+-            }
+-        }
+-        item { Spacer(Modifier.height(3.dp)) }
+-        item {
+-            PreferenceGroupItem(cutTop = true, cutBottom = true) {
+-                NavigationActionPreference(
+-                    label = stringResource(R.string.homalawn_about_licences),
+-                    destination = AboutLicenses,
+-                )
+-            }
+-        }
+-        item { Spacer(Modifier.height(3.dp)) }
+-        item {
+-            PreferenceGroupItem(cutTop = true, cutBottom = false) {
++    }
++
++    if (flux) {
++        AlertDialog(
++            onDismissRequest = { flux = false },
++            title = { Text(stringResource(R.string.homalawn_about_flux)) },
++            text = {
+                 Text(
+-                    text = stringResource(R.string.homalawn_about_flux),
+-                    style = MaterialTheme.typography.bodyLarge,
+-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
++                    FLUX_LICENSE,
++                    style = MaterialTheme.typography.bodySmall,
++                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                 )
+-            }
+-        }
++            },
++            confirmButton = { TextButton({ flux = false }) { Text(stringResource(R.string.homalawn_about_close)) } },
++        )
+     }
+ }
+ 
+ @Composable
+-private fun Paragraph(text: Int) {
++private fun Secondary(text: String, style: androidx.compose.ui.text.TextStyle) {
+     Text(
+-        text = stringResource(text),
+-        style = MaterialTheme.typography.bodyLarge,
++        text = text,
++        style = style,
+         color = MaterialTheme.colorScheme.onSurfaceVariant,
+-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
++        textAlign = TextAlign.Center,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
++    )
++}
++
++/** A paragraph as a card of its own group, never loose text. */
++@Composable
++private fun Paragraph(text: Int) {
++    PreferenceTemplate(
++        title = {
++            Text(
++                text = stringResource(text),
++                style = MaterialTheme.typography.bodyMedium,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        },
+     )
+ }
+ 
+@@ -154,7 +160,23 @@ private fun LinkRow(label: Int, subtitle: Int, url: String) {
+     )
+ }
+ 
++private const val HOMALAWN_GITHUB = "https://github.com/g00rek/homalawn"
++private const val HOMALAWN_ISSUES = "https://github.com/g00rek/homalawn/issues"
+ private const val OMARCHY_SITE = "https://omarchy.org/"
+ private const val OMARCHY_GITHUB = "https://github.com/omacom/omarchy" // basecamp/omarchy redirects here
+ private const val LAWNCHAIR_SITE = "https://lawnchair.app/"
+ private const val LAWNCHAIR_GITHUB = "https://github.com/LawnchairLauncher/lawnchair"
++private const val BIP39_LIST = "https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt"
++
++// the repository's THIRD_PARTY_LICENSES, word for word
++private const val FLUX_LICENSE = """Flux (https://github.com/bjarneo/flux)
++
++MIT License
++
++Copyright (c) 2026 Bjarne Oeverli
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."""
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
+new file mode 100644
+index 0000000000..82623cc541
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnDashboard.kt
+@@ -0,0 +1,136 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import androidx.lifecycle.compose.LifecycleResumeEffect
++import app.lawnchair.omalawn.link.Computer
++import app.lawnchair.omalawn.link.HomarComputers
++import app.lawnchair.omalawn.link.LinkServer
++import app.lawnchair.omalawn.link.Pins
++import app.lawnchair.ui.preferences.LocalNavController
++import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
++import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
++import com.android.launcher3.BuildConfig
++import com.android.launcher3.R
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++
++/**
++ * The settings dashboard's labelled groups (patch 0033): Homa Lawn's own layer first, under
++ * "Your computer" (Computers, Wallpaper & style, Permissions, each with a summary of its state);
++ * Lawnchair's rows follow under "Launcher" in upstream's order, and About under "About". The
++ * headings are [YOUR_COMPUTER], [LAUNCHER] and [ABOUT]; PreferencesDashboard has one hook each.
++ */
++object HomaLawnDashboard {
++    const val YOUR_COMPUTER = "Your computer"
++    const val LAUNCHER = "Launcher"
++    const val ABOUT = "About"
++
++    /** The About row's summary: "Homa Lawn 16 · build 325". */
++    fun aboutSummary(ctx: Context): String =
++        "${ctx.getString(R.string.derived_app_name)} ${BuildConfig.MAJOR_VERSION} · build ${BuildConfig.HOMALAWN_BUILD}"
++}
++
++@Composable
++fun HomaLawnDashboardGroup() {
++    val ctx = LocalContext.current
++    val nav = LocalNavController.current
++    // computers and their connections change while the dashboard shows; permissions change in Android's pages
++    var tick by remember { mutableIntStateOf(0) }
++    DisposableEffect(Unit) {
++        val l: () -> Unit = { tick++ }
++        Pins.onChange(l)
++        LinkServer.onChange(l)
++        onDispose {
++            Pins.removeListener(l)
++            LinkServer.removeListener(l)
++        }
++    }
++    LifecycleResumeEffect(Unit) {
++        tick++
++        onPauseOrDispose { }
++    }
++    val book by LookBook.changes.collectAsState()
++    var computers by remember { mutableStateOf<String?>(null) }
++    var look by remember { mutableStateOf<String?>(null) }
++    LaunchedEffect(tick, book) {
++        withContext(Dispatchers.IO) {
++            val paired = Pins.list(ctx)
++            computers = computersSummary(paired, LinkServer.connectedFps())
++            look = lookSummary(ctx, paired)
++        }
++    }
++    val attention = remember(tick) { HomaLawnPermissions.needAttention(ctx) }
++
++    PreferenceGroup(heading = HomaLawnDashboard.YOUR_COMPUTER) {
++        PreferenceCategory(
++            label = stringResource(R.string.homar_computers_label),
++            description = computers ?: " ",
++            iconResource = R.drawable.homar_ic_computer,
++            onNavigate = { nav.navigate(HomarComputers) },
++        )
++        PreferenceCategory(
++            label = stringResource(R.string.homar_wallpapers_label),
++            description = look ?: " ",
++            iconResource = R.drawable.ic_wallpaper,
++            onNavigate = { nav.navigate(HomarWallpapers) },
++        )
++        PreferenceCategory(
++            label = "Permissions",
++            description = when (attention) {
++                0 -> "All set"
++                1 -> "1 needs attention"
++                else -> "$attention need attention"
++            },
++            iconResource = R.drawable.homalawn_ic_permissions,
++            onNavigate = { nav.navigate(HomaLawnPermissions.Route) },
++        )
++    }
++}
++
++/** "Laptop · online now" / "Laptop · last seen 5 min ago" / "2 paired" / "None paired yet". */
++private fun computersSummary(paired: List<Computer>, online: Set<String>): String = when (paired.size) {
++    0 -> "None paired yet"
++    1 -> paired[0].let { c ->
++        val name = c.name.ifEmpty { "Computer" }
++        when {
++            c.fp in online -> "$name · online now"
++            c.seen == 0L -> "$name · not seen yet"
++            else -> "$name · last seen ${ago(c.seen)}"
++        }
++    }
++    else -> "${paired.size} paired"
++}
++
++/** "From <computer>'s Omarchy theme", or "From your computer's Omarchy theme" when no computer is the source yet. */
++private fun lookSummary(ctx: Context, paired: List<Computer>): String {
++    val source = try {
++        LookBook.source(ctx)
++    } catch (_: OmalawnError) {
++        null // an unreadable look book: the screen itself says so
++    }
++    val name = paired.firstOrNull { it.fp == source }?.name?.ifEmpty { null }
++        ?: paired.singleOrNull()?.name?.ifEmpty { null }
++    return if (name != null) "From $name's Omarchy theme" else "From your computer's Omarchy theme"
++}
++
++// English whatever the phone's language is, as on the Computers screen
++private fun ago(ms: Long): String {
++    val m = (System.currentTimeMillis() - ms) / 60_000
++    return when {
++        m < 1 -> "just now"
++        m < 60 -> "$m min ago"
++        m < 1440 -> "${m / 60} h ago"
++        else -> "${m / 1440} days ago"
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
+new file mode 100644
+index 0000000000..cc6b99cbb6
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
+@@ -0,0 +1,57 @@
++package app.lawnchair.omalawn
++
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationChannelGroup
++import android.app.NotificationManager
++import android.content.Context
++import android.os.Build
++import com.android.launcher3.R
++
++/**
++ * Homa Lawn's notification channels, in one channel group "From your computer" on Android's
++ * notification page for the app (patch 0033), apart from Lawnchair's own:
++ * - "Pairing requests" ([PAIRING]): asks before a computer is paired;
++ * - "Setup reminders" ([REMINDERS]): what Homa Lawn still needs from Android (home app, run in
++ *   background, photo access); a tap opens Settings › Permissions;
++ * - "App updates" ([UPDATES]): a new Homa Lawn sent from a paired computer.
++ * The ids are the ones phones already have, so a person's choices per channel stay. All three are
++ * created together whenever one is needed, so the page always shows the whole group. Every Homa
++ * Lawn notification uses one small icon, the phone mark ([ICON]).
++ */
++object HomaLawnNotifications {
++    const val PAIRING = "omalawn_pair"
++    const val REMINDERS = "omalawn_requests"
++    const val UPDATES = "omalawn_update"
++    private const val GROUP = "homalawn_from_computer"
++
++    val ICON = R.drawable.homalawn_ic_notification
++
++    /** Creates (or renames) the group and the three channels; returns the notification manager. */
++    fun ensure(ctx: Context): NotificationManager? {
++        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return null
++        nm.createNotificationChannelGroup(NotificationChannelGroup(GROUP, "From your computer"))
++        // below Android 12 notification actions cannot demand an unlock: pairing stays off the lock screen
++        val pairingLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Notification.VISIBILITY_PRIVATE else Notification.VISIBILITY_SECRET
++        nm.createNotificationChannels(
++            listOf(
++                NotificationChannel(PAIRING, "Pairing requests", NotificationManager.IMPORTANCE_HIGH).apply {
++                    description = "Asks before a computer is paired with this phone"
++                    lockscreenVisibility = pairingLock
++                    setShowBadge(false)
++                    group = GROUP
++                },
++                NotificationChannel(REMINDERS, "Setup reminders", NotificationManager.IMPORTANCE_DEFAULT).apply {
++                    description = "What Homa Lawn still needs from Android: the home app, running in the background, access to photos"
++                    group = GROUP
++                },
++                NotificationChannel(UPDATES, "App updates", NotificationManager.IMPORTANCE_HIGH).apply {
++                    description = "A new Homa Lawn sent from your paired computer, ready to install"
++                    setShowBadge(false)
++                    group = GROUP
++                },
++            ),
++        )
++        return nm
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
+new file mode 100644
+index 0000000000..bf3946d415
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
+@@ -0,0 +1,194 @@
++package app.lawnchair.omalawn
++
++import android.annotation.SuppressLint
++import android.app.Activity
++import android.content.ActivityNotFoundException
++import android.content.Context
++import android.content.ContextWrapper
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.os.PowerManager
++import android.provider.Settings
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import androidx.core.app.NotificationManagerCompat
++import androidx.lifecycle.compose.LifecycleResumeEffect
++import androidx.navigation.NavGraphBuilder
++import androidx.navigation.compose.composable
++import androidx.navigation.navDeepLink
++import app.lawnchair.LawnchairAccessibilityService
++import app.lawnchair.omalawn.screen.ScreenCommands
++import app.lawnchair.ui.preferences.LocalIsExpandedScreen
++import app.lawnchair.ui.preferences.PreferenceActivity
++import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
++import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
++import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
++import com.android.launcher3.R
++import kotlinx.serialization.Serializable
++import org.json.JSONObject
++
++/**
++ * Settings › Permissions (patch 0033): the one place that shows everything Homa Lawn needs from
++ * Android, each with its state, one line why, and a tap that opens the exact Android page. Three
++ * are needed for a computer to reach the phone (home app, run in background, notifications), two
++ * are optional (screen control, install updates). The dashboard row counts only the needed ones;
++ * the "Setup reminders" notification opens this screen; `launcher.ping` reports the same states
++ * as `permissions`, so the computer shows what the phone shows.
++ */
++object HomaLawnPermissions {
++    enum class Perm(val key: String, val required: Boolean) {
++        HOME("home", true),
++        BACKGROUND("background", true),
++        NOTIFICATIONS("notifications", true),
++        SCREEN_CONTROL("screen_control", false),
++        INSTALL_UPDATES("install_updates", false),
++    }
++
++    private const val DEEP_LINK = "lawnchair://settings/homalawn-permissions"
++
++    /**
++     * Homa Lawn is the home app Android opens: the HOME intent resolves to it (not to the chooser);
++     * also `launcher.ping`'s `default_home`. Not the HOME role: after an install the role can still
++     * name Homa Lawn while Home shows the chooser (seen on the test AVD).
++     */
++    fun isHome(ctx: Context): Boolean = ctx.packageManager.resolveActivity(
++        Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
++        0,
++    )?.activityInfo?.packageName == ctx.packageName
++
++    fun allowed(ctx: Context, p: Perm): Boolean = when (p) {
++        Perm.HOME -> isHome(ctx)
++        Perm.BACKGROUND -> ctx.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(ctx.packageName) == true
++        Perm.NOTIFICATIONS -> NotificationManagerCompat.from(ctx).areNotificationsEnabled()
++        Perm.SCREEN_CONTROL -> LawnchairAccessibilityService.current != null
++        Perm.INSTALL_UPDATES -> ctx.packageManager.canRequestPackageInstalls()
++    }
++
++    /** How many of the needed ones are not allowed. */
++    fun needAttention(ctx: Context): Int = Perm.entries.count { it.required && !allowed(ctx, it) }
++
++    /** `launcher.ping`'s `permissions`: {home, background, notifications, screen_control, install_updates}. */
++    fun toJson(ctx: Context): JSONObject = JSONObject().apply { Perm.entries.forEach { put(it.key, allowed(ctx, it)) } }
++
++    /** Opens this screen over a fresh settings task (the "Setup reminders" notification's tap). */
++    fun openIntent(ctx: Context): Intent = Intent(Intent.ACTION_VIEW, Uri.parse(DEEP_LINK))
++        .setClass(ctx, PreferenceActivity::class.java)
++        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
++
++    /** The exact Android page for [p] (a dialog where Android asks the question itself). */
++    @SuppressLint("BatteryLife") // sideloaded build; the link must survive Doze
++    fun androidPage(ctx: Context, p: Perm): Intent {
++        val pkg = Uri.fromParts("package", ctx.packageName, null)
++        return when (p) {
++            Perm.HOME -> Intent(Settings.ACTION_HOME_SETTINGS)
++            // not allowed: Android's own question; allowed: App info, where App battery usage lives
++            Perm.BACKGROUND -> if (allowed(ctx, p)) {
++                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
++            } else {
++                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkg)
++            }
++            Perm.NOTIFICATIONS -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
++                .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
++            // the service's own page needs a permission only system apps get; Homa Lawn is listed here
++            Perm.SCREEN_CONTROL -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
++            Perm.INSTALL_UPDATES -> Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkg)
++        }
++    }
++
++    /** The settings route, reachable by its deep link from the notification. */
++    @Serializable
++    data object Route
++
++    fun register(graph: NavGraphBuilder) {
++        graph.composable<Route>(deepLinks = listOf(navDeepLink<Route>(basePath = DEEP_LINK))) { PermissionsScreen() }
++    }
++}
++
++/** Registers the screen in Lawnchair's settings graph (one line in PreferenceNavigation). */
++fun NavGraphBuilder.homaLawnPermissions() = HomaLawnPermissions.register(this)
++
++@Composable
++fun PermissionsScreen() {
++    val ctx = LocalContext.current
++    // the states change in Android's pages; read again whenever the screen comes back
++    var tick by remember { mutableIntStateOf(0) }
++    LifecycleResumeEffect(Unit) {
++        tick++
++        onPauseOrDispose { }
++    }
++    val states = remember(tick) { HomaLawnPermissions.Perm.entries.associateWith { HomaLawnPermissions.allowed(ctx, it) } }
++    // Android 13+ may block turning on an accessibility service of a sideloaded app
++    val restricted = remember(tick) { Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ScreenCommands.restricted(ctx) != false }
++    val samsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
++    val name = stringResource(R.string.derived_app_name) // as Android lists it ("Homa Lawn Test" for the test build)
++
++    PreferenceLayout(label = "Permissions", backArrowVisible = !LocalIsExpandedScreen.current) {
++        PreferenceGroup(heading = "Needed") {
++            PermissionRow(HomaLawnPermissions.Perm.HOME, "Home app", states, "Your computer reaches the phone through the home screen.")
++            PermissionRow(
++                HomaLawnPermissions.Perm.BACKGROUND,
++                "Run in background",
++                states,
++                "Lets your computer reach the phone while it sleeps.",
++                hint = "In Android: App battery usage › Allow background usage." +
++                    if (samsung) " On Samsung also add Homa Lawn to Never auto sleeping apps." else "",
++            )
++            PermissionRow(HomaLawnPermissions.Perm.NOTIFICATIONS, "Notifications", states, "For pairing requests and updates that need a tap.")
++        }
++        PreferenceGroup(heading = "Optional") {
++            PermissionRow(
++                HomaLawnPermissions.Perm.SCREEN_CONTROL,
++                "Screen control",
++                states,
++                "Lets a paired computer or its AI assistant see and operate the screen.",
++                hint = listOfNotNull(
++                    "In Android: Downloaded apps › $name › Use $name.",
++                    "If Android says “Restricted setting”: App info › ⋮ › Allow restricted settings, then try again.".takeIf { restricted },
++                ).joinToString("\n"),
++            )
++            PermissionRow(HomaLawnPermissions.Perm.INSTALL_UPDATES, "Install updates", states, "Lets updates from your computer install.")
++        }
++    }
++}
++
++@Composable
++private fun PermissionRow(
++    perm: HomaLawnPermissions.Perm,
++    title: String,
++    states: Map<HomaLawnPermissions.Perm, Boolean>,
++    why: String,
++    hint: String? = null,
++) {
++    val ctx = LocalContext.current
++    val allowed = states[perm] == true
++    PreferenceTemplate(
++        title = { Text(title) },
++        description = { Text(listOfNotNull(why, hint.takeIf { !allowed }).joinToString("\n")) },
++        endWidget = {
++            Text(
++                if (allowed) "Allowed" else "Not allowed",
++                style = MaterialTheme.typography.labelLarge,
++                color = if (!allowed && perm.required) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        },
++        onClick = {
++            // in the settings' own task, so Back from Android's page comes back here
++            val activity = generateSequence(ctx) { (it as? ContextWrapper)?.baseContext }.firstOrNull { it is Activity }
++            fun open(i: Intent) = (activity ?: ctx).startActivity(if (activity == null) i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) else i)
++            try {
++                open(HomaLawnPermissions.androidPage(ctx, perm))
++            } catch (_: ActivityNotFoundException) {
++                // a phone whose Settings lacks that page: App info leads to every one of them
++                open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", ctx.packageName, null)))
++            }
++        },
++    )
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt b/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
+index f7b19c57cc..ff28f01878 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
+@@ -2,7 +2,6 @@ package app.lawnchair.omalawn
+ 
+ import android.Manifest
+ import android.app.Activity
+-import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
+ import android.app.WallpaperManager
+@@ -31,7 +30,7 @@ import org.json.JSONObject
+  * `why: not_grantable` and posts nothing; the prompt path is for Android 12 and older.
+  */
+ object MediaPermission {
+-    private const val CHANNEL = "omalawn_requests"
++    private const val CHANNEL = HomaLawnNotifications.REMINDERS
+     private const val NOTIFICATION_ID = 47102
+     const val REQUEST_CODE = 47102
+     const val EXTRA_PERMISSION = "permission"
+@@ -74,12 +73,7 @@ object MediaPermission {
+             NotifyPermission.neededNow(ctx) // the launcher asks for notifications when it next comes up
+             return JSONObject().put("granted", false).put("asked", false).put("why", "notifications_off")
+         }
+-        val nm = ctx.getSystemService(NotificationManager::class.java)!!
+-        nm.createNotificationChannel(
+-            NotificationChannel(CHANNEL, "Homa Lawn requests", NotificationManager.IMPORTANCE_DEFAULT).apply {
+-                description = "Permissions Homa Lawn on your computer needs from you"
+-            },
+-        )
++        val nm = HomaLawnNotifications.ensure(ctx)!!
+         val tap = PendingIntent.getActivity(
+             ctx,
+             REQUEST_CODE,
+@@ -89,7 +83,7 @@ object MediaPermission {
+             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+         )
+         val n = NotificationCompat.Builder(ctx, CHANNEL)
+-            .setSmallIcon(android.R.drawable.ic_menu_gallery)
++            .setSmallIcon(HomaLawnNotifications.ICON)
+             .setContentTitle("Homa Lawn needs access to photos to back up your wallpaper")
+             .setContentText("Tap to allow. Homa Lawn uses it only to read the current wallpaper.")
+             .setContentIntent(tap)
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index b0b39ffd77..5d1e792528 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -3,7 +3,6 @@ package app.lawnchair.omalawn
+ import android.app.WallpaperManager
+ import android.appwidget.AppWidgetManager
+ import android.content.Context
+-import android.content.Intent
+ import android.content.pm.LauncherApps
+ import android.os.Build
+ import android.os.Handler
+@@ -254,13 +253,9 @@ object OmalawnCommands {
+         // true once the workspace has been loaded from the DB (LoaderTask finished); false while
+         // the launcher is starting, loading, or has never been started in this process
+         .put("model_loaded", LauncherAppState.getInstance(ctx).model.isModelLoaded())
+-        .put(
+-            "default_home",
+-            ctx.packageManager.resolveActivity(
+-                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+-                0,
+-            )?.activityInfo?.packageName == ctx.packageName,
+-        )
++        .put("default_home", HomaLawnPermissions.isHome(ctx))
++        // patch 0033: what Settings › Permissions shows, {home, background, notifications, screen_control, install_updates}
++        .put("permissions", HomaLawnPermissions.toJson(ctx))
+ 
+     private fun typed(v: Any?): JSONObject = JSONObject()
+         .put(
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+index 30cce86079..5063c92f78 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnUpdate.kt
+@@ -2,7 +2,6 @@ package app.lawnchair.omalawn
+ 
+ import android.app.Activity
+ import android.app.KeyguardManager
+-import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
+ import android.content.BroadcastReceiver
+@@ -22,7 +21,6 @@ import android.util.Log
+ import android.widget.Toast
+ import androidx.core.app.NotificationCompat
+ import androidx.core.content.FileProvider
+-import com.android.launcher3.R
+ import java.io.File
+ import java.io.FileOutputStream
+ import java.security.MessageDigest
+@@ -65,7 +63,7 @@ object OmalawnUpdate {
+     const val MAX_CHUNK = 8 shl 20 // one blob
+ 
+     const val APK_MIME = "application/vnd.android.package-archive"
+-    private const val CHANNEL = "omalawn_update"
++    private const val CHANNEL = HomaLawnNotifications.UPDATES
+     private const val NOTIFICATION_TAG = "omalawn-update"
+     private const val NOTIFICATION_ID = 47110
+     // Its own group: without one, Android (and Samsung One UI) folds it together with the link's
+@@ -525,13 +523,9 @@ object OmalawnUpdate {
+         confirm: Intent? = null,
+         text: String? = null,
+     ): Boolean {
+-        val nm = ctx.getSystemService(NotificationManager::class.java)!!
+-        nm.createNotificationChannel(
+-            NotificationChannel(CHANNEL, "Homa Lawn updates", NotificationManager.IMPORTANCE_HIGH).apply {
+-                description = "A new Homa Lawn sent from your paired computer, ready to install"
+-                setShowBadge(false)
+-            },
+-        )
++        val nm = HomaLawnNotifications.ensure(ctx)!!
++        // an update is a notification the person needs: without the permission the launcher asks again
++        app.lawnchair.omalawn.link.NotifyPermission.neededNow(ctx)
+         val tap = PendingIntent.getActivity(
+             ctx,
+             NOTIFICATION_ID,
+@@ -549,7 +543,7 @@ object OmalawnUpdate {
+         )
+         val body = text ?: notificationText(version, canInstall)
+         val n = NotificationCompat.Builder(ctx, CHANNEL)
+-            .setSmallIcon(R.drawable.ic_home_screen)
++            .setSmallIcon(HomaLawnNotifications.ICON)
+             .setContentTitle("Homa Lawn update from ${computer.ifEmpty { "your computer" }}")
+             .setContentText(body)
+             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+@@ -675,7 +669,7 @@ class UpdateInstallActivity : Activity() {
+             refreshNotification() // no longer "allow installing apps"
+             install()
+         } else {
+-            Toast.makeText(this, "Homa Lawn needs \"Install unknown apps\" to update itself", Toast.LENGTH_LONG).show()
++            Toast.makeText(this, "Homa Lawn can update itself only with Install unknown apps allowed: Homa Lawn's settings › Permissions › Install updates", Toast.LENGTH_LONG).show()
+             finish()
+         }
+     }
+@@ -695,7 +689,7 @@ class UpdateInstallActivity : Activity() {
+     private fun install() {
+         val apk = OmalawnUpdate.pending(this, intent.getStringExtra(EXTRA_SHA))
+         if (apk == null) {
+-            Toast.makeText(this, "This Homa Lawn update is no longer on the phone; send it again", Toast.LENGTH_LONG).show()
++            Toast.makeText(this, "This update is no longer on the phone. Send it again from your computer.", Toast.LENGTH_LONG).show()
+             finish()
+             return
+         }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+index 2a65b42b1b..42c4108943 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+@@ -93,8 +93,6 @@ import app.lawnchair.omalawn.ThemeWallpapers.Look
+ import app.lawnchair.omalawn.ThemeWallpapers.Sel
+ import app.lawnchair.omalawn.link.Pins
+ import app.lawnchair.ui.preferences.LocalIsExpandedScreen
+-import app.lawnchair.ui.preferences.LocalNavController
+-import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
+ import app.lawnchair.ui.preferences.components.controls.SwitchPreference
+ import app.lawnchair.ui.preferences.components.layout.BottomSpacer
+ import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
+@@ -124,18 +122,6 @@ fun NavGraphBuilder.homarWallpapers() {
+     composable<HomarWallpapers> { ThemeWallpapersScreen() }
+ }
+ 
+-/** Its row on the settings home (one line in PreferencesDashboard). */
+-@Composable
+-fun HomarWallpapersEntry() {
+-    val nav = LocalNavController.current
+-    PreferenceCategory(
+-        label = stringResource(R.string.homar_wallpapers_label),
+-        description = stringResource(R.string.homar_wallpapers_description),
+-        iconResource = R.drawable.ic_wallpaper,
+-        onNavigate = { nav.navigate(HomarWallpapers) },
+-    )
+-}
+-
+ private const val LOCK = "lock"
+ private const val HOME = "home"
+ private const val TAB_KEEP = 0
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
+deleted file mode 100644
+index 43b76fd6f9..0000000000
+--- a/lawnchair/src/app/lawnchair/omalawn/link/ComputersEntry.kt
++++ /dev/null
+@@ -1,24 +0,0 @@
+-package app.lawnchair.omalawn.link
+-
+-import androidx.compose.runtime.Composable
+-import androidx.compose.ui.res.stringResource
+-import app.lawnchair.ui.preferences.LocalNavController
+-import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
+-import com.android.launcher3.R
+-
+-/**
+- * "Computers" in Homa Lawn's settings: opens [ComputersScreen] (the paired computers, Forget, and
+- * "Pair a computer", which opens the pairing screen, [PairConfirmActivity.ACTION_WAIT]: the way in
+- * when the home screen cannot be showing; it was the status notification's "Pair a computer"
+- * until that notification went, 2026-10-17).
+- */
+-@Composable
+-fun HomarComputersEntry() {
+-    val nav = LocalNavController.current
+-    PreferenceCategory(
+-        label = stringResource(R.string.homar_computers_label),
+-        description = stringResource(R.string.homar_computers_description),
+-        iconResource = R.drawable.homar_ic_computer,
+-        onNavigate = { nav.navigate(HomarComputers) },
+-    )
+-}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+index 16bcff4087..7bf07344e9 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+@@ -1,8 +1,6 @@
+ package app.lawnchair.omalawn.link
+ 
+ import android.annotation.SuppressLint
+-import android.app.NotificationChannel
+-import android.app.NotificationManager
+ import android.app.PendingIntent
+ import android.content.Context
+ import android.content.Intent
+@@ -12,15 +10,16 @@ import android.provider.Settings
+ import android.util.Log
+ import androidx.core.app.NotificationCompat
+ import app.lawnchair.omalawn.HomeRole
+-import com.android.launcher3.R
+ 
+ /**
+- * What the person has to do so computers can reach the phone, as one notification that only
+- * exists while something is missing (there is no status notification):
+- * - **Set as home**: Homa Lawn is not the default home app, so Android does not keep its process
+- *   (and the link in it) at home-app priority;
+- * - **Keep connected**: Homa Lawn is under battery optimisation, so the link has no network while
+- *   the phone sleeps (Doze) and Android stops its service once the app is idle.
++ * What the person has to do so computers can reach the phone, as one "Setup reminders"
++ * notification that only exists while something is missing (there is no status notification).
++ * Its tap opens Settings › Permissions ([app.lawnchair.omalawn.HomaLawnPermissions], patch 0033);
++ * its actions go straight to Android's control:
++ * - **Set as home app**: Homa Lawn is not the default home app, so Android does not keep its
++ *   process (and the link in it) at home-app priority;
++ * - **Run in background**: Homa Lawn is under battery optimisation, so the link has no network
++ *   while the phone sleeps (Doze) and Android stops its service once the app is idle.
+  *
+  * Each need is asked once: dismissed, it stays away until that need goes and comes back (or a
+  * new one appears). When nothing is missing any more the notification is removed. Checked when
+@@ -28,7 +27,7 @@ import com.android.launcher3.R
+  */
+ object LinkAsks {
+     private const val TAG = "OmalawnLink"
+-    private const val CHANNEL = "omalawn_requests" // the channel of MediaPermission's requests
++    private const val CHANNEL = app.lawnchair.omalawn.HomaLawnNotifications.REMINDERS
+     private const val NOTIFICATION_ID = 47103
+     private const val PREFS = "omalawn_link"
+     private const val KEY_ASKED = "asks_posted"
+@@ -43,7 +42,8 @@ object LinkAsks {
+     }
+ 
+     fun refresh(ctx: Context) {
+-        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
++        // the channel group is there from the first start, so Android's notification page shows it
++        val nm = app.lawnchair.omalawn.HomaLawnNotifications.ensure(ctx) ?: return
+         val needs = needs(ctx)
+         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+         val asked = prefs.getStringSet(KEY_ASKED, emptySet()).orEmpty()
+@@ -57,41 +57,50 @@ object LinkAsks {
+         if (still != asked) prefs.edit().putStringSet(KEY_ASKED, still).apply()
+         if (still.containsAll(needs)) return // asked already (shown, or dismissed by the person)
+         if (NotifyPermission.missing(ctx) || !nm.areNotificationsEnabled()) return // asked once it can show
+-        nm.createNotificationChannel(
+-            NotificationChannel(CHANNEL, "Homa Lawn requests", NotificationManager.IMPORTANCE_DEFAULT).apply {
+-                description = "Permissions Homa Lawn on your computer needs from you"
+-            },
+-        )
+         nm.notify(NOTIFICATION_ID, build(ctx, needs))
+         prefs.edit().putStringSet(KEY_ASKED, needs.toSet()).apply()
+         Log.i(TAG, "asked for: ${needs.joinToString()}")
+     }
+ 
+     private fun build(ctx: Context, needs: List<String>): android.app.Notification {
+-        val lines = needs.map {
+-            when (it) {
+-                HOME -> "Make Homa Lawn your home screen: your computer reaches the phone through it."
+-                else -> "Let Homa Lawn run in the background, so your computer can reach the phone while it sleeps."
++        // one need: its name as the title and why as the text; two: one line each
++        val lines = if (needs.size > 1) {
++            needs.map {
++                when (it) {
++                    HOME -> "Set Homa Lawn as the home app: your computer reaches the phone through the home screen."
++                    else -> "Let Homa Lawn run in the background, so your computer can reach the phone while it sleeps."
++                }
+             }
++        } else if (needs[0] == HOME) {
++            listOf("Your computer reaches the phone through the home screen.")
++        } else {
++            listOf("So your computer can reach the phone while it sleeps.")
+         }
+         val title = if (needs.size > 1) {
+             "Homa Lawn needs two settings"
+         } else if (needs[0] == HOME) {
+-            "Make Homa Lawn your home screen"
++            "Set Homa Lawn as the home app"
+         } else {
+-            "Keep Homa Lawn connected"
++            "Let Homa Lawn run in the background"
+         }
+         val intents = needs.map { intentFor(ctx, it) }
+         val b = NotificationCompat.Builder(ctx, CHANNEL)
+-            .setSmallIcon(R.drawable.ic_home_screen)
++            .setSmallIcon(app.lawnchair.omalawn.HomaLawnNotifications.ICON)
+             .setContentTitle(title)
+             .setContentText(lines.first())
+             .setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
+-            .setContentIntent(intents.first())
++            .setContentIntent(
++                PendingIntent.getActivity(
++                    ctx,
++                    5,
++                    app.lawnchair.omalawn.HomaLawnPermissions.openIntent(ctx),
++                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++                ),
++            )
+             .setAutoCancel(true)
+             .setOnlyAlertOnce(true)
+         needs.forEachIndexed { i, need ->
+-            b.addAction(0, if (need == HOME) "Set as home" else "Keep connected", intents[i])
++            b.addAction(0, if (need == HOME) "Set as home app" else "Run in background", intents[i])
+         }
+         return b.build()
+     }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+index e2dde1f5f1..ecb234c348 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+@@ -7,12 +7,15 @@ import android.content.pm.PackageManager
+ import android.os.Build
+ 
+ /**
+- * The link's notification ("Forget all computers", later the pairing prompt) is invisible on
+- * Android 13+ without POST_NOTIFICATIONS. The launcher asks once per app version, and again when
+- * something the user must answer (a pair request) arrived while it was missing.
++ * Homa Lawn's notifications (pairing requests, setup reminders, app updates) are invisible on
++ * Android 13+ without POST_NOTIFICATIONS. The launcher asks once per install (patch 0033: no
++ * longer again after every update), and again when a notification the person needs (a pair
++ * request, a photo-access request, an app update) came while it was missing. Settings ›
++ * Permissions › Notifications shows the state and opens Android's page at any time.
+  */
+ object NotifyPermission {
+     private const val PREFS = "omalawn_link"
++    // set once asked; before patch 0033 it held the app version asked for, so any value means asked
+     private const val KEY_ASKED = "notify_asked_version"
+     private const val KEY_NEEDED = "notify_needed"
+     const val REQUEST_CODE = 47100
+@@ -29,10 +32,9 @@ object NotifyPermission {
+     fun maybeAsk(activity: Activity) {
+         if (!missing(activity)) return
+         val p = prefs(activity)
+-        val version = version(activity)
+-        if (p.getString(KEY_ASKED, null) == version && !p.getBoolean(KEY_NEEDED, false)) return
++        if (p.contains(KEY_ASKED) && !p.getBoolean(KEY_NEEDED, false)) return
+         // recorded before asking: the dialog pauses and resumes the launcher, which must not ask again
+-        p.edit().putString(KEY_ASKED, version).putBoolean(KEY_NEEDED, false).commit()
++        p.edit().putString(KEY_ASKED, version(activity)).putBoolean(KEY_NEEDED, false).commit()
+         activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
+     }
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+index 010ec8c9e3..01e48faf6a 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+@@ -1,7 +1,6 @@
+ package app.lawnchair.omalawn.link
+ 
+ import android.app.Notification
+-import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
+ import android.content.Context
+@@ -13,7 +12,6 @@ import android.util.Log
+ import androidx.core.app.NotificationCompat
+ import app.lawnchair.omalawn.OmalawnError
+ import com.android.launcher3.BuildConfig
+-import com.android.launcher3.R
+ import java.net.Socket
+ import java.security.MessageDigest
+ import java.security.SecureRandom
+@@ -49,7 +47,7 @@ object Pairing {
+     private const val WINDOW_MS = 10 * 60_000L
+     private const val MAX_PER_WINDOW = 3
+     private const val TAG = "OmalawnLink"
+-    private const val CHANNEL = "omalawn_pair"
++    private const val CHANNEL = app.lawnchair.omalawn.HomaLawnNotifications.PAIRING
+     private const val NOTIFICATION_ID = 47101
+     /** The action the notification's Accept used to send to the service; it pins nothing now. */
+     const val LEGACY_ACCEPT = "app.lawnchair.omalawn.link.PAIR_ACCEPT"
+@@ -389,13 +387,7 @@ object Pairing {
+         } else {
+             Notification.VISIBILITY_SECRET
+         }
+-        nm.createNotificationChannel(
+-            NotificationChannel(CHANNEL, "Homa Lawn pairing", NotificationManager.IMPORTANCE_HIGH).apply {
+-                description = "Asks before a computer may control this phone through Homa Lawn"
+-                lockscreenVisibility = lockVisibility
+-                setShowBadge(false)
+-            },
+-        )
++        app.lawnchair.omalawn.HomaLawnNotifications.ensure(ctx)
+         val actions = synchronized(s.intents) {
+             s.intents.forEach { it.cancel() }
+             s.intents.clear()
+@@ -422,19 +414,19 @@ object Pairing {
+         val text = words.joinToString(" ")
+         // what the lock screen shows when the user hides sensitive content: no name, no words, no buttons
+         val public = NotificationCompat.Builder(ctx, CHANNEL)
+-            .setSmallIcon(R.drawable.ic_home_screen)
+-            .setContentTitle("Homa Lawn pairing request")
++            .setSmallIcon(app.lawnchair.omalawn.HomaLawnNotifications.ICON)
++            .setContentTitle("A computer asks to pair")
+             .setContentText("Unlock the phone to answer")
+             .build()
+         val n = NotificationCompat.Builder(ctx, CHANNEL)
+-            .setSmallIcon(R.drawable.ic_home_screen)
++            .setSmallIcon(app.lawnchair.omalawn.HomaLawnNotifications.ICON)
+             .setContentTitle("Pair with ${s.name}? $text")
+             .setContentText(text)
+             .setSubText("Homa Lawn")
+             .setStyle(
+                 NotificationCompat.BigTextStyle().bigText(
+                     "$text\n\nTap Review and accept only if the computer shows the same four words. " +
+-                        "A paired computer can change this phone's home screen and, with screen control on, " +
++                        "A paired computer can change this phone's home screen and, with Screen control on, " +
+                         "see and operate the screen.",
+                 ),
+             )
+diff --git a/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+index c352c3e04f..fb3ef1b955 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+@@ -82,7 +82,7 @@ object ScreenCommands {
+     fun dispatch(ctx: Context, method: String, params: JSONObject): Any {
+         if (method == "screen.status") return status(ctx)
+         val svc = LawnchairAccessibilityService.current
+-            ?: throw OmalawnError(SCREEN_OFF, "Turn on Homa Lawn in Settings › Accessibility")
++            ?: throw OmalawnError(SCREEN_OFF, "Screen control is off. On the phone, open Homa Lawn's settings › Permissions › Screen control and turn it on.")
+         if (!lock.tryLock(LOCK_WAIT_S, TimeUnit.SECONDS)) {
+             throw OmalawnError(BUSY, "$BUSY: another screen action has been running for over ${LOCK_WAIT_S}s")
+         }
+@@ -136,7 +136,7 @@ object ScreenCommands {
+      * installs errored); null on 15+, where Enhanced Confirmation judges the install source, which
+      * an app cannot ask.
+      */
+-    private fun restricted(ctx: Context): Boolean? {
++    fun restricted(ctx: Context): Boolean? { // also read by Settings › Permissions (patch 0033)
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+         return try {
+             val ops = ctx.getSystemService(AppOpsManager::class.java)!!
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+index df9a5e626a..b23aa42a92 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/destinations/PreferencesDashboard.kt
+@@ -55,7 +55,6 @@ import androidx.compose.ui.unit.dp
+ import androidx.core.content.getSystemService
+ import app.lawnchair.LawnchairApp
+ import app.lawnchair.LawnchairLauncher
+-import app.lawnchair.omalawn.HomarWallpapersEntry
+ import app.lawnchair.preferences.getAdapter
+ import app.lawnchair.preferences.observeAsState
+ import app.lawnchair.preferences.preferenceManager
+@@ -108,7 +107,7 @@ fun PreferencesDashboard(
+     val aboutDescrption = if (prefs.hideVersionInfo.get()) {
+         prefs.pseudonymVersion.get()
+     } else {
+-        "${context.getString(R.string.derived_app_name)} ${BuildConfig.MAJOR_VERSION}"
++        app.lawnchair.omalawn.HomaLawnDashboard.aboutSummary(context) // Homa Lawn: "Homa Lawn 16 · build 325" (patch 0033)
+     }
+ 
+     PreferenceLayout(
+@@ -131,7 +130,8 @@ fun PreferencesDashboard(
+         }
+ 
+         val deckLayout = prefs2.deckLayout.getAdapter()
+-        PreferenceGroup {
++        app.lawnchair.omalawn.HomaLawnDashboardGroup() // Homa Lawn: Your computer (patch 0033)
++        PreferenceGroup(heading = app.lawnchair.omalawn.HomaLawnDashboard.LAUNCHER) {
+             PreferenceCategory(
+                 label = stringResource(R.string.general_label),
+                 description = stringResource(R.string.general_description),
+@@ -148,9 +148,6 @@ fun PreferencesDashboard(
+                 isSelected = currentRoute is HomeScreen,
+             )
+ 
+-            HomarWallpapersEntry() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
+-            app.lawnchair.omalawn.link.HomarComputersEntry() // Homa Lawn: Pair a computer (patch 0020)
+-
+             val isSmartspaceEnabled = prefs2.enableSmartspace.firstCached()
+             PreferenceCategory(
+                 label = stringResource(id = R.string.smartspace_widget),
+@@ -223,7 +220,8 @@ fun PreferencesDashboard(
+                 onNavigate = { onNavigate(BackupAndRestore) },
+                 isSelected = currentRoute is BackupAndRestore,
+             )
+-
++        }
++        PreferenceGroup(heading = app.lawnchair.omalawn.HomaLawnDashboard.ABOUT) { // Homa Lawn: its own group (patch 0033)
+             PreferenceCategory(
+                 label = stringResource(R.string.about_label),
+                 description = aboutDescrption,
+diff --git a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+index 1619db0ee7..0a0b9515e3 100644
+--- a/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
++++ b/lawnchair/src/app/lawnchair/ui/preferences/navigation/PreferenceNavigation.kt
+@@ -27,6 +27,7 @@ import app.lawnchair.ui.preferences.components.search.SearchProviderId
+ import app.lawnchair.ui.preferences.components.search.SearchProviderPreferenceScreen
+ import app.lawnchair.omalawn.homarWallpapers
+ import app.lawnchair.omalawn.link.homarComputers
++import app.lawnchair.omalawn.homaLawnPermissions
+ import app.lawnchair.ui.preferences.destinations.AppDrawerFoldersPreference
+ import app.lawnchair.ui.preferences.destinations.AppDrawerPreferences
+ import app.lawnchair.ui.preferences.destinations.BackupAndRestorePreference
+@@ -147,6 +148,7 @@ fun PreferenceNavigation(
+         ) { HomeScreenPreferences() }
+         homarWallpapers() // Homa Lawn: Wallpaper from Omarchy (patch 0017)
+         homarComputers() // Homa Lawn: Computers (patch 0030)
++        homaLawnPermissions() // Homa Lawn: Permissions (patch 0033)
+         composable<HomeScreenGrid>(
+             deepLinks = getDeepLink(HomeScreenGrid),
+         ) { HomeScreenGridPreferences() }

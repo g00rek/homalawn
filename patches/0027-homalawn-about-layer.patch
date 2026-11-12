@@ -1,0 +1,133 @@
+From 35d5751b7e17e68c1edbea09a84f6c82e19f4d31 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sun, 18 Oct 2026 10:07:21 +0200
+Subject: [PATCH] homalawn about layer: About says what Homa Lawn is for and
+ what it adds on top of Lawnchair
+
+Homa Lawn's About, under the name and version:
+
+- "What Homa Lawn is": the phone as part of the Omarchy desktop
+  (following its theme, arranged from the computer, operable by AI
+  assistants once allowed, a direct connection with no Homa Lawn server
+  in between), with rows to omarchy.org and Omarchy on GitHub
+  (omacom/omarchy, where basecamp/omarchy redirects).
+- "Built on Lawnchair": Homa Lawn is Lawnchair with a layer on top, what
+  Lawnchair's team made, what Homa Lawn adds, and that Homa Lawn
+  problems go to us, not to the Lawnchair team; rows to lawnchair.app,
+  Lawnchair on GitHub and the open-source licences.
+---
+ lawnchair/res/values/homar_strings.xml        | 12 +++-
+ .../app/lawnchair/omalawn/HomaLawnAbout.kt    | 64 +++++++++++++++----
+ 2 files changed, 64 insertions(+), 12 deletions(-)
+
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index 9b821a2b21..99708b14d2 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -41,6 +41,16 @@
+     <!-- settings › About (patch 0026) -->
+     <string name="homalawn_about_built_on">Built on Lawnchair</string>
+     <string name="homalawn_about_lawnchair">Lawnchair</string>
+-    <string name="homalawn_about_lawnchair_description">The open-source launcher Homa Lawn is built on</string>
++    <string name="homalawn_about_lawnchair_description">lawnchair.app</string>
++    <!-- settings › About (patch 0027): what Homa Lawn is for, and what it is on top of Lawnchair -->
++    <string name="homalawn_about_what">What Homa Lawn is</string>
++    <string name="homalawn_about_what_text">Homa Lawn makes your Android phone part of your Omarchy desktop. Omarchy is a Linux setup built on Arch and Hyprland, where one theme sets the look of everything.\n\nWith Homa Lawn the phone follows that theme: when you switch themes on the computer, the phone\'s wallpapers, colours and icon tint follow. From the computer you can also arrange this home screen, move apps and widgets, and let AI assistants on the computer read and operate the phone, after you allow it here.\n\nThe phone and the computer talk to each other directly, over your own network (or your Tailscale network); there is no Homa Lawn server in between.</string>
++    <string name="homalawn_about_omarchy">Omarchy</string>
++    <string name="homalawn_about_omarchy_description">omarchy.org</string>
++    <string name="homalawn_about_omarchy_github">Omarchy on GitHub</string>
++    <string name="homalawn_about_omarchy_github_description">omacom/omarchy</string>
++    <string name="homalawn_about_layer">Homa Lawn is Lawnchair with a layer on top. Lawnchair is a free, open-source Android launcher made by the Lawnchair team and its contributors: the home screen, the app drawer, the icons and most of the settings here are their work.\n\nHoma Lawn adds what ties this phone to your computer: pairing, wallpapers and colours from your Omarchy theme, and letting the Homa Lawn app on the computer arrange this home screen.\n\nHoma Lawn is not made by the Lawnchair team. Report Homa Lawn problems to us, not to them.</string>
++    <string name="homalawn_about_github">Lawnchair on GitHub</string>
++    <string name="homalawn_about_github_description">Source code and the people who made it</string>
+     <string name="homalawn_about_licences">Open-source licences</string>
+ </resources>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+index 19d1a31b78..050f77cede 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+@@ -34,8 +34,10 @@ import com.android.launcher3.R
+ 
+ /**
+  * Homa Lawn's About screen (patch 0026), in place of Lawnchair's: the app's own icon (the one
+- * the launcher and Android's Settings show), its name and version, then one "Built on Lawnchair"
+- * group with a row to lawnchair.app and the open-source licences. Lawnchair's links, team list,
++ * the launcher and Android's Settings show), its name and version, then (patch 0027) "What Homa
++ * Lawn is" (what it is for, with Omarchy's site and repository) and "Built on Lawnchair" (what
++ * Homa Lawn adds on top of Lawnchair and who made what, with lawnchair.app and Lawnchair's
++ * GitHub), and the open-source licences. Lawnchair's links, team list,
+  * nightly updater and privacy policy are Lawnchair's, not ours, so they are not shown here.
+  */
+ @Composable
+@@ -80,17 +82,31 @@ fun HomaLawnAbout(modifier: Modifier = Modifier) {
+             )
+         }
+         item { Spacer(modifier = Modifier.height(16.dp)) }
+-        item { PreferenceGroupHeading(stringResource(R.string.homalawn_about_built_on)) }
++        item { PreferenceGroupHeading(stringResource(R.string.homalawn_about_what)) }
++        item { Paragraph(R.string.homalawn_about_what_text) }
+         item {
+             PreferenceGroupItem(cutTop = false, cutBottom = true) {
+-                ClickablePreference(
+-                    label = stringResource(R.string.homalawn_about_lawnchair),
+-                    subtitle = stringResource(R.string.homalawn_about_lawnchair_description),
+-                    onClick = {
+-                        val intent = Intent(Intent.ACTION_VIEW, LAWNCHAIR_SITE.toUri())
+-                        if (intent.resolveActivity(context.packageManager) != null) context.startActivity(intent)
+-                    },
+-                )
++                LinkRow(R.string.homalawn_about_omarchy, R.string.homalawn_about_omarchy_description, OMARCHY_SITE)
++            }
++        }
++        item { Spacer(Modifier.height(3.dp)) }
++        item {
++            PreferenceGroupItem(cutTop = true, cutBottom = false) {
++                LinkRow(R.string.homalawn_about_omarchy_github, R.string.homalawn_about_omarchy_github_description, OMARCHY_GITHUB)
++            }
++        }
++        item { Spacer(Modifier.height(8.dp)) }
++        item { PreferenceGroupHeading(stringResource(R.string.homalawn_about_built_on)) }
++        item { Paragraph(R.string.homalawn_about_layer) }
++        item {
++            PreferenceGroupItem(cutTop = false, cutBottom = true) {
++                LinkRow(R.string.homalawn_about_lawnchair, R.string.homalawn_about_lawnchair_description, LAWNCHAIR_SITE)
++            }
++        }
++        item { Spacer(Modifier.height(3.dp)) }
++        item {
++            PreferenceGroupItem(cutTop = true, cutBottom = true) {
++                LinkRow(R.string.homalawn_about_github, R.string.homalawn_about_github_description, LAWNCHAIR_GITHUB)
+             }
+         }
+         item { Spacer(Modifier.height(3.dp)) }
+@@ -105,4 +121,30 @@ fun HomaLawnAbout(modifier: Modifier = Modifier) {
+     }
+ }
+ 
++@Composable
++private fun Paragraph(text: Int) {
++    Text(
++        text = stringResource(text),
++        style = MaterialTheme.typography.bodyLarge,
++        color = MaterialTheme.colorScheme.onSurfaceVariant,
++        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
++    )
++}
++
++@Composable
++private fun LinkRow(label: Int, subtitle: Int, url: String) {
++    val context = LocalContext.current
++    ClickablePreference(
++        label = stringResource(label),
++        subtitle = stringResource(subtitle),
++        onClick = {
++            val intent = Intent(Intent.ACTION_VIEW, url.toUri())
++            if (intent.resolveActivity(context.packageManager) != null) context.startActivity(intent)
++        },
++    )
++}
++
++private const val OMARCHY_SITE = "https://omarchy.org/"
++private const val OMARCHY_GITHUB = "https://github.com/omacom/omarchy" // basecamp/omarchy redirects here
+ private const val LAWNCHAIR_SITE = "https://lawnchair.app/"
++private const val LAWNCHAIR_GITHUB = "https://github.com/LawnchairLauncher/lawnchair"

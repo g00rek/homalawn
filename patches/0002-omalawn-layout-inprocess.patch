@@ -1,0 +1,338 @@
+From 1f1cb354464700eee15dbdb5ffba4db4ddae8cfb Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Fri, 2 Oct 2026 12:13:59 +0200
+Subject: [PATCH] omalawn in-process layout export/import
+
+---
+ .../src/app/lawnchair/omalawn/LayoutIo.kt     | 258 ++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   2 +
+ .../omalawn/OmalawnControlProvider.kt         |   1 +
+ .../launcher3/model/OmalawnDbAccess.java      |  29 ++
+ 4 files changed, 290 insertions(+)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
+ create mode 100644 lawnchair/src/com/android/launcher3/model/OmalawnDbAccess.java
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt b/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
+new file mode 100644
+index 0000000000..680f74e43a
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
+@@ -0,0 +1,258 @@
++package app.lawnchair.omalawn
++
++import android.content.ContentValues
++import android.content.Context
++import android.database.Cursor
++import android.database.DatabaseUtils
++import android.database.sqlite.SQLiteDatabase
++import android.database.sqlite.SQLiteException
++import android.system.Os
++import com.android.launcher3.AbstractFloatingView
++import com.android.launcher3.Launcher
++import com.android.launcher3.LauncherAppState
++import com.android.launcher3.LauncherModel
++import com.android.launcher3.LauncherSettings.Favorites
++import com.android.launcher3.model.OmalawnDbAccess
++import com.android.launcher3.util.Executors.MAIN_EXECUTOR
++import com.android.launcher3.util.Executors.MODEL_EXECUTOR
++import java.io.File
++import java.util.concurrent.ExecutionException
++import java.util.concurrent.FutureTask
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.TimeoutException
++import org.json.JSONObject
++
++/**
++ * Layout export/import inside the running launcher, through the model's own open database
++ * connection: no file swap, no process kill.
++ *
++ * Export: a consistent copy of the live DB (`VACUUM INTO`, or a favorites-only copy where SQLite
++ * is older than 3.27) under files/omalawn/. Import: validate a DB file, then on the model thread
++ * replace every favorites row in one transaction and reload the model.
++ */
++object LayoutIo {
++    const val BAD_SCHEMA = "bad_schema"
++    const val GRID_MISMATCH = "grid_mismatch"
++    const val BUSY = "busy"
++    const val BAD_PATH = "bad_path"
++
++    private const val TIMEOUT_S = 30L
++    private const val STALE_MS = 10 * 60 * 1000L
++    private const val TABLE = Favorites.TABLE_NAME
++
++    /** The provider only carries the message, so it starts with the code. */
++    private fun fail(code: String, msg: String) = OmalawnError(code, "$code: $msg")
++
++    fun exportDb(ctx: Context, params: JSONObject): JSONObject {
++        val model = loadedModel()
++        // An item removed with the undo snackbar still showing is only deleted from the DB when the
++        // snackbar goes; without this the export would still hold it and a later import revive it.
++        commitPendingDeletes()
++        val dir = OmalawnCommands.privateDir(ctx)
++        sweep(dir)
++        val out = File(dir, "export-${System.currentTimeMillis()}.db")
++        val forceCopy = params.optString("via") == "copy"
++        val how = onModel {
++            val db = model.modelDbController.db
++            if (forceCopy) {
++                copyFavorites(db, out)
++                "copy"
++            } else {
++                try {
++                    db.execSQL("VACUUM INTO ?", arrayOf<Any>(out.absolutePath))
++                    "vacuum"
++                } catch (e: SQLiteException) { // SQLite < 3.27 (Android 10 and older)
++                    out.delete()
++                    copyFavorites(db, out)
++                    "copy"
++                }
++            }
++        }
++        private600(out)
++        return JSONObject()
++            .put("path", out.absolutePath)
++            .put("db", LauncherAppState.getIDP(ctx).dbFile)
++            .put("size", out.length())
++            .put("how", how)
++    }
++
++    fun importDb(ctx: Context, params: JSONObject): JSONObject {
++        val path = if (params.isNull("path")) throw fail(BAD_PATH, "path required") else params.getString("path")
++        val dir = OmalawnCommands.privateDir(ctx).canonicalFile
++        val file = File(path).canonicalFile
++        if (file.parentFile != dir) throw fail(BAD_PATH, "$path is not inside ${dir.path}")
++        try {
++            if (!file.isFile) throw fail(BAD_PATH, "$path does not exist")
++            private600(file)
++            // No "loaded" precondition: a rollback comes right after a reload. The replace below runs
++            // on MODEL_EXECUTOR, where a whole LoaderTask.run() is one task, so it queues behind a
++            // load in progress; forceReload() then loads the new rows.
++            val model = LauncherAppState.getInstance(ctx).model
++            val idp = LauncherAppState.getIDP(ctx)
++            val wantDb = if (params.isNull("db")) null else params.getString("db")
++            if (wantDb != null && wantDb != idp.dbFile) {
++                throw fail(GRID_MISMATCH, "the layout is for $wantDb, the launcher uses ${idp.dbFile}")
++            }
++            val (cols, version, rows) = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY)
++                .use { inc ->
++                    val check = DatabaseUtils.stringForQuery(inc, "PRAGMA integrity_check", null)
++                    if (check != "ok") throw fail(BAD_SCHEMA, "integrity check: $check")
++                    val c = columns(inc)
++                    if (c.isEmpty()) throw fail(BAD_SCHEMA, "no $TABLE table")
++                    Triple(c, inc.version, readRows(inc, c))
++                }
++            checkGrid(rows, idp.numColumns, idp.numRows, idp.numDatabaseHotseatIcons)
++            onModel {
++                val db = model.modelDbController.db
++                val live = columns(db)
++                if (live.toSet() != cols.toSet()) {
++                    throw fail(BAD_SCHEMA, "columns differ from the launcher's: ${(live.toSet() xor cols.toSet()).sorted()}")
++                }
++                if (version != db.version) throw fail(BAD_SCHEMA, "schema version $version, launcher has ${db.version}")
++            }
++            commitPendingDeletes()
++            val n = onModel {
++                val controller = model.modelDbController
++                val db = controller.db
++                controller.newTransaction().use { t ->
++                    db.delete(TABLE, null, null)
++                    rows.forEach { db.insertOrThrow(TABLE, null, it) }
++                    t.commit()
++                }
++                val maxId = rows.maxOfOrNull { it.getAsInteger(Favorites._ID) ?: 0 } ?: 0
++                OmalawnDbAccess.afterBulkReplace(controller, maxId)
++                model.forceReload()
++                rows.size
++            }
++            return JSONObject().put("items", n)
++        } finally {
++            file.delete()
++            sweep(dir)
++        }
++    }
++
++    private infix fun Set<String>.xor(o: Set<String>) = (this - o) + (o - this)
++
++    /** Same bounds the loader enforces (LoaderCursor.checkItemPlacement); refuse instead of dropping. */
++    private fun checkGrid(rows: List<ContentValues>, cols: Int, rowsN: Int, hotseat: Int) {
++        val bad = mutableListOf<String>()
++        for (r in rows) {
++            val id = r.getAsInteger(Favorites._ID)
++            val container = r.getAsInteger(Favorites.CONTAINER) ?: continue
++            val screen = r.getAsInteger(Favorites.SCREEN) ?: 0
++            val x = r.getAsInteger(Favorites.CELLX) ?: 0
++            val y = r.getAsInteger(Favorites.CELLY) ?: 0
++            val w = r.getAsInteger(Favorites.SPANX) ?: 1
++            val h = r.getAsInteger(Favorites.SPANY) ?: 1
++            when (container) {
++                Favorites.CONTAINER_DESKTOP ->
++                    if (screen < 0 || x < 0 || y < 0 || x + w > cols || y + h > rowsN) {
++                        bad += "item $id at screen $screen ($x,$y) size ${w}x$h"
++                    }
++                Favorites.CONTAINER_HOTSEAT ->
++                    if (screen < 0 || screen >= hotseat) bad += "item $id at dock position $screen"
++            }
++        }
++        if (bad.isNotEmpty()) {
++            throw fail(
++                GRID_MISMATCH,
++                "outside the current grid ${cols}x$rowsN, dock $hotseat: ${bad.take(5).joinToString("; ")}" +
++                    if (bad.size > 5) " (+${bad.size - 5} more)" else "",
++            )
++        }
++    }
++
++    private fun loadedModel(): LauncherModel {
++        val model = LauncherAppState.getInstanceNoCreate()?.model
++        if (model == null || !model.isModelLoaded) throw fail(BUSY, "the launcher has not finished loading its home screen")
++        return model
++    }
++
++    /** An item deleted with the undo snackbar still showing is only removed when the snackbar goes;
++     *  commit it now so its pending delete can never run against the imported rows. */
++    private fun commitPendingDeletes() {
++        val task = FutureTask {
++            val l = Launcher.ACTIVITY_TRACKER.getCreatedContext<Launcher>() ?: return@FutureTask
++            l.modelWriter.commitDelete() // its tasks are posted to the model thread before ours
++            AbstractFloatingView.getOpenView<AbstractFloatingView>(l, AbstractFloatingView.TYPE_SNACKBAR)
++                ?.close(false)
++        }
++        MAIN_EXECUTOR.execute(task)
++        await(task)
++    }
++
++    private fun <T> onModel(block: () -> T): T {
++        val task = FutureTask(block)
++        MODEL_EXECUTOR.execute(task)
++        return await(task)
++    }
++
++    private fun <T> await(task: FutureTask<T>): T = try {
++        task.get(TIMEOUT_S, TimeUnit.SECONDS)
++    } catch (e: TimeoutException) {
++        task.cancel(false)
++        throw fail(BUSY, "the launcher did not get to it within ${TIMEOUT_S}s")
++    } catch (e: ExecutionException) {
++        throw e.cause ?: e
++    }
++
++    private fun columns(db: SQLiteDatabase): List<String> =
++        db.rawQuery("PRAGMA table_info($TABLE)", null).use { c ->
++            val out = mutableListOf<String>()
++            val name = c.getColumnIndexOrThrow("name")
++            while (c.moveToNext()) out += c.getString(name)
++            out
++        }
++
++    private fun readRows(db: SQLiteDatabase, cols: List<String>): List<ContentValues> =
++        db.rawQuery("SELECT ${cols.joinToString(",") { "\"$it\"" }} FROM $TABLE", null).use { c ->
++            val out = mutableListOf<ContentValues>()
++            while (c.moveToNext()) {
++                val v = ContentValues()
++                cols.forEachIndexed { i, k ->
++                    when (c.getType(i)) {
++                        Cursor.FIELD_TYPE_NULL -> v.putNull(k)
++                        Cursor.FIELD_TYPE_INTEGER -> v.put(k, c.getLong(i))
++                        Cursor.FIELD_TYPE_FLOAT -> v.put(k, c.getDouble(i))
++                        Cursor.FIELD_TYPE_BLOB -> v.put(k, c.getBlob(i))
++                        else -> v.put(k, c.getString(i))
++                    }
++                }
++                out += v
++            }
++            out
++        }
++
++    /** The export where `VACUUM INTO` is missing: the favorites table only, same schema version. */
++    private fun copyFavorites(db: SQLiteDatabase, out: File) {
++        val create = DatabaseUtils.stringForQuery(
++            db,
++            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
++            arrayOf(TABLE),
++        )
++        val rows = readRows(db, columns(db))
++        SQLiteDatabase.openOrCreateDatabase(out, null).use { o ->
++            o.execSQL(create)
++            o.beginTransaction()
++            try {
++                rows.forEach { o.insertOrThrow(TABLE, null, it) }
++                o.setTransactionSuccessful()
++            } finally {
++                o.endTransaction()
++            }
++            o.version = db.version
++        }
++        // a rollback journal is left next to the copy; the export is the single file only
++        for (suffix in listOf("-journal", "-wal", "-shm")) File(out.path + suffix).delete()
++    }
++
++    /** Leftovers of interrupted runs; a run reads or deletes its own file within seconds. */
++    private fun sweep(dir: File) {
++        val cutoff = System.currentTimeMillis() - STALE_MS
++        dir.listFiles()?.forEach { f ->
++            if ((f.name.startsWith("export-") || f.name.startsWith("import-")) && f.lastModified() < cutoff) f.delete()
++        }
++    }
++
++    private fun private600(f: File) = Os.chmod(f.absolutePath, 0b110_000_000)
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 1b964a1f35..14ff139791 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -53,6 +53,8 @@ object OmalawnCommands {
+             }
+             "launcher.widgets_list" -> widgetsList(ctx)
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
++            "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
++            "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             else -> throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 79ad751192..c4a1fdd672 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -49,6 +49,7 @@ class OmalawnControlProvider : ContentProvider() {
+             "prefs_set_many" -> "writes"
+             "wallpaper_set" -> "path"
+             "widget_status" -> "id"
++            "layout_import" -> "path"
+             else -> null
+         }
+         if (argName != null && arg != null) p.put(argName, arg)
+diff --git a/lawnchair/src/com/android/launcher3/model/OmalawnDbAccess.java b/lawnchair/src/com/android/launcher3/model/OmalawnDbAccess.java
+new file mode 100644
+index 0000000000..d741dca01e
+--- /dev/null
++++ b/lawnchair/src/com/android/launcher3/model/OmalawnDbAccess.java
+@@ -0,0 +1,29 @@
++package com.android.launcher3.model;
++
++import android.content.ContentValues;
++
++import com.android.launcher3.LauncherSettings.Favorites;
++
++/**
++ * omalawn: reaches {@link ModelDbController#mOpenHelper} (protected, so only from this package)
++ * after {@code app.lawnchair.omalawn.LayoutIo} has replaced every favorites row in one transaction.
++ */
++public final class OmalawnDbAccess {
++    private OmalawnDbAccess() {
++    }
++
++    /**
++     * Runs on the model thread right after the replace commits. Does what
++     * {@link DatabaseHelper#dbInsertAndCheck} and {@link ModelDbController#insert} do for every
++     * single insert: raises the cached max item id (so ids handed out later never collide with an
++     * imported row; it only ever raises) and drops the hybrid-hotseat restore table.
++     */
++    public static void afterBulkReplace(ModelDbController controller, int maxId) {
++        controller.getDb(); // opens mOpenHelper if this process has not touched the DB yet
++        DatabaseHelper helper = controller.mOpenHelper;
++        helper.onAddOrDeleteOp(helper.getWritableDatabase());
++        ContentValues v = new ContentValues();
++        v.put(Favorites._ID, maxId);
++        helper.checkId(v);
++    }
++}

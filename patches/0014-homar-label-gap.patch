@@ -1,0 +1,146 @@
+From 60a363c2e6da05809cdb6e0edca62c1d155d4572 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Wed, 14 Oct 2026 23:46:59 +0200
+Subject: [PATCH] homar label gap: a setting for the space between icon and
+ label
+
+Upstream subtracts the icon's invisible margin from the label padding,
+so larger home icons (home_icon_size_factor > 1) leave the label
+touching the icon. New datastore float homar_label_gap_dp (default 0 =
+upstream), declared in app/lawnchair/omalawn/HomarLabelGap.kt, adds its
+dp to the workspace label padding (clamped to -8..32 dp; a negative
+gap pulls the label closer to the icon).
+
+Two hooks in DeviceProfile:
+- getNormalizedIconDrawablePadding(), used only by the workspace
+  branches (responsive, scalable, fixed), adds the gap before each
+  branch fits the cell, so a short cell gives the space back from
+  border spacing / cell padding.
+- the fixed (non-scalable) grid clamps the padding to half the cell's
+  free height, which goes negative when the cell is shorter than icon +
+  label (4x8 with larger icons) and pulls the label into the icon by
+  far more than needed. With a gap set, the padding becomes the wanted
+  gap shrunk to the room the cell really has below icon and label,
+  never below upstream's value, so the label is not cut.
+
+On the fixed grid a negative gap takes its dp off upstream's padding.
+
+All apps and folders keep their own padding; gap 0 is upstream exactly.
+
+On Lawnchair 16 the label text factor is applied before the layout, so
+the fixed-grid hook measures the label with the text size as it is.
+---
+ .../app/lawnchair/omalawn/HomarLabelGap.kt    | 71 +++++++++++++++++++
+ src/com/android/launcher3/DeviceProfile.java  |  7 +-
+ 2 files changed, 77 insertions(+), 1 deletion(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt b/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
+new file mode 100644
+index 0000000000..5fedc5f740
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/HomarLabelGap.kt
+@@ -0,0 +1,71 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import android.content.res.Resources
++import android.util.DisplayMetrics
++import androidx.datastore.preferences.core.floatPreferencesKey
++import app.lawnchair.preferences2.PreferenceManager2
++import app.lawnchair.preferences2.ReloadHelper
++import com.android.launcher3.testing.shared.ResourceUtils
++import com.patrykmichalik.opto.core.PreferenceImpl
++import com.patrykmichalik.opto.core.firstBlocking
++
++/**
++ * Space between a home-screen icon and its label, in dp, on top of upstream's gap.
++ *
++ * Upstream subtracts the icon's invisible margin from the label padding, so larger icons
++ * (home_icon_size_factor > 1) push the label against the icon. 0 keeps upstream's layout; a
++ * negative gap (down to [MIN_DP]) pulls the label that much closer, for small icons or tall labels.
++ * DeviceProfile adds [extraPx] to the workspace padding before it fits the cell, so a short cell
++ * gives the space back from border spacing / cell padding rather than cutting the label; on the
++ * fixed grid [fixedCellPadding] keeps the label off the icon when the cell is short.
++ * Set from the desktop with `homalawn prefs set homar_label_gap_dp 6`.
++ */
++object HomarLabelGap {
++    private const val MIN_DP = -8f
++    private const val MAX_DP = 32f
++
++    // a literal, so scripts/gen-prefs-catalog.py lists it for `homalawn prefs set`
++    private val key = floatPreferencesKey(name = "homar_label_gap_dp")
++
++    /** The setting, as Lawnchair's own preferences are declared: a change reloads the grid. */
++    fun preference(context: Context): PreferenceImpl<Float, Float> {
++        val app = context.applicationContext
++        return PreferenceManager2.getInstance(app).preference(
++            key = key,
++            defaultValue = 0f,
++            onSet = { ReloadHelper(app).reloadGrid() },
++        )
++    }
++
++    private fun gapDp(prefs2: PreferenceManager2): Float =
++        prefs2.preference(key = key, defaultValue = 0f).firstBlocking().coerceIn(MIN_DP, MAX_DP)
++
++    /** Extra label padding in px for DeviceProfile (0 when unset, negative for a negative gap). */
++    @JvmStatic
++    fun extraPx(prefs2: PreferenceManager2, metrics: DisplayMetrics): Int =
++        px(gapDp(prefs2), metrics)
++
++    /** pxFromDp answers -1 (an invalid resource) for any negative size; negate around it. */
++    private fun px(dp: Float, metrics: DisplayMetrics): Int =
++        if (dp < 0f) -ResourceUtils.pxFromDp(-dp, metrics) else ResourceUtils.pxFromDp(dp, metrics)
++
++    /**
++     * Label padding for upstream's fixed (non-scalable) grid. Upstream clamps the padding to half
++     * the cell's free height, which goes negative when the cell is shorter than icon + label
++     * (4x8 with larger icons), pulling the label up into the icon by far more than the cell
++     * needs. With a gap set: the [wanted] padding (gap included), shrunk to the [roomPx] the cell
++     * really has below the icon and label (negative when even padding 0 would cut the label's
++     * descenders), never below upstream's own value. Gap 0 keeps upstream's value; a negative gap
++     * takes its dp off upstream's value.
++     */
++    @JvmStatic
++    fun fixedCellPadding(prefs2: PreferenceManager2, upstream: Int, wanted: Int, roomPx: Int): Int {
++        val gap = gapDp(prefs2)
++        return when {
++            gap == 0f -> upstream
++            gap < 0f -> upstream + px(gap, Resources.getSystem().displayMetrics)
++            else -> maxOf(upstream, minOf(wanted, roomPx))
++        }
++    }
++}
+diff --git a/src/com/android/launcher3/DeviceProfile.java b/src/com/android/launcher3/DeviceProfile.java
+index 4e22812b41..8cbf59f827 100644
+--- a/src/com/android/launcher3/DeviceProfile.java
++++ b/src/com/android/launcher3/DeviceProfile.java
+@@ -93,6 +93,7 @@ import app.lawnchair.DeviceProfileOverrides;
+ import app.lawnchair.LawnchairApp;
+ import app.lawnchair.LawnchairAppKt;
+ import app.lawnchair.hotseat.HotseatMode;
++import app.lawnchair.omalawn.HomarLabelGap;
+ import app.lawnchair.preferences.PreferenceManager;
+ import app.lawnchair.preferences2.PreferenceManager2;
+ import app.lawnchair.theme.color.ColorOption;
+@@ -1210,7 +1211,8 @@ public class DeviceProfile {
+     }
+ 
+     private int getNormalizedIconDrawablePadding() {
+-        return getNormalizedIconDrawablePadding(iconSizePx, mIconDrawablePaddingOriginalPx);
++        return getNormalizedIconDrawablePadding(iconSizePx, mIconDrawablePaddingOriginalPx)
++                + HomarLabelGap.extraPx(preferenceManager2, mMetrics); // Homa Lawn: label gap setting
+     }
+ 
+     private int getNormalizedFolderChildDrawablePaddingPx(int textHeight) {
+@@ -1356,6 +1358,9 @@ public class DeviceProfile {
+                 cellHeightPx -= (iconDrawablePaddingPx - cellPaddingY);
+                 iconDrawablePaddingPx = cellPaddingY;
+             }
++            iconDrawablePaddingPx = HomarLabelGap.fixedCellPadding(preferenceManager2, // Homa Lawn
++                    iconDrawablePaddingPx, (int) (getNormalizedIconDrawablePadding() * iconScale),
++                    getCellSize().y - iconSizePx - Utilities.calculateTextHeight(iconTextSizePx));
+         }
+ 
+         // All apps

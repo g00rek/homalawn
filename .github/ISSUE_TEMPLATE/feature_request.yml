@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something Homa Lawn could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The job you want done on the phone or the desktop, and why it matters to you.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could it work?
+      description: A command, a window section, an agent tool... Rough ideas are fine.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?
+  - type: checkboxes
+    id: lawnchair
+    attributes:
+      label: Lawnchair
+      options:
+        - label: I checked that no existing Lawnchair setting already does this (Homa Lawn prefers settings over patches).

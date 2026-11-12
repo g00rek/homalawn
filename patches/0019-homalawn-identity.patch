@@ -1,0 +1,161 @@
+From 53fb1ea61a45b60931ead384ab385b89d2f134fa Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 16 Oct 2026 19:59:40 +0200
+Subject: [PATCH] homalawn identity: app.homalawn, our release key, a growing
+ version, Homa Lawn in visible strings
+
+---
+ build.gradle    |   3 ++
+ homalawn.gradle | 132 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 135 insertions(+)
+ create mode 100644 homalawn.gradle
+
+diff --git a/build.gradle b/build.gradle
+index b8840a3d7a..7cf5e773d1 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -539,3 +539,6 @@ licensee {
+     bundleAndroidAsset = true
+     androidAssetReportPath = 'licenses.json'
+ }
++
++// Homa Lawn: its own app identity, signing, version and name (patch 0019)
++apply from: "homalawn.gradle"
+diff --git a/homalawn.gradle b/homalawn.gradle
+new file mode 100644
+index 0000000000..ff1052a254
+--- /dev/null
++++ b/homalawn.gradle
+@@ -0,0 +1,132 @@
++// Homa Lawn's own app identity (patch 0019), applied at the end of build.gradle.
++//
++// - The `homalawn` channel: applicationId app.homalawn (release, for phones) and, through the debug
++//   build type's ".debug" suffix, app.homalawn.debug (the debuggable test build for the emulator).
++//   Both can sit next to each other and next to any Lawnchair.
++// - Release builds are signed with Homa Lawn's own key, read from
++//   ~/.config/homalawn/signing/homalawn-release.properties (or HOMALAWN_SIGNING_PROPERTIES), or
++//   from HOMALAWN_SIGNING_STORE_FILE / _STORE_PASSWORD / _KEY_ALIAS / _KEY_PASSWORD. Without the key
++//   a release build stops; it never falls back to another key.
++// - The version grows with every Homa Lawn commit: versionCode = upstream's versionCode + the
++//   build number (-Phomalawn.build, the commit count of the Homa Lawn repository), versionName
++//   "<upstream major>.0-dev.<upstream base>+homalawn.<build>" (".dirty" when built from uncommitted
++//   changes). scripts/build-lawnchair.sh passes them.
++// - The strings a person sees that name Lawnchair say Homa Lawn instead, in every language
++//   (BRAND_KEYS); credits, the About screen and upstream's own statements stay as they are.
++//
++// Upstream's flavors, build types and signing are left untouched.
++
++def hlProp = { String name, String dflt -> (project.findProperty("homalawn." + name) ?: dflt).toString() }
++def hlBuild = hlProp("build", "0") as int
++def hlBase = hlProp("base", "unknown")
++def hlDirty = hlProp("dirty", "false") == "true"
++def hlMajor = android.defaultConfig.versionName.toString().split("\\.")[0]
++def hlVersionCode = (android.defaultConfig.versionCode as int) + hlBuild
++def hlVersionName = "${hlMajor}.0-dev.${hlBase}+homalawn.${hlBuild}${hlDirty ? '.dirty' : ''}"
++
++// -- release signing ----------------------------------------------------------------------------
++def hlEnv = System.getenv()
++def hlSigningFile = new File(hlEnv.HOMALAWN_SIGNING_PROPERTIES
++        ?: "${System.getProperty('user.home')}/.config/homalawn/signing/homalawn-release.properties")
++def hlSigningProps = new Properties()
++if (hlSigningFile.isFile()) hlSigningFile.withInputStream { hlSigningProps.load(it) }
++def hlSigning = [
++        storeFile    : hlEnv.HOMALAWN_SIGNING_STORE_FILE ?: hlSigningProps.getProperty("storeFile"),
++        storePassword: hlEnv.HOMALAWN_SIGNING_STORE_PASSWORD ?: hlSigningProps.getProperty("storePassword"),
++        keyAlias     : hlEnv.HOMALAWN_SIGNING_KEY_ALIAS ?: hlSigningProps.getProperty("keyAlias"),
++        keyPassword  : hlEnv.HOMALAWN_SIGNING_KEY_PASSWORD ?: hlSigningProps.getProperty("keyPassword"),
++]
++def hlHaveKey = hlSigning.values().every { it } && new File(hlSigning.storeFile).isFile()
++
++// -- the Lawnchair name in what a person sees ---------------------------------------------------
++final def BRAND_KEYS = [
++        "onboarding_open_settings_title", "onboarding_welcome", "onboarding_major_upgrade_title",
++        "set_default_launcher_tip", "generic_a11y_hint", "generic_a11y_disclaimer", "dt2s_admin_hint",
++        "accessibility_service_description", "omalawn_accessibility_service_description",
++        "managed_by_lawnchair", "smartspace_widget_toggle_description", "unfolded_grid_description",
++        "quickswitch_ignored_warning", "lawnchair_bug_report", "debug_restart_launcher",
++        "prediction_mode_lawnchair", "smartspace_mode_lawnchair", "hotseat_mode_lawnchair",
++]
++def hlBrandDir = layout.buildDirectory.dir("generated/homalawn-brand/res").get().asFile
++hlBrandDir.deleteDir()
++file("lawnchair/res").eachDirMatch(~/values(-.+)?/) { dir ->
++    def strings = new File(dir, "strings.xml")
++    if (!strings.isFile()) return
++    def text = strings.getText("UTF-8")
++    def out = []
++    BRAND_KEYS.each { key ->
++        def m = text =~ /(?s)<string name="${key}"([^>]*)>(.*?)<\/string>/
++        if (m.find()) {
++            def attrs = m.group(1).contains('translatable="false"') ? ' translatable="false"' : ''
++            out << "    <string name=\"${key}\"${attrs}>${m.group(2).replaceAll(/Lawnchair\w*/, 'Homa Lawn')}</string>"
++        }
++    }
++    if (out) {
++        def target = new File(hlBrandDir, dir.name)
++        target.mkdirs()
++        new File(target, "homalawn_brand.xml").setText(
++                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
++                "<!-- generated by homalawn.gradle from ${dir.name}/strings.xml: Lawnchair -> Homa Lawn -->\n" +
++                "<resources xmlns:xliff=\"urn:oasis:names:tc:xliff:document:1.2\">\n" + out.join("\n") + "\n</resources>\n",
++                "UTF-8")
++    }
++}
++
++android {
++    if (hlHaveKey) {
++        signingConfigs {
++            homalawnRelease {
++                storeFile file(hlSigning.storeFile)
++                storePassword hlSigning.storePassword
++                keyAlias hlSigning.keyAlias
++                keyPassword hlSigning.keyPassword
++            }
++        }
++    }
++
++    productFlavors {
++        homalawn {
++            dimension "channel"
++            applicationId "app.homalawn"
++            versionCode hlVersionCode
++            versionName hlVersionName
++            buildConfigField "String", "VERSION_DISPLAY_NAME", "\"${hlVersionName}\""
++            // the launcher's Recents integration on every Android version, as in the debug builds
++            // our phones ran before (upstream limits its own release builds to the versions it tests)
++            manifestPlaceholders.quickstepMinSdk = "0"
++            manifestPlaceholders.quickstepMaxSdk = "100000"
++            buildConfigField "int", "QUICKSTEP_MIN_SDK", "0"
++            buildConfigField "int", "QUICKSTEP_MAX_SDK", "100000"
++        }
++    }
++
++    sourceSets {
++        homalawn {
++            manifest.srcFile "github/AndroidManifest.xml" // the same permissions as the github builds we ran
++        }
++        lawnWithQuickstepHomalawn {
++            manifest.srcFile "quickstep/AndroidManifest-launcher.xml"
++            res.srcDirs += hlBrandDir
++        }
++    }
++}
++
++androidComponents {
++    onVariants(selector().withFlavor(new kotlin.Pair("channel", "homalawn"))) { variant ->
++        if (variant.buildType == "release" && hlHaveKey) {
++            variant.signingConfig.setConfig(android.signingConfigs.homalawnRelease)
++        }
++        variant.outputs.forEach { output ->
++            output.outputFileName.set("HomaLawn-${hlVersionName}-${variant.buildType}.apk")
++        }
++    }
++}
++
++gradle.taskGraph.whenReady { graph ->
++    if (!hlHaveKey && graph.allTasks.any { it.name.contains("HomalawnRelease") }) {
++        throw new GradleException("Homa Lawn's release key is missing: put its properties file at " +
++                "${hlSigningFile} (storeFile, storePassword, keyAlias, keyPassword) or set " +
++                "HOMALAWN_SIGNING_STORE_FILE, _STORE_PASSWORD, _KEY_ALIAS and _KEY_PASSWORD. " +
++                "A release build is never signed with another key.")
++    }
++}

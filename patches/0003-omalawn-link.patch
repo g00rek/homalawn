@@ -1,0 +1,4907 @@
+From f2fe655aecf576341cb439357070d0bb3ad25b5b Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Fri, 2 Oct 2026 13:17:42 +0200
+Subject: [PATCH] omalawn link: TLS server, foreground service, mDNS
+
+Mutual TLS 1.3 server on TCP 47100 with an EC P-256 identity held in Android
+Keystore, JSON-line and blob framing, per-request pin classification, a
+connectedDevice foreground service with a status notification, boot/update
+receiver and an _omalawn._tcp mDNS advert. Dispatcher gains link.hello,
+link.ping and launcher.apps_list; layout, prefs and wallpaper calls run one at
+a time; wallpaper backup cleanup only removes stale files. Debug-build pin hooks
+on the shell-only provider.
+
+Pairing by four words (SAS over both certificates and both nonces, BIP-39
+list as an asset): link.pair_request (nonce commitment) / link.pair_reveal /
+link.pair_wait / link.unpair, a single
+pairing slot that outlives the unpaired lifetime, a Homa Lawn Accept/Reject
+notification that needs an unlocked phone, rate limit 3 per 10 minutes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ArQxcgsGx5uG8agkURxU2Z
+---
+ lawnchair/AndroidManifest.xml                 |   32 +
+ lawnchair/assets/omalawn_words.txt            | 2048 +++++++++++++++++
+ lawnchair/src/app/lawnchair/LawnchairApp.kt   |   13 +
+ .../src/app/lawnchair/LawnchairLauncher.kt    |   11 +
+ .../src/app/lawnchair/omalawn/CrashExit.kt    |  143 ++
+ .../src/app/lawnchair/omalawn/LayoutIo.kt     |   64 +-
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  118 +-
+ .../omalawn/OmalawnControlProvider.kt         |  104 +
+ .../lawnchair/omalawn/link/BootReceiver.kt    |   29 +
+ .../src/app/lawnchair/omalawn/link/Frames.kt  |  102 +
+ .../app/lawnchair/omalawn/link/Identity.kt    |   88 +
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  532 +++++
+ .../app/lawnchair/omalawn/link/LinkService.kt |  257 +++
+ .../omalawn/link/NotifyPermission.kt          |   45 +
+ .../src/app/lawnchair/omalawn/link/Nsd.kt     |   60 +
+ .../omalawn/link/PairConfirmActivity.kt       |  290 +++
+ .../src/app/lawnchair/omalawn/link/Pairing.kt |  456 ++++
+ .../app/lawnchair/omalawn/link/PairingGate.kt |  136 ++
+ .../src/app/lawnchair/omalawn/link/Pins.kt    |   76 +
+ 19 files changed, 4593 insertions(+), 11 deletions(-)
+ create mode 100644 lawnchair/assets/omalawn_words.txt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/CrashExit.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/Identity.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index 4b00c3eff8..8317c106cc 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -23,6 +23,13 @@
+     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
++    <!-- Homa Lawn link: FGS type connectedDevice needs this plus one network permission
++         (developer.android.com/develop/background-work/services/fgs/service-types#connected-device) -->
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
++    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
++    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
++    <!-- the pairing confirmation screen hides other apps' overlays while it shows (12+) -->
++    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+     <uses-permission android:name="com.google.android.apps.nexuslauncher.permission.QSB" />
+     <uses-permission android:name="com.kieronquinn.app.smartspacer.permission.ACCESS_SMARTSPACER"/>
+     <uses-permission android:name="android.permission.READ_CONTACTS" />
+@@ -170,6 +177,31 @@
+             android:authorities="${applicationId}.omalawn"
+             android:exported="true" />
+ 
++        <service
++            android:name="app.lawnchair.omalawn.link.LinkService"
++            android:exported="false"
++            android:foregroundServiceType="connectedDevice" />
++
++        <!-- system broadcasts reach a non-exported receiver; nothing else can trigger it -->
++        <receiver
++            android:name="app.lawnchair.omalawn.link.BootReceiver"
++            android:exported="false">
++            <intent-filter>
++                <action android:name="android.intent.action.BOOT_COMPLETED" />
++                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
++            </intent-filter>
++        </receiver>
++
++        <!-- Homa Lawn: the pairing screen ("Pair a computer") and the only place a pairing can be accepted -->
++        <activity
++            android:name="app.lawnchair.omalawn.link.PairConfirmActivity"
++            android:exported="false"
++            android:launchMode="singleTop"
++            android:excludeFromRecents="true"
++            android:noHistory="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.DeviceDefault.Dialog.NoActionBar" />
++
+         <provider
+             android:name="app.lawnchair.search.LawnchairRecentSuggestionProvider"
+             android:authorities="${applicationId}.search.LawnchairRecentSuggestionProvider"
+diff --git a/lawnchair/assets/omalawn_words.txt b/lawnchair/assets/omalawn_words.txt
+new file mode 100644
+index 0000000000..942040ed50
+--- /dev/null
++++ b/lawnchair/assets/omalawn_words.txt
+@@ -0,0 +1,2048 @@
++abandon
++ability
++able
++about
++above
++absent
++absorb
++abstract
++absurd
++abuse
++access
++accident
++account
++accuse
++achieve
++acid
++acoustic
++acquire
++across
++act
++action
++actor
++actress
++actual
++adapt
++add
++addict
++address
++adjust
++admit
++adult
++advance
++advice
++aerobic
++affair
++afford
++afraid
++again
++age
++agent
++agree
++ahead
++aim
++air
++airport
++aisle
++alarm
++album
++alcohol
++alert
++alien
++all
++alley
++allow
++almost
++alone
++alpha
++already
++also
++alter
++always
++amateur
++amazing
++among
++amount
++amused
++analyst
++anchor
++ancient
++anger
++angle
++angry
++animal
++ankle
++announce
++annual
++another
++answer
++antenna
++antique
++anxiety
++any
++apart
++apology
++appear
++apple
++approve
++april
++arch
++arctic
++area
++arena
++argue
++arm
++armed
++armor
++army
++around
++arrange
++arrest
++arrive
++arrow
++art
++artefact
++artist
++artwork
++ask
++aspect
++assault
++asset
++assist
++assume
++asthma
++athlete
++atom
++attack
++attend
++attitude
++attract
++auction
++audit
++august
++aunt
++author
++auto
++autumn
++average
++avocado
++avoid
++awake
++aware
++away
++awesome
++awful
++awkward
++axis
++baby
++bachelor
++bacon
++badge
++bag
++balance
++balcony
++ball
++bamboo
++banana
++banner
++bar
++barely
++bargain
++barrel
++base
++basic
++basket
++battle
++beach
++bean
++beauty
++because
++become
++beef
++before
++begin
++behave
++behind
++believe
++below
++belt
++bench
++benefit
++best
++betray
++better
++between
++beyond
++bicycle
++bid
++bike
++bind
++biology
++bird
++birth
++bitter
++black
++blade
++blame
++blanket
++blast
++bleak
++bless
++blind
++blood
++blossom
++blouse
++blue
++blur
++blush
++board
++boat
++body
++boil
++bomb
++bone
++bonus
++book
++boost
++border
++boring
++borrow
++boss
++bottom
++bounce
++box
++boy
++bracket
++brain
++brand
++brass
++brave
++bread
++breeze
++brick
++bridge
++brief
++bright
++bring
++brisk
++broccoli
++broken
++bronze
++broom
++brother
++brown
++brush
++bubble
++buddy
++budget
++buffalo
++build
++bulb
++bulk
++bullet
++bundle
++bunker
++burden
++burger
++burst
++bus
++business
++busy
++butter
++buyer
++buzz
++cabbage
++cabin
++cable
++cactus
++cage
++cake
++call
++calm
++camera
++camp
++can
++canal
++cancel
++candy
++cannon
++canoe
++canvas
++canyon
++capable
++capital
++captain
++car
++carbon
++card
++cargo
++carpet
++carry
++cart
++case
++cash
++casino
++castle
++casual
++cat
++catalog
++catch
++category
++cattle
++caught
++cause
++caution
++cave
++ceiling
++celery
++cement
++census
++century
++cereal
++certain
++chair
++chalk
++champion
++change
++chaos
++chapter
++charge
++chase
++chat
++cheap
++check
++cheese
++chef
++cherry
++chest
++chicken
++chief
++child
++chimney
++choice
++choose
++chronic
++chuckle
++chunk
++churn
++cigar
++cinnamon
++circle
++citizen
++city
++civil
++claim
++clap
++clarify
++claw
++clay
++clean
++clerk
++clever
++click
++client
++cliff
++climb
++clinic
++clip
++clock
++clog
++close
++cloth
++cloud
++clown
++club
++clump
++cluster
++clutch
++coach
++coast
++coconut
++code
++coffee
++coil
++coin
++collect
++color
++column
++combine
++come
++comfort
++comic
++common
++company
++concert
++conduct
++confirm
++congress
++connect
++consider
++control
++convince
++cook
++cool
++copper
++copy
++coral
++core
++corn
++correct
++cost
++cotton
++couch
++country
++couple
++course
++cousin
++cover
++coyote
++crack
++cradle
++craft
++cram
++crane
++crash
++crater
++crawl
++crazy
++cream
++credit
++creek
++crew
++cricket
++crime
++crisp
++critic
++crop
++cross
++crouch
++crowd
++crucial
++cruel
++cruise
++crumble
++crunch
++crush
++cry
++crystal
++cube
++culture
++cup
++cupboard
++curious
++current
++curtain
++curve
++cushion
++custom
++cute
++cycle
++dad
++damage
++damp
++dance
++danger
++daring
++dash
++daughter
++dawn
++day
++deal
++debate
++debris
++decade
++december
++decide
++decline
++decorate
++decrease
++deer
++defense
++define
++defy
++degree
++delay
++deliver
++demand
++demise
++denial
++dentist
++deny
++depart
++depend
++deposit
++depth
++deputy
++derive
++describe
++desert
++design
++desk
++despair
++destroy
++detail
++detect
++develop
++device
++devote
++diagram
++dial
++diamond
++diary
++dice
++diesel
++diet
++differ
++digital
++dignity
++dilemma
++dinner
++dinosaur
++direct
++dirt
++disagree
++discover
++disease
++dish
++dismiss
++disorder
++display
++distance
++divert
++divide
++divorce
++dizzy
++doctor
++document
++dog
++doll
++dolphin
++domain
++donate
++donkey
++donor
++door
++dose
++double
++dove
++draft
++dragon
++drama
++drastic
++draw
++dream
++dress
++drift
++drill
++drink
++drip
++drive
++drop
++drum
++dry
++duck
++dumb
++dune
++during
++dust
++dutch
++duty
++dwarf
++dynamic
++eager
++eagle
++early
++earn
++earth
++easily
++east
++easy
++echo
++ecology
++economy
++edge
++edit
++educate
++effort
++egg
++eight
++either
++elbow
++elder
++electric
++elegant
++element
++elephant
++elevator
++elite
++else
++embark
++embody
++embrace
++emerge
++emotion
++employ
++empower
++empty
++enable
++enact
++end
++endless
++endorse
++enemy
++energy
++enforce
++engage
++engine
++enhance
++enjoy
++enlist
++enough
++enrich
++enroll
++ensure
++enter
++entire
++entry
++envelope
++episode
++equal
++equip
++era
++erase
++erode
++erosion
++error
++erupt
++escape
++essay
++essence
++estate
++eternal
++ethics
++evidence
++evil
++evoke
++evolve
++exact
++example
++excess
++exchange
++excite
++exclude
++excuse
++execute
++exercise
++exhaust
++exhibit
++exile
++exist
++exit
++exotic
++expand
++expect
++expire
++explain
++expose
++express
++extend
++extra
++eye
++eyebrow
++fabric
++face
++faculty
++fade
++faint
++faith
++fall
++false
++fame
++family
++famous
++fan
++fancy
++fantasy
++farm
++fashion
++fat
++fatal
++father
++fatigue
++fault
++favorite
++feature
++february
++federal
++fee
++feed
++feel
++female
++fence
++festival
++fetch
++fever
++few
++fiber
++fiction
++field
++figure
++file
++film
++filter
++final
++find
++fine
++finger
++finish
++fire
++firm
++first
++fiscal
++fish
++fit
++fitness
++fix
++flag
++flame
++flash
++flat
++flavor
++flee
++flight
++flip
++float
++flock
++floor
++flower
++fluid
++flush
++fly
++foam
++focus
++fog
++foil
++fold
++follow
++food
++foot
++force
++forest
++forget
++fork
++fortune
++forum
++forward
++fossil
++foster
++found
++fox
++fragile
++frame
++frequent
++fresh
++friend
++fringe
++frog
++front
++frost
++frown
++frozen
++fruit
++fuel
++fun
++funny
++furnace
++fury
++future
++gadget
++gain
++galaxy
++gallery
++game
++gap
++garage
++garbage
++garden
++garlic
++garment
++gas
++gasp
++gate
++gather
++gauge
++gaze
++general
++genius
++genre
++gentle
++genuine
++gesture
++ghost
++giant
++gift
++giggle
++ginger
++giraffe
++girl
++give
++glad
++glance
++glare
++glass
++glide
++glimpse
++globe
++gloom
++glory
++glove
++glow
++glue
++goat
++goddess
++gold
++good
++goose
++gorilla
++gospel
++gossip
++govern
++gown
++grab
++grace
++grain
++grant
++grape
++grass
++gravity
++great
++green
++grid
++grief
++grit
++grocery
++group
++grow
++grunt
++guard
++guess
++guide
++guilt
++guitar
++gun
++gym
++habit
++hair
++half
++hammer
++hamster
++hand
++happy
++harbor
++hard
++harsh
++harvest
++hat
++have
++hawk
++hazard
++head
++health
++heart
++heavy
++hedgehog
++height
++hello
++helmet
++help
++hen
++hero
++hidden
++high
++hill
++hint
++hip
++hire
++history
++hobby
++hockey
++hold
++hole
++holiday
++hollow
++home
++honey
++hood
++hope
++horn
++horror
++horse
++hospital
++host
++hotel
++hour
++hover
++hub
++huge
++human
++humble
++humor
++hundred
++hungry
++hunt
++hurdle
++hurry
++hurt
++husband
++hybrid
++ice
++icon
++idea
++identify
++idle
++ignore
++ill
++illegal
++illness
++image
++imitate
++immense
++immune
++impact
++impose
++improve
++impulse
++inch
++include
++income
++increase
++index
++indicate
++indoor
++industry
++infant
++inflict
++inform
++inhale
++inherit
++initial
++inject
++injury
++inmate
++inner
++innocent
++input
++inquiry
++insane
++insect
++inside
++inspire
++install
++intact
++interest
++into
++invest
++invite
++involve
++iron
++island
++isolate
++issue
++item
++ivory
++jacket
++jaguar
++jar
++jazz
++jealous
++jeans
++jelly
++jewel
++job
++join
++joke
++journey
++joy
++judge
++juice
++jump
++jungle
++junior
++junk
++just
++kangaroo
++keen
++keep
++ketchup
++key
++kick
++kid
++kidney
++kind
++kingdom
++kiss
++kit
++kitchen
++kite
++kitten
++kiwi
++knee
++knife
++knock
++know
++lab
++label
++labor
++ladder
++lady
++lake
++lamp
++language
++laptop
++large
++later
++latin
++laugh
++laundry
++lava
++law
++lawn
++lawsuit
++layer
++lazy
++leader
++leaf
++learn
++leave
++lecture
++left
++leg
++legal
++legend
++leisure
++lemon
++lend
++length
++lens
++leopard
++lesson
++letter
++level
++liar
++liberty
++library
++license
++life
++lift
++light
++like
++limb
++limit
++link
++lion
++liquid
++list
++little
++live
++lizard
++load
++loan
++lobster
++local
++lock
++logic
++lonely
++long
++loop
++lottery
++loud
++lounge
++love
++loyal
++lucky
++luggage
++lumber
++lunar
++lunch
++luxury
++lyrics
++machine
++mad
++magic
++magnet
++maid
++mail
++main
++major
++make
++mammal
++man
++manage
++mandate
++mango
++mansion
++manual
++maple
++marble
++march
++margin
++marine
++market
++marriage
++mask
++mass
++master
++match
++material
++math
++matrix
++matter
++maximum
++maze
++meadow
++mean
++measure
++meat
++mechanic
++medal
++media
++melody
++melt
++member
++memory
++mention
++menu
++mercy
++merge
++merit
++merry
++mesh
++message
++metal
++method
++middle
++midnight
++milk
++million
++mimic
++mind
++minimum
++minor
++minute
++miracle
++mirror
++misery
++miss
++mistake
++mix
++mixed
++mixture
++mobile
++model
++modify
++mom
++moment
++monitor
++monkey
++monster
++month
++moon
++moral
++more
++morning
++mosquito
++mother
++motion
++motor
++mountain
++mouse
++move
++movie
++much
++muffin
++mule
++multiply
++muscle
++museum
++mushroom
++music
++must
++mutual
++myself
++mystery
++myth
++naive
++name
++napkin
++narrow
++nasty
++nation
++nature
++near
++neck
++need
++negative
++neglect
++neither
++nephew
++nerve
++nest
++net
++network
++neutral
++never
++news
++next
++nice
++night
++noble
++noise
++nominee
++noodle
++normal
++north
++nose
++notable
++note
++nothing
++notice
++novel
++now
++nuclear
++number
++nurse
++nut
++oak
++obey
++object
++oblige
++obscure
++observe
++obtain
++obvious
++occur
++ocean
++october
++odor
++off
++offer
++office
++often
++oil
++okay
++old
++olive
++olympic
++omit
++once
++one
++onion
++online
++only
++open
++opera
++opinion
++oppose
++option
++orange
++orbit
++orchard
++order
++ordinary
++organ
++orient
++original
++orphan
++ostrich
++other
++outdoor
++outer
++output
++outside
++oval
++oven
++over
++own
++owner
++oxygen
++oyster
++ozone
++pact
++paddle
++page
++pair
++palace
++palm
++panda
++panel
++panic
++panther
++paper
++parade
++parent
++park
++parrot
++party
++pass
++patch
++path
++patient
++patrol
++pattern
++pause
++pave
++payment
++peace
++peanut
++pear
++peasant
++pelican
++pen
++penalty
++pencil
++people
++pepper
++perfect
++permit
++person
++pet
++phone
++photo
++phrase
++physical
++piano
++picnic
++picture
++piece
++pig
++pigeon
++pill
++pilot
++pink
++pioneer
++pipe
++pistol
++pitch
++pizza
++place
++planet
++plastic
++plate
++play
++please
++pledge
++pluck
++plug
++plunge
++poem
++poet
++point
++polar
++pole
++police
++pond
++pony
++pool
++popular
++portion
++position
++possible
++post
++potato
++pottery
++poverty
++powder
++power
++practice
++praise
++predict
++prefer
++prepare
++present
++pretty
++prevent
++price
++pride
++primary
++print
++priority
++prison
++private
++prize
++problem
++process
++produce
++profit
++program
++project
++promote
++proof
++property
++prosper
++protect
++proud
++provide
++public
++pudding
++pull
++pulp
++pulse
++pumpkin
++punch
++pupil
++puppy
++purchase
++purity
++purpose
++purse
++push
++put
++puzzle
++pyramid
++quality
++quantum
++quarter
++question
++quick
++quit
++quiz
++quote
++rabbit
++raccoon
++race
++rack
++radar
++radio
++rail
++rain
++raise
++rally
++ramp
++ranch
++random
++range
++rapid
++rare
++rate
++rather
++raven
++raw
++razor
++ready
++real
++reason
++rebel
++rebuild
++recall
++receive
++recipe
++record
++recycle
++reduce
++reflect
++reform
++refuse
++region
++regret
++regular
++reject
++relax
++release
++relief
++rely
++remain
++remember
++remind
++remove
++render
++renew
++rent
++reopen
++repair
++repeat
++replace
++report
++require
++rescue
++resemble
++resist
++resource
++response
++result
++retire
++retreat
++return
++reunion
++reveal
++review
++reward
++rhythm
++rib
++ribbon
++rice
++rich
++ride
++ridge
++rifle
++right
++rigid
++ring
++riot
++ripple
++risk
++ritual
++rival
++river
++road
++roast
++robot
++robust
++rocket
++romance
++roof
++rookie
++room
++rose
++rotate
++rough
++round
++route
++royal
++rubber
++rude
++rug
++rule
++run
++runway
++rural
++sad
++saddle
++sadness
++safe
++sail
++salad
++salmon
++salon
++salt
++salute
++same
++sample
++sand
++satisfy
++satoshi
++sauce
++sausage
++save
++say
++scale
++scan
++scare
++scatter
++scene
++scheme
++school
++science
++scissors
++scorpion
++scout
++scrap
++screen
++script
++scrub
++sea
++search
++season
++seat
++second
++secret
++section
++security
++seed
++seek
++segment
++select
++sell
++seminar
++senior
++sense
++sentence
++series
++service
++session
++settle
++setup
++seven
++shadow
++shaft
++shallow
++share
++shed
++shell
++sheriff
++shield
++shift
++shine
++ship
++shiver
++shock
++shoe
++shoot
++shop
++short
++shoulder
++shove
++shrimp
++shrug
++shuffle
++shy
++sibling
++sick
++side
++siege
++sight
++sign
++silent
++silk
++silly
++silver
++similar
++simple
++since
++sing
++siren
++sister
++situate
++six
++size
++skate
++sketch
++ski
++skill
++skin
++skirt
++skull
++slab
++slam
++sleep
++slender
++slice
++slide
++slight
++slim
++slogan
++slot
++slow
++slush
++small
++smart
++smile
++smoke
++smooth
++snack
++snake
++snap
++sniff
++snow
++soap
++soccer
++social
++sock
++soda
++soft
++solar
++soldier
++solid
++solution
++solve
++someone
++song
++soon
++sorry
++sort
++soul
++sound
++soup
++source
++south
++space
++spare
++spatial
++spawn
++speak
++special
++speed
++spell
++spend
++sphere
++spice
++spider
++spike
++spin
++spirit
++split
++spoil
++sponsor
++spoon
++sport
++spot
++spray
++spread
++spring
++spy
++square
++squeeze
++squirrel
++stable
++stadium
++staff
++stage
++stairs
++stamp
++stand
++start
++state
++stay
++steak
++steel
++stem
++step
++stereo
++stick
++still
++sting
++stock
++stomach
++stone
++stool
++story
++stove
++strategy
++street
++strike
++strong
++struggle
++student
++stuff
++stumble
++style
++subject
++submit
++subway
++success
++such
++sudden
++suffer
++sugar
++suggest
++suit
++summer
++sun
++sunny
++sunset
++super
++supply
++supreme
++sure
++surface
++surge
++surprise
++surround
++survey
++suspect
++sustain
++swallow
++swamp
++swap
++swarm
++swear
++sweet
++swift
++swim
++swing
++switch
++sword
++symbol
++symptom
++syrup
++system
++table
++tackle
++tag
++tail
++talent
++talk
++tank
++tape
++target
++task
++taste
++tattoo
++taxi
++teach
++team
++tell
++ten
++tenant
++tennis
++tent
++term
++test
++text
++thank
++that
++theme
++then
++theory
++there
++they
++thing
++this
++thought
++three
++thrive
++throw
++thumb
++thunder
++ticket
++tide
++tiger
++tilt
++timber
++time
++tiny
++tip
++tired
++tissue
++title
++toast
++tobacco
++today
++toddler
++toe
++together
++toilet
++token
++tomato
++tomorrow
++tone
++tongue
++tonight
++tool
++tooth
++top
++topic
++topple
++torch
++tornado
++tortoise
++toss
++total
++tourist
++toward
++tower
++town
++toy
++track
++trade
++traffic
++tragic
++train
++transfer
++trap
++trash
++travel
++tray
++treat
++tree
++trend
++trial
++tribe
++trick
++trigger
++trim
++trip
++trophy
++trouble
++truck
++true
++truly
++trumpet
++trust
++truth
++try
++tube
++tuition
++tumble
++tuna
++tunnel
++turkey
++turn
++turtle
++twelve
++twenty
++twice
++twin
++twist
++two
++type
++typical
++ugly
++umbrella
++unable
++unaware
++uncle
++uncover
++under
++undo
++unfair
++unfold
++unhappy
++uniform
++unique
++unit
++universe
++unknown
++unlock
++until
++unusual
++unveil
++update
++upgrade
++uphold
++upon
++upper
++upset
++urban
++urge
++usage
++use
++used
++useful
++useless
++usual
++utility
++vacant
++vacuum
++vague
++valid
++valley
++valve
++van
++vanish
++vapor
++various
++vast
++vault
++vehicle
++velvet
++vendor
++venture
++venue
++verb
++verify
++version
++very
++vessel
++veteran
++viable
++vibrant
++vicious
++victory
++video
++view
++village
++vintage
++violin
++virtual
++virus
++visa
++visit
++visual
++vital
++vivid
++vocal
++voice
++void
++volcano
++volume
++vote
++voyage
++wage
++wagon
++wait
++walk
++wall
++walnut
++want
++warfare
++warm
++warrior
++wash
++wasp
++waste
++water
++wave
++way
++wealth
++weapon
++wear
++weasel
++weather
++web
++wedding
++weekend
++weird
++welcome
++west
++wet
++whale
++what
++wheat
++wheel
++when
++where
++whip
++whisper
++wide
++width
++wife
++wild
++will
++win
++window
++wine
++wing
++wink
++winner
++winter
++wire
++wisdom
++wise
++wish
++witness
++wolf
++woman
++wonder
++wood
++wool
++word
++work
++world
++worry
++worth
++wrap
++wreck
++wrestle
++wrist
++write
++wrong
++yard
++year
++yellow
++you
++young
++youth
++zebra
++zero
++zone
++zoo
+diff --git a/lawnchair/src/app/lawnchair/LawnchairApp.kt b/lawnchair/src/app/lawnchair/LawnchairApp.kt
+index 029e65cd0f..0977b01bb7 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairApp.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairApp.kt
+@@ -64,12 +64,25 @@ class LawnchairApp : LauncherApplication() {
+     internal var accessibilityService: LawnchairAccessibilityService? = null
+     val isVibrateOnIconAnimation: Boolean by unsafeLazy { getSystemUiBoolean("config_vibrateOnIconAnimation", false) }
+ 
++    override fun attachBaseContext(base: Context) {
++        super.attachBaseContext(base)
++        // a crashed process must really end, or the link outlives a dead main thread. Installed
++        // here, before the content providers install their handlers on top (see CrashExit).
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && android.app.Application.getProcessName() == base.packageName) {
++            app.lawnchair.omalawn.CrashExit.install(this)
++        }
++    }
++
+     override fun onCreate() {
+         super.onCreate()
+         instance = this
+         QuickStepContract.sRecentsDisabled = !recentsEnabled
+         Flowerpot.Manager.getInstance(this)
+         registerActivityLifecycleCallbacks(activityHandler)
++        // Homa Lawn link: main process only (the :bugReport process runs this too). Android may
++        // refuse the start while the launcher is in the background; LawnchairLauncher.onResume,
++        // the boot receiver and START_STICKY cover that.
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || android.app.Application.getProcessName() == packageName) app.lawnchair.omalawn.link.LinkService.start(this)
+     }
+ 
+     fun hideClockInStatusBar() {
+diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+index f415675229..41533fb5aa 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
+@@ -471,6 +471,12 @@ class LawnchairLauncher : QuickstepLauncher() {
+         super.onResume()
+         restartIfPending()
+         refreshPredictionContainersFromModel()
++        app.lawnchair.omalawn.link.PairingGate.launcherResumed(true) // the home screen takes pair requests
++        // visible, so Android always allows the start; a no-op when the link already runs. Then
++        // make sure its notification can be seen (asks at most once per version).
++        if (app.lawnchair.omalawn.link.LinkService.start(this)) {
++            app.lawnchair.omalawn.link.NotifyPermission.maybeAsk(this)
++        }
+ 
+         dragLayer.viewTreeObserver.addOnDrawListener(
+             object : ViewTreeObserver.OnDrawListener {
+@@ -497,6 +503,11 @@ class LawnchairLauncher : QuickstepLauncher() {
+         refreshPredictionContainersFromModel()
+     }
+ 
++    override fun onPause() {
++        app.lawnchair.omalawn.link.PairingGate.launcherResumed(false)
++        super.onPause()
++    }
++
+     override fun onDestroy() {
+         super.onDestroy()
+         // Only actually closes if required, safe to call if not enabled
+diff --git a/lawnchair/src/app/lawnchair/omalawn/CrashExit.kt b/lawnchair/src/app/lawnchair/omalawn/CrashExit.kt
+new file mode 100644
+index 0000000000..1497f5d812
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/CrashExit.kt
+@@ -0,0 +1,143 @@
++package app.lawnchair.omalawn
++
++import android.app.AlarmManager
++import android.app.Application
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.os.Process
++import android.os.SystemClock
++import android.util.Log
++import app.lawnchair.omalawn.link.BootReceiver
++import app.lawnchair.omalawn.link.LinkService
++import kotlin.system.exitProcess
++
++/**
++ * Makes sure a crashed launcher process really ends.
++ *
++ * Android's own handler (RuntimeInit.KillApplicationHandler) reports the crash to the system and
++ * only kills the process after `handleApplicationCrash` returns. When the system shows "Lawnchair
++ * keeps stopping" that call blocks until the dialog is answered (or its 5 minute timeout).
++ * Meanwhile the crashed main thread is stuck, but binder and link threads live on: the link
++ * answers `ping` while every layout call waits on the dead main thread and ends `busy`. So: let
++ * Android record the crash as usual, and if the process is still alive [GRACE_MS] later, end it
++ * ourselves; the system then restarts the link service (START_STICKY) in a fresh process.
++ *
++ * Order: installed from `LawnchairApp.attachBaseContext`, before any other handler, so it sits
++ * directly above Android's: Lawnchair's bug reporter (installed later, from the provider's process
++ * initializer) wraps it and writes its report before this handler starts the timer; Android's
++ * handler registers the crash right after. Trade-off of the grace: long enough on a slow phone for
++ * that registration (an ordinary crash is killed by Android well within it, so the timer never
++ * fires), but in the stuck-dialog case the link stays dead that much longer.
++ *
++ * Restart: a crash within 60 s of the service's previous (re)start makes Android wait 30 min or
++ * more (ActiveServices: BOUND_SERVICE_CRASH_RESTART_DURATION * (crashCount - 1)); any other crash
++ * Android restarts in about a second by itself. So a plain alarm ~10 s ahead that starts the link
++ * service again is set only in the two cases where Android will not: the crash came less than
++ * [RECENT_MS] after this process created the link service, or the timer had to end a stuck
++ * process. Bounds, so a crash loop is never fed: at most [RESTART_MAX] alarms per
++ * [RESTART_WINDOW_MS], each armed alarm counted (no sliding, no merging); and none at all within
++ * [SELF_MS] of a start by our own alarm (whatever process crashes then: the restart it caused
++ * failed, so Android's own back-off takes over). That background FGS start went
++ * through on the API 35 AVD without the battery exemption (reason not logged); with the exemption
++ * ("Keep connected") it is always allowed.
++ */
++object CrashExit {
++    private const val TAG = "OmalawnCrashExit"
++    const val GRACE_MS = 8000L
++
++    private const val RESTART_DELAY_MS = 10_000L
++    private const val RESTART_WINDOW_MS = 10 * 60 * 1000L
++    private const val RESTART_MAX = 3
++    private const val SELF_MS = 60_000L
++    private const val RECENT_MS = 60_000L
++
++    // its own file: read only here and by BootReceiver's restart path
++    private const val PREFS = "omalawn_crash_restart"
++    private const val KEY_ARMED = "armed_at"
++    private const val KEY_RESTART_AT = "restart_at"
++    const val EXTRA_FROM_CRASH = "app.lawnchair.omalawn.from_crash_exit"
++
++    @Volatile private var installed = false
++    @Volatile private var armedHere = false
++
++    fun install(app: Application) {
++        if (installed) return
++        installed = true
++        val previous = Thread.getDefaultUncaughtExceptionHandler()
++        Log.i(TAG, "installed over ${previous?.javaClass?.name}")
++        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
++            val created = LinkService.createdAt
++            if (created > 0 && SystemClock.elapsedRealtime() - created < RECENT_MS) {
++                // Android will postpone the restart by 30 min or more
++                tryArm(app, "crash ${SystemClock.elapsedRealtime() - created}ms after the link service started")
++            }
++            val exit = Thread({
++                try {
++                    Thread.sleep(GRACE_MS)
++                } catch (_: InterruptedException) {
++                }
++                // still alive: Android's crash call is blocked (crash dialog); end it ourselves
++                Log.w(TAG, "process still alive ${GRACE_MS}ms after an uncaught exception in ${thread.name}; ending it")
++                if (!armedHere) tryArm(app, "stuck process ended")
++                Process.killProcess(Process.myPid())
++                exitProcess(10)
++            }, "omalawn-crash-exit")
++            exit.isDaemon = true
++            exit.start()
++            if (previous != null) {
++                previous.uncaughtException(thread, error)
++            } else {
++                Process.killProcess(Process.myPid())
++                exitProcess(10)
++            }
++        }
++    }
++
++    /** Called by BootReceiver when our alarm fired: no alarm is armed again within [SELF_MS]. */
++    fun onRestartAlarm(ctx: Context) {
++        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
++            .putLong(KEY_RESTART_AT, SystemClock.elapsedRealtime())
++            .commit()
++    }
++
++    private fun tryArm(ctx: Context, why: String) {
++        try {
++            armRestart(ctx, why)
++        } catch (t: Throwable) {
++            Log.w(TAG, "no restart alarm: $t")
++        }
++    }
++
++    /** Debug hook (provider, shell only): forget armed alarms and the restart marker. */
++    fun resetBudget(ctx: Context) {
++        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
++    }
++
++    private fun armRestart(ctx: Context, why: String) {
++        armedHere = true
++        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        val sinceAlarm = SystemClock.elapsedRealtime() - prefs.getLong(KEY_RESTART_AT, Long.MIN_VALUE / 2)
++        if (sinceAlarm in 0 until SELF_MS) {
++            Log.w(TAG, "no restart alarm ($why): our last restart alarm fired only ${sinceAlarm}ms ago")
++            return
++        }
++        val now = System.currentTimeMillis()
++        val armed = prefs.getString(KEY_ARMED, "").orEmpty().split(',')
++            .mapNotNull { it.toLongOrNull() }.filter { it in (now - RESTART_WINDOW_MS)..now }
++        if (armed.size >= RESTART_MAX) {
++            Log.w(TAG, "no restart alarm ($why): already $RESTART_MAX in the last ${RESTART_WINDOW_MS / 60000} min")
++            return
++        }
++        prefs.edit().putString(KEY_ARMED, (armed + now).joinToString(",")).commit() // the process is about to die
++        val pi = PendingIntent.getBroadcast(
++            ctx,
++            47100,
++            Intent(ctx, BootReceiver::class.java).setAction(BootReceiver.ACTION_RESTART).putExtra(EXTRA_FROM_CRASH, true),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++        ctx.getSystemService(AlarmManager::class.java)!!
++            .set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + RESTART_DELAY_MS, pi)
++        Log.i(TAG, "link restart alarm set for ${RESTART_DELAY_MS}ms from now (${armed.size + 1}/$RESTART_MAX; $why)")
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt b/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
+index 680f74e43a..a08e9cf8d5 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/LayoutIo.kt
+@@ -7,11 +7,13 @@ import android.database.DatabaseUtils
+ import android.database.sqlite.SQLiteDatabase
+ import android.database.sqlite.SQLiteException
+ import android.system.Os
++import android.util.Log
+ import com.android.launcher3.AbstractFloatingView
+ import com.android.launcher3.Launcher
+ import com.android.launcher3.LauncherAppState
+ import com.android.launcher3.LauncherModel
+ import com.android.launcher3.LauncherSettings.Favorites
++import com.android.launcher3.model.BgDataModel
+ import com.android.launcher3.model.OmalawnDbAccess
+ import com.android.launcher3.util.Executors.MAIN_EXECUTOR
+ import com.android.launcher3.util.Executors.MODEL_EXECUTOR
+@@ -36,6 +38,7 @@ object LayoutIo {
+     const val BUSY = "busy"
+     const val BAD_PATH = "bad_path"
+ 
++    private const val TAG = "OmalawnLayoutIo"
+     private const val TIMEOUT_S = 30L
+     private const val STALE_MS = 10 * 60 * 1000L
+     private const val TABLE = Favorites.TABLE_NAME
+@@ -44,7 +47,7 @@ object LayoutIo {
+     private fun fail(code: String, msg: String) = OmalawnError(code, "$code: $msg")
+ 
+     fun exportDb(ctx: Context, params: JSONObject): JSONObject {
+-        val model = loadedModel()
++        val model = loadedModel(ctx)
+         // An item removed with the undo snackbar still showing is only deleted from the DB when the
+         // snackbar goes; without this the export would still hold it and a later import revive it.
+         commitPendingDeletes()
+@@ -162,10 +165,61 @@ object LayoutIo {
+         }
+     }
+ 
+-    private fun loadedModel(): LauncherModel {
+-        val model = LauncherAppState.getInstanceNoCreate()?.model
+-        if (model == null || !model.isModelLoaded) throw fail(BUSY, "the launcher has not finished loading its home screen")
+-        return model
++    /**
++     * The model, loaded. A process started without the launcher activity (by the link service after
++     * a crash, by a provider call, after an update) never loads the home screen on its own: in this
++     * Launcher3 the loader only runs for registered callbacks (LauncherModel.startLoader). So when
++     * nothing is loaded or loading, [ensureLoaded] registers a headless no-op callback, which starts
++     * the same LoaderTask the launcher would; the callback goes away once loaded.
++     */
++    private fun loadedModel(ctx: Context): LauncherModel {
++        if (!ensureLoaded(ctx, LOAD_WAIT_S)) {
++            throw fail(BUSY, "the launcher has not finished loading its home screen within ${LOAD_WAIT_S}s")
++        }
++        return current()!!
++    }
++
++    private fun current(): LauncherModel? = LauncherAppState.getInstance(app.lawnchair.LawnchairApp.instance).model
++
++    /** Loaded within [waitS] seconds? Starts a headless load if needed. Off the main thread only. */
++    fun ensureLoaded(ctx: Context, waitS: Long): Boolean {
++        if (current()?.isModelLoaded() == true) return true
++        kickLoad(ctx)
++        val end = System.currentTimeMillis() + waitS * 1000
++        while (current()?.isModelLoaded() != true && System.currentTimeMillis() < end) Thread.sleep(100)
++        return current()?.isModelLoaded() == true
++    }
++
++    private const val LOAD_WAIT_S = 30L
++    private val headless = object : BgDataModel.Callbacks {}
++    @Volatile private var headlessOn = false
++
++    /**
++     * Start loading the home screen if no launcher is there to do it; returns at once. Everything,
++     * the app state included, is touched on the main thread, so a caller never blocks on it.
++     */
++    fun kickLoad(ctx: Context) {
++        val app = ctx.applicationContext
++        MAIN_EXECUTOR.execute {
++            val model = LauncherAppState.getInstance(app).model
++            if (model.isModelLoaded()) {
++                dropHeadless(model)
++            } else if (!model.hasCallbacks()) {
++                Log.i(TAG, "no launcher activity: loading the home screen headless")
++                headlessOn = true
++                model.addCallbacksAndLoad(headless)
++                // drop the no-op callback once the load has finished (checked on the model thread,
++                // after the queued LoaderTask), so it never receives later binds
++                MODEL_EXECUTOR.execute { MAIN_EXECUTOR.execute { dropHeadless(model) } }
++            }
++        }
++    }
++
++    private fun dropHeadless(model: LauncherModel) {
++        if (headlessOn && model.isModelLoaded()) {
++            headlessOn = false
++            model.removeCallbacks(headless)
++        }
+     }
+ 
+     /** An item deleted with the undo snackbar still showing is only removed when the snackbar goes;
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 14ff139791..45c3f68d31 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -4,19 +4,27 @@ import android.app.WallpaperManager
+ import android.appwidget.AppWidgetManager
+ import android.content.Context
+ import android.content.Intent
++import android.content.pm.LauncherApps
++import android.os.Build
+ import android.os.Handler
+ import android.os.Looper
++import android.os.Process
++import android.provider.Settings
+ import android.system.Os
+ import androidx.datastore.preferences.core.booleanPreferencesKey
+ import androidx.datastore.preferences.core.edit
+ import androidx.datastore.preferences.core.floatPreferencesKey
+ import androidx.datastore.preferences.core.intPreferencesKey
+ import androidx.datastore.preferences.core.stringPreferencesKey
++import app.lawnchair.omalawn.link.Identity
+ import app.lawnchair.preferences2.PreferenceManager2
+ import app.lawnchair.preferences2.ReloadHelper
+ import com.android.launcher3.LauncherAppState
+ import com.android.launcher3.widget.LauncherAppWidgetProviderInfo
+ import java.io.File
++import java.util.UUID
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.locks.ReentrantLock
+ import kotlin.math.roundToInt
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.runBlocking
+@@ -33,9 +41,47 @@ class OmalawnError(val code: String, message: String) : Exception(message)
+  */
+ object OmalawnCommands {
+ 
+-    fun dispatch(ctx: Context, method: String, params: JSONObject): Any = try {
++    /**
++     * [paired] is what the caller's own authentication decided; only `link.hello` reports it.
++     * Methods in [SERIAL] (layout, preferences, wallpaper, staged files) run one at a time across
++     * every caller, so concurrent link connections and the provider never interleave writes.
++     */
++    fun dispatch(ctx: Context, method: String, params: JSONObject, paired: Boolean = false): Any =
++        if (method in SERIAL) serially { run(ctx, method, params, paired) } else run(ctx, method, params, paired)
++
++    private val SERIAL = setOf(
++        "launcher.pref_set",
++        "launcher.prefs_set_many",
++        "launcher.wallpaper_backup",
++        "launcher.wallpaper_set",
++        "launcher.layout_export",
++        "launcher.layout_import",
++    )
++    private const val LOCK_WAIT_S = 90L
++    private val lock = ReentrantLock(true)
++
++    private fun <T> serially(block: () -> T): T {
++        if (!lock.tryLock(LOCK_WAIT_S, TimeUnit.SECONDS)) {
++            throw OmalawnError(BUSY, "$BUSY: another change has been running for over ${LOCK_WAIT_S}s")
++        }
++        try {
++            return block()
++        } finally {
++            lock.unlock()
++        }
++    }
++
++    private fun run(ctx: Context, method: String, params: JSONObject, paired: Boolean): Any = try {
+         when (method) {
++            "link.ping" -> JSONObject().put("t", System.currentTimeMillis())
++            "link.hello" -> hello(ctx, paired)
++            "launcher.apps_list" -> appsList(ctx)
+             "launcher.ping" -> ping(ctx)
++            // starts the home screen load if nothing else will (no launcher activity), waits a
++            // little; touches nothing that blocks on the main thread (db is null until it exists)
++            "launcher.ensure_loaded" -> JSONObject()
++                .put("loaded", LayoutIo.ensureLoaded(ctx, ENSURE_WAIT_S))
++                .put("db", com.android.launcher3.InvariantDeviceProfile.INSTANCE.getNoCreate()?.dbFile ?: JSONObject.NULL)
+             "launcher.prefs_list" -> prefsList(ctx)
+             "launcher.pref_set" -> {
+                 prefSet(ctx, params)
+@@ -64,6 +110,65 @@ object OmalawnCommands {
+     }
+ 
+     const val UNKNOWN_METHOD = "unknown_method"
++    const val LINK_VERSION = 1
++    private const val ENSURE_WAIT_S = 10L
++    const val BUSY = "busy"
++    const val BAD_NAME = "bad_name"
++    private const val STALE_MS = 10 * 60 * 1000L
++    private val STAGE_NAME = Regex("[a-z0-9._-]{1,64}")
++    private val RESERVED = listOf("export-", "import-", "wp-backup-")
++
++    /**
++     * Writes [bytes] to files/omalawn/<name> (0600) through a temp file and a rename, so a reader
++     * never sees half a file. [internal] names come from our own code and may use the reserved
++     * prefixes that our cleanups delete.
++     */
++    fun stageFile(ctx: Context, name: String, bytes: ByteArray, internal: Boolean = false): File {
++        if (!STAGE_NAME.matches(name) || name.startsWith(".") ||
++            (!internal && RESERVED.any { name.startsWith(it) })
++        ) {
++            throw OmalawnError(BAD_NAME, "$BAD_NAME: file name must match [a-z0-9._-]{1,64}, not start with '.' or ${RESERVED.joinToString("/")}")
++        }
++        return serially {
++            val dir = privateDir(ctx)
++            val out = File(dir, name)
++            val tmp = File(dir, ".stage-${UUID.randomUUID()}")
++            try {
++                tmp.outputStream().use { it.write(bytes) }
++                private600(tmp)
++                if (!tmp.renameTo(out)) error("cannot write $name")
++            } finally {
++                tmp.delete()
++            }
++            out
++        }
++    }
++
++    /** An unpaired computer learns only that it is not paired and the protocol version. */
++    private fun hello(ctx: Context, paired: Boolean): JSONObject {
++        val o = JSONObject().put("paired", paired).put("v", LINK_VERSION)
++        if (!paired) return o
++        return o.put("device", Build.MODEL)
++            .put("name", Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)
++            .put("fp", Identity.fingerprint())
++            .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
++    }
++
++    /** Launchable activities of the current user, as the app drawer sees them. */
++    private fun appsList(ctx: Context): JSONArray {
++        val out = JSONArray()
++        ctx.getSystemService(LauncherApps::class.java)!!
++            .getActivityList(null, Process.myUserHandle())
++            .forEach { a ->
++                out.put(
++                    JSONObject()
++                        .put("package", a.componentName.packageName)
++                        .put("activity", a.componentName.className)
++                        .put("label", a.label.toString()),
++                )
++            }
++        return out
++    }
+ 
+     /** files/omalawn/, private to Lawnchair (0700). */
+     fun privateDir(ctx: Context): File {
+@@ -212,13 +317,14 @@ object OmalawnCommands {
+     private fun wallpaperBackup(ctx: Context): JSONObject {
+         val dir = privateDir(ctx)
+         val now = System.currentTimeMillis()
+-        // A backup is read and deleted by the desktop right after this call; any older one is
+-        // left over from an interrupted run.
++        // A backup is read and deleted by its caller within seconds of this call; only one older
++        // than STALE_MS is a leftover of an interrupted run. A younger one may still be on its way
++        // to another caller, so it stays.
+         dir.listFiles()?.forEach { f ->
+-            val t = f.name.removePrefix("wp-backup-").removeSuffix(".png").toLongOrNull()
+-            if (f.name.startsWith("wp-backup-") && t != null && t < now) f.delete()
++            val t = f.name.removePrefix("wp-backup-").substringBefore('-').removeSuffix(".png").toLongOrNull()
++            if (f.name.startsWith("wp-backup-") && t != null && t < now - STALE_MS) f.delete()
+         }
+-        val out = File(dir, "wp-backup-$now.png")
++        val out = File(dir, "wp-backup-$now-${UUID.randomUUID().toString().take(8)}.png")
+         val wm = WallpaperManager.getInstance(ctx)
+         if (wm.wallpaperInfo != null) error("live wallpaper: the current wallpaper is a live wallpaper and cannot be saved")
+         val failures = mutableListOf<String>()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index c4a1fdd672..209b7cde63 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -2,11 +2,18 @@ package app.lawnchair.omalawn
+ 
+ import android.content.ContentProvider
+ import android.content.ContentValues
++import android.content.Context
+ import android.database.Cursor
+ import android.net.Uri
+ import android.os.Binder
+ import android.os.Bundle
+ import android.os.Process
++import app.lawnchair.omalawn.link.LinkService
++import app.lawnchair.omalawn.link.LinkServer
++import app.lawnchair.omalawn.link.Pairing
++import app.lawnchair.omalawn.link.PairingGate
++import app.lawnchair.omalawn.link.Pins
++import com.android.launcher3.BuildConfig
+ import org.json.JSONObject
+ 
+ /**
+@@ -29,6 +36,7 @@ class OmalawnControlProvider : ContentProvider() {
+         val uid = Binder.getCallingUid()
+         if (uid != Process.SHELL_UID && uid != Process.ROOT_UID) return fail("forbidden uid $uid")
+         val ctx = context!!.applicationContext
++        if (method.startsWith("debug_")) return debug(ctx, method, arg, extras)
+         return try {
+             when (val r = OmalawnCommands.dispatch(ctx, "launcher.$method", params(method, arg, extras))) {
+                 is ByteArray -> fail("$method returns binary data, which this provider cannot carry")
+@@ -41,6 +49,102 @@ class OmalawnControlProvider : ContentProvider() {
+         }
+     }
+ 
++    /**
++     * Test hooks of the debug build, reachable only here (shell uid), never over the link:
++     * Pairing gate: `debug_allow_local_pairing on|off` (pair requests from loopback, i.e. `adb
++     * forward`, until off or reboot; also lifts the handshake limit for loopback),
++     * `debug_open_pairing` / `debug_close_pairing` (the window "Pair a computer" opens),
++     * `debug_link_state` (window, home screen showing, toggle, connected computers, screen-in-use).
++     * `debug_pair_legacy_accept` sends the old notification Accept (a service intent) for the
++     * pending request, as an app with notification access could; it must pin nothing.
++     * `debug_refuse_foreground <n>` makes the next n foreground starts of the link service fail
++     * the way Android refuses them.
++     * `debug_pin <fp> [name=…]` and `debug_unpin <fp>` add/remove a link pin without pairing;
++     * `debug_pair_reset` forgets the pairing rate window and cool-down; `debug_pair_fire_stale` fires
++     * the Review action of the last ended pairing (must be dead), `debug_pair_fire_current` the
++     * pending one's (opens the confirmation screen, pins nothing); `debug_sas` (extras phone, desktop,
++     * nonce_phone, nonce_desktop as hex) returns the four words, the commitment to nonce_desktop and the word list's SHA-256.
++     * `debug_crash_link_start <n>` makes the next n link service starts crash (persisted, survives
++     * the process); `debug_crash_link_left` reads what is left; `debug_crash_budget_reset` forgets
++     * CrashExit's armed restart alarms and its restart marker.
++     */
++    private fun debug(ctx: Context, method: String, arg: String?, extras: Bundle?): Bundle {
++        if (!BuildConfig.DEBUG) return fail("unknown method $method")
++        return try {
++            when (method) {
++                "debug_pin" -> Pins.add(ctx, arg ?: return fail("fingerprint required"), extras?.getString("name") ?: "debug")
++                "debug_unpin" -> Pins.remove(ctx, arg ?: return fail("fingerprint required"))
++                "debug_pair_reset" -> Pairing.resetRateLimit()
++                "debug_allow_local_pairing" -> {
++                    val on = when (arg) {
++                        "on" -> true
++                        "off" -> false
++                        else -> return fail("on or off required")
++                    }
++                    PairingGate.setLocalAllowed(ctx, on)
++                    return ok(linkState(ctx))
++                }
++                "debug_open_pairing" -> {
++                    PairingGate.openWindow()
++                    return ok(linkState(ctx))
++                }
++                "debug_close_pairing" -> {
++                    PairingGate.closeWindow()
++                    return ok(linkState(ctx))
++                }
++                "debug_link_state" -> return ok(linkState(ctx))
++                "debug_pair_legacy_accept" -> {
++                    val token = Pairing.currentToken() ?: return ok(JSONObject().put("sent", false))
++                    ctx.startService(
++                        android.content.Intent(ctx, LinkService::class.java).setAction(Pairing.LEGACY_ACCEPT)
++                            .putExtra(Pairing.EXTRA_TOKEN, token),
++                    )
++                    return ok(JSONObject().put("sent", true))
++                }
++                "debug_refuse_foreground" -> {
++                    val n = arg?.toIntOrNull() ?: return fail("count required")
++                    ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).edit()
++                        .putInt(LinkService.KEY_REFUSE_FOREGROUND, n).commit()
++                    return ok(JSONObject().put("refuse_foreground", n))
++                }
++                "debug_crash_link_start" -> {
++                    val n = arg?.toIntOrNull() ?: return fail("count required")
++                    ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).edit()
++                        .putInt(LinkService.KEY_CRASH_STARTS, n).commit()
++                    return ok(JSONObject().put("crash_link_start", n))
++                }
++                "debug_crash_link_left" -> return ok(
++                    JSONObject().put(
++                        "crash_link_start",
++                        ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).getInt(LinkService.KEY_CRASH_STARTS, 0),
++                    ),
++                )
++                "debug_crash_budget_reset" -> CrashExit.resetBudget(ctx)
++                "debug_pair_fire_stale" -> return ok(JSONObject().put("stale", Pairing.fireAccept("stale")))
++                "debug_pair_fire_current" -> return ok(JSONObject().put("current", Pairing.fireAccept("current")))
++                "debug_sas" -> {
++                    // hex inputs, so the Kotlin words can be checked against tests/vectors/sas.json
++                    val x = { k: String -> Pairing.hex(requireNotNull(extras?.getString(k)) { "$k required" }) }
++                    val words = Pairing.sas(ctx, x("phone"), x("desktop"), x("nonce_phone"), x("nonce_desktop"))
++                    return ok(JSONObject().put("words", org.json.JSONArray(words)).put("words_sha256", Pairing.wordsSha256(ctx))
++                        .put("commit", Pairing.commitment(x("nonce_desktop")).joinToString("") { "%02x".format(it) }))
++                }
++                else -> return fail("unknown method $method")
++            }
++            ok(JSONObject().put("pins", Pins.count(ctx)))
++        } catch (e: Exception) {
++            fail("${e.javaClass.simpleName}: ${e.message}")
++        }
++    }
++
++    private fun linkState(ctx: Context) = JSONObject()
++        .put("pairing_open_ms", PairingGate.windowLeftMs())
++        .put("home_showing", PairingGate.homeShowing(ctx))
++        .put("local_pairing", PairingGate.localAllowed(ctx))
++        .put("connected", org.json.JSONArray(LinkServer.connectedNames(ctx)))
++        .put("screen_in_use_ms", LinkServer.screenShownLeftMs(LinkService.SCREEN_SHOWN_MS))
++        .put("refuse_foreground", ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).getInt(LinkService.KEY_REFUSE_FOREGROUND, 0))
++
+     /** The provider's positional `arg` gets the name each command reads it under. */
+     private fun params(method: String, arg: String?, extras: Bundle?): JSONObject {
+         val p = JSONObject()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+new file mode 100644
+index 0000000000..cd5b4ebc6b
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/BootReceiver.kt
+@@ -0,0 +1,29 @@
++package app.lawnchair.omalawn.link
++
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.util.Log
++import app.lawnchair.omalawn.CrashExit
++
++/**
++ * Brings the link back after a reboot or an update of this app (both may start an FGS), and after
++ * a crash (CrashExit's alarm, see there).
++ */
++class BootReceiver : BroadcastReceiver() {
++    override fun onReceive(context: Context, intent: Intent) {
++        when (intent.action) {
++            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED, ACTION_RESTART -> {
++                if (intent.action == ACTION_RESTART && intent.getBooleanExtra(CrashExit.EXTRA_FROM_CRASH, false)) {
++                    CrashExit.onRestartAlarm(context)
++                }
++                Log.i("OmalawnLink", "link start from ${intent.action}")
++                LinkService.start(context)
++            }
++        }
++    }
++
++    companion object {
++        const val ACTION_RESTART = "app.lawnchair.omalawn.link.RESTART"
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt b/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
+new file mode 100644
+index 0000000000..2bac522ecd
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Frames.kt
+@@ -0,0 +1,102 @@
++package app.lawnchair.omalawn.link
++
++import java.io.ByteArrayOutputStream
++import java.io.EOFException
++import java.io.InputStream
++import java.io.OutputStream
++import org.json.JSONObject
++
++/** A frame that breaks the protocol; the connection cannot continue after it. */
++class FrameError(val code: String, message: String) : Exception(message)
++
++/**
++ * Wire format (spec D6): newline-delimited JSON; a binary payload is announced by a line
++ * `{"id":n,"blob":len}` (optionally with `"result":{…}` metadata) followed by exactly `len` raw
++ * bytes. Lines are capped at [maxLine] bytes (newline excluded), blobs at [maxBlob].
++ */
++class FrameReader(
++    input: InputStream,
++    private val maxLine: Int = MAX_LINE,
++    private val maxBlob: Int = MAX_BLOB,
++) {
++    private val inp = input.buffered(64 * 1024)
++
++    /** The next line as JSON, or null at a clean end of stream (between frames). */
++    fun readJson(): JSONObject? {
++        val line = readLine() ?: return null
++        return try {
++            JSONObject(line)
++        } catch (e: Exception) {
++            throw FrameError(BAD_FRAME, "not a JSON object")
++        }
++    }
++
++    private fun readLine(): String? {
++        val buf = ByteArrayOutputStream()
++        while (true) {
++            val b = inp.read()
++            if (b < 0) {
++                if (buf.size() == 0) return null
++                throw EOFException("stream ended inside a line")
++            }
++            if (b == '\n'.code) break
++            if (buf.size() >= maxLine) throw FrameError(FRAME_TOO_LARGE, "line longer than $maxLine bytes")
++            buf.write(b)
++        }
++        return buf.toString(Charsets.UTF_8.name()).trimEnd('\r')
++    }
++
++    /** Reads the blob frame that must follow request [id]. */
++    fun readBlob(id: Any?): ByteArray {
++        val head = readJson() ?: throw EOFException("stream ended before the blob")
++        if (!head.has("blob") || head.opt("id")?.toString() != id?.toString()) {
++            throw FrameError(BAD_FRAME, "expected a blob frame for id $id")
++        }
++        val len = head.optLong("blob", -1)
++        if (len < 0) throw FrameError(BAD_FRAME, "bad blob length")
++        if (len > maxBlob) throw FrameError(FRAME_TOO_LARGE, "blob of $len bytes exceeds $maxBlob")
++        val out = ByteArray(len.toInt())
++        var off = 0
++        while (off < out.size) {
++            val n = inp.read(out, off, out.size - off)
++            if (n < 0) throw EOFException("stream ended inside a blob")
++            off += n
++        }
++        return out
++    }
++
++    companion object {
++        const val MAX_LINE = 1 shl 20 // 1 MiB
++        const val MAX_BLOB = 32 shl 20 // 32 MiB
++        const val FRAME_TOO_LARGE = "frame_too_large"
++        const val BAD_FRAME = "bad_frame"
++    }
++}
++
++class FrameWriter(output: OutputStream) {
++    private val out = output.buffered(64 * 1024)
++
++    @Synchronized
++    fun json(o: JSONObject) {
++        out.write(o.toString().toByteArray(Charsets.UTF_8))
++        out.write('\n'.code)
++        out.flush()
++    }
++
++    fun result(id: Any?, r: Any) = json(JSONObject().put("id", id ?: JSONObject.NULL).put("result", r))
++
++    fun error(id: Any?, code: String, message: String) = json(
++        JSONObject().put("id", id ?: JSONObject.NULL)
++            .put("error", JSONObject().put("code", code).put("message", message)),
++    )
++
++    @Synchronized
++    fun blob(id: Any?, bytes: ByteArray, meta: JSONObject? = null) {
++        val head = JSONObject().put("id", id ?: JSONObject.NULL).put("blob", bytes.size)
++        if (meta != null) head.put("result", meta)
++        out.write(head.toString().toByteArray(Charsets.UTF_8))
++        out.write('\n'.code)
++        out.write(bytes)
++        out.flush()
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Identity.kt b/lawnchair/src/app/lawnchair/omalawn/link/Identity.kt
+new file mode 100644
+index 0000000000..36a7fcc367
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Identity.kt
+@@ -0,0 +1,88 @@
++package app.lawnchair.omalawn.link
++
++import android.security.keystore.KeyGenParameterSpec
++import android.security.keystore.KeyProperties
++import java.math.BigInteger
++import java.net.Socket
++import java.security.KeyPairGenerator
++import java.security.KeyStore
++import java.security.MessageDigest
++import java.security.Principal
++import java.security.PrivateKey
++import java.security.cert.X509Certificate
++import java.security.spec.ECGenParameterSpec
++import java.util.Date
++import javax.net.ssl.SSLEngine
++import javax.net.ssl.X509ExtendedKeyManager
++import javax.security.auth.x500.X500Principal
++
++/**
++ * The phone's link identity: an EC P-256 key that never leaves Android Keystore, with the
++ * self-signed certificate Keystore creates alongside it. Peers pin SHA-256 of that certificate.
++ */
++object Identity {
++    const val ALIAS = "omalawn_link"
++    private const val PROVIDER = "AndroidKeyStore"
++    private const val YEARS = 30
++
++    private fun keyStore(): KeyStore = KeyStore.getInstance(PROVIDER).apply { load(null) }
++
++    @Synchronized
++    fun ensure() {
++        val ks = keyStore()
++        if (ks.containsAlias(ALIAS) && ks.getCertificate(ALIAS) != null) return
++        val now = System.currentTimeMillis()
++        val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
++            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
++            // NONE: TLS signs a digest it computed itself; SHA256: Keystore signs the cert with it
++            .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256)
++            .setCertificateSubject(X500Principal("CN=OmaLawn link")) // kept: wire compatibility
++            .setCertificateSerialNumber(BigInteger.valueOf(now))
++            .setCertificateNotBefore(Date(now - 24L * 3600 * 1000))
++            .setCertificateNotAfter(Date(now + YEARS * 365L * 24 * 3600 * 1000))
++            .build()
++        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER).apply {
++            initialize(spec)
++            generateKeyPair()
++        }
++    }
++
++    fun certificate(): X509Certificate {
++        ensure()
++        return keyStore().getCertificate(ALIAS) as X509Certificate
++    }
++
++    private fun privateKey(): PrivateKey {
++        ensure()
++        return keyStore().getKey(ALIAS, null) as PrivateKey
++    }
++
++    /** Lowercase hex SHA-256 of the DER certificate. */
++    fun fingerprint(): String = sha256Hex(certificate().encoded)
++
++    fun sha256Hex(b: ByteArray): String =
++        MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
++
++    /** Serves the one Keystore key for every server handshake. */
++    fun keyManager(): X509ExtendedKeyManager {
++        val key = privateKey()
++        val chain = arrayOf(certificate())
++        return object : X509ExtendedKeyManager() {
++            override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) =
++                if (keyType == null || keyType.startsWith("EC")) ALIAS else null
++            override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) =
++                if (keyType == null || keyType.startsWith("EC")) ALIAS else null
++            override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = arrayOf(ALIAS)
++            override fun getCertificateChain(alias: String?) = if (alias == ALIAS) chain else null
++            override fun getPrivateKey(alias: String?) = if (alias == ALIAS) key else null
++            override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?) = null
++            override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?) = null
++        }
++    }
++
++    /** Drops the key; the next [ensure] makes a new identity (peers must pair again). */
++    @Synchronized
++    fun reset() {
++        keyStore().deleteEntry(ALIAS)
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+new file mode 100644
+index 0000000000..30f7a2eed0
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -0,0 +1,532 @@
++package app.lawnchair.omalawn.link
++
++import android.content.Context
++import android.os.Build
++import android.os.SystemClock
++import android.provider.Settings
++import android.util.Log
++import app.lawnchair.omalawn.OmalawnCommands
++import app.lawnchair.omalawn.OmalawnError
++import java.io.File
++import java.io.IOException
++import java.net.InetSocketAddress
++import java.net.Socket
++import java.net.SocketException
++import java.net.SocketTimeoutException
++import java.security.cert.CertificateException
++import java.security.cert.X509Certificate
++import java.util.Collections
++import java.util.UUID
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.ScheduledFuture
++import java.util.concurrent.ScheduledThreadPoolExecutor
++import java.util.concurrent.TimeUnit
++import javax.net.ssl.SSLContext
++import javax.net.ssl.SSLServerSocket
++import javax.net.ssl.SSLSocket
++import javax.net.ssl.X509TrustManager
++import org.json.JSONObject
++
++/**
++ * The link: mutual TLS 1.3 on TCP 47100 (all interfaces), one thread per connection, at most
++ * [MAX_CONNECTIONS]. Any client certificate passes the handshake; what it may call is decided per
++ * request from [Pins]: a pinned computer gets every method below, an unpinned one only [OPEN].
++ *
++ * Slots: handshaking sockets (max [MAX_PENDING], oldest dropped), paired computers (max
++ * [MAX_CONNECTIONS]), unpaired ones (max [MAX_UNPAIRED], oldest evicted, each closed after
++ * [UNPAIRED_LIFETIME_MS]) and ONE pairing slot: an unpaired connection whose `link.pair_request`
++ * was accepted leaves the evictable unpaired queue, its 30 s close is replaced by the 120 s
++ * pairing deadline, and on Accept it is promoted to the paired set and stays open (on Reject,
++ * dismissal or timeout it is closed after answering `link.pair_wait`).
++ *
++ * Before the TLS handshake every new socket passes [PairingGate.admitHandshake] (a per-address
++ * limit; a paired computer's attempt is given back). The status notification reads
++ * [connectedNames] and [screenShownLeftMs]; [onChange] tells it when they change.
++ */
++object LinkServer {
++    const val PORT = 47100
++    const val MAX_CONNECTIONS = 4 // paired computers
++    const val MAX_UNPAIRED = 2
++    private const val MAX_PENDING = 4 // sockets still in the TLS handshake
++    private const val HANDSHAKE_MS = 10_000L
++    private const val UNPAIRED_LIFETIME_MS = 30_000L
++    private const val IDLE_MS = 60_000
++    private const val RETRY_MS = 5_000L
++    private const val PAIR_END_GRACE_MS = 10_000L // after Reject/timeout: time to collect the answer
++    private const val TAG = "OmalawnLink"
++
++    const val NOT_PAIRED = "not_paired"
++    const val BAD_PARAMS = "bad_params"
++    const val BAD_PATH = "bad_path"
++
++    /** Methods an unpinned computer may call. */
++    private val OPEN = setOf("link.hello", "link.pair_request", "link.pair_reveal", "link.pair_wait")
++
++    private enum class Kind { PLAIN, BLOB_OUT, BLOB_IN, STAGE }
++
++    /** Method → (accepted params, how bytes travel). Unknown methods and params are refused. */
++    private class Spec(val params: Set<String>, val kind: Kind = Kind.PLAIN)
++
++    private val METHODS = mapOf(
++        "link.hello" to Spec(emptySet()),
++        "link.ping" to Spec(emptySet()),
++        "link.pair_request" to Spec(setOf("name", "commit")),
++        "link.pair_reveal" to Spec(setOf("nonce_desktop")),
++        "link.pair_wait" to Spec(emptySet()),
++        "link.unpair" to Spec(emptySet()),
++        "launcher.ping" to Spec(emptySet()),
++        "launcher.ensure_loaded" to Spec(emptySet()),
++        "launcher.apps_list" to Spec(emptySet()),
++        "launcher.prefs_list" to Spec(emptySet()),
++        "launcher.pref_set" to Spec(setOf("store", "key", "type", "value")),
++        "launcher.prefs_set_many" to Spec(setOf("writes")),
++        "launcher.wallpaper_info" to Spec(emptySet()),
++        "launcher.wallpaper_backup" to Spec(emptySet(), Kind.BLOB_OUT),
++        "launcher.wallpaper_set" to Spec(setOf("path")),
++        "launcher.widgets_list" to Spec(emptySet()),
++        "launcher.widget_status" to Spec(setOf("id")),
++        "launcher.layout_export" to Spec(setOf("via"), Kind.BLOB_OUT),
++        "launcher.layout_import" to Spec(setOf("db"), Kind.BLOB_IN),
++        "launcher.stage_file" to Spec(setOf("name"), Kind.STAGE),
++    )
++
++    @Volatile private var running = false
++    @Volatile private var generation = 0 // bumped by start() and stop(); an accept thread of an older one exits
++    private var server: SSLServerSocket? = null
++    private val all: MutableSet<Socket> = Collections.synchronizedSet(mutableSetOf())
++
++    /** Slot bookkeeping, all under [slots]. */
++    private val slots = Any()
++    private val pending = ArrayDeque<Socket>() // accepted, TLS not finished; oldest first
++    private val pairedConns = mutableMapOf<Socket, String>() // -> certificate fingerprint
++    private val unpairedConns = ArrayDeque<Socket>() // oldest first
++    private var pairingConn: Socket? = null // the one connection with a pending pair request
++    private val lifetimes = HashMap<Socket, ScheduledFuture<*>>() // unpaired lifetime / pairing deadline
++
++    private val timer = ScheduledThreadPoolExecutor(1) { r ->
++        Thread(r, "omalawn-link-timer").apply { isDaemon = true }
++    }.apply { removeOnCancelPolicy = true } // cancelled 30 s/120 s closes must not pile up
++
++    /** Per-connection state the request handler keeps. */
++    private class ConnState(val s: SSLSocket, val fp: String, val der: ByteArray) {
++        var session: Pairing.Session? = null
++    }
++
++    val connections get() = all.size
++
++    private val listeners = CopyOnWriteArrayList<() -> Unit>()
++    fun onChange(l: () -> Unit) = listeners.add(l)
++    fun removeListener(l: () -> Unit) = listeners.remove(l)
++    private fun changed() = listeners.forEach { runCatching { it() } }
++
++    /** Names of the paired computers connected right now (each once). */
++    fun connectedNames(ctx: Context): List<String> {
++        val fps = synchronized(slots) { pairedConns.values.toSet() }
++        return fps.mapNotNull { Pins.name(ctx, it)?.ifEmpty { null } }.sorted()
++    }
++
++    @Volatile private var lastScreenUse = 0L // elapsedRealtime of the last screen.* call, 0 = never
++
++    /** A paired computer read or operated the screen (patch 0004 calls this for every screen.* but status). */
++    fun noteScreenUse() {
++        val first = lastScreenUse == 0L || SystemClock.elapsedRealtime() - lastScreenUse >= LinkService.SCREEN_SHOWN_MS
++        lastScreenUse = SystemClock.elapsedRealtime()
++        if (first) changed()
++    }
++
++    /** How much longer "screen control in use" stays shown, 0 when not. */
++    fun screenShownLeftMs(showMs: Long): Long =
++        if (lastScreenUse == 0L) 0 else (lastScreenUse + showMs - SystemClock.elapsedRealtime()).coerceAtLeast(0)
++
++    @Synchronized
++    fun start(context: Context) {
++        if (running) return
++        running = true
++        val gen = ++generation
++        val ctx = context.applicationContext
++        Thread({ acceptLoop(ctx, gen) }, "omalawn-link-accept").apply {
++            isDaemon = true
++            start()
++        }
++    }
++
++    @Synchronized
++    fun stop() {
++        running = false
++        generation++
++        runCatching { server?.close() }
++        server = null
++        synchronized(all) { all.toList() }.forEach { runCatching { it.close() } }
++    }
++
++    private fun alive(gen: Int) = running && generation == gen
++
++    private fun open(): SSLServerSocket {
++        val tls = SSLContext.getInstance("TLSv1.3")
++        tls.init(arrayOf(Identity.keyManager()), arrayOf(AnyClientCert), null)
++        val ss = tls.serverSocketFactory.createServerSocket() as SSLServerSocket
++        ss.reuseAddress = true
++        ss.bind(InetSocketAddress(PORT))
++        ss.enabledProtocols = arrayOf("TLSv1.3")
++        ss.needClientAuth = true
++        return ss
++    }
++
++    private fun acceptLoop(ctx: Context, gen: Int) {
++        while (alive(gen)) {
++            val ss = try {
++                open().also { synchronized(this) { if (alive(gen)) server = it else it.close() } }
++            } catch (e: Throwable) {
++                Log.w(TAG, "cannot listen on $PORT, retrying: ${e.javaClass.simpleName}: ${e.message}")
++                try {
++                    Thread.sleep(RETRY_MS)
++                } catch (_: InterruptedException) {
++                }
++                continue
++            }
++            if (!alive(gen)) break
++            Log.i(TAG, "listening on $PORT")
++            try {
++                while (alive(gen)) {
++                    val s = ss.accept() as SSLSocket
++                    acceptFailures = 0
++                    try {
++                        admit(ctx, s)
++                    } catch (e: Throwable) { // e.g. no memory for a thread: drop this one, keep listening
++                        Log.w(TAG, "cannot serve a connection: ${e.javaClass.simpleName}")
++                        drop(s)
++                    }
++                }
++            } catch (e: Throwable) {
++                if (alive(gen)) {
++                    Log.w(TAG, "accept failed, reopening: ${e.javaClass.simpleName}: ${e.message}")
++                    // the first failure reopens at once; repeated ones wait, so a broken socket cannot spin
++                    if (++acceptFailures > 1) {
++                        try {
++                            Thread.sleep(RETRY_MS)
++                        } catch (_: InterruptedException) {
++                        }
++                    }
++                }
++            } finally {
++                runCatching { ss.close() }
++            }
++        }
++    }
++
++    private var acceptFailures = 0 // accept thread only
++
++    /**
++     * Every new socket gets a pending slot; when [MAX_PENDING] are taken the oldest is dropped, so
++     * idle TCP sockets cannot keep a real computer from reaching the TLS handshake.
++     */
++    private fun admit(ctx: Context, s: SSLSocket) {
++        all.add(s)
++        val evict = synchronized(slots) {
++            pending.addLast(s)
++            if (pending.size > MAX_PENDING) pending.removeFirst() else null
++        }
++        evict?.let { drop(it) }
++        Thread({ serve(ctx, s) }, "omalawn-link-conn").apply {
++            isDaemon = true
++            start()
++        }
++    }
++
++    private fun drop(s: Socket, ctx: Context? = null) {
++        var wasPaired = false
++        val wasPairing = synchronized(slots) {
++            pending.remove(s)
++            wasPaired = pairedConns.remove(s) != null
++            unpairedConns.remove(s)
++            lifetimes.remove(s)?.cancel(false)
++            (pairingConn === s).also { if (it) pairingConn = null }
++        }
++        all.remove(s)
++        runCatching { s.close() }
++        if (wasPairing && ctx != null) Pairing.connectionGone(ctx, s) // withdraws the prompt
++        if (wasPaired) changed()
++    }
++
++    /**
++     * Called by [Pairing] when a pair request on [s] is accepted for processing: [s] leaves the
++     * unpaired queue (strangers can no longer evict it), its unpaired lifetime is cancelled and
++     * [onDeadline] runs after [deadlineMs]. False when the slot is taken or [s] is not an
++     * unpaired connection any more.
++     */
++    fun enterPairing(s: Socket, deadlineMs: Long, onDeadline: () -> Unit): Boolean = synchronized(slots) {
++        if (pairingConn != null || !unpairedConns.remove(s)) return@synchronized false
++        lifetimes.remove(s)?.cancel(false)
++        pairingConn = s
++        lifetimes[s] = timer.schedule({ runCatching(onDeadline) }, deadlineMs, TimeUnit.MILLISECONDS)
++        true
++    }
++
++    /**
++     * The pairing on [s] ended. Accepted: [s] joins the paired set and keeps going (closed when the
++     * set is full; the computer then simply dials again). Otherwise [s] is closed once `pair_wait`
++     * has answered, or after [PAIR_END_GRACE_MS] at the latest.
++     */
++    fun leavePairing(s: Socket, accepted: Boolean, fp: String) {
++        val keep = synchronized(slots) {
++            if (pairingConn !== s) return@synchronized false
++            pairingConn = null
++            lifetimes.remove(s)?.cancel(false)
++            if (accepted && pairedConns.size < MAX_CONNECTIONS) {
++                pairedConns[s] = fp
++                true
++            } else {
++                false
++            }
++        }
++        if (keep) changed()
++        if (!keep) {
++            if (accepted) Log.w(TAG, "paired, but $MAX_CONNECTIONS computers are connected; closing so it dials again")
++            closeLater(s, PAIR_END_GRACE_MS)
++        }
++    }
++
++    private fun closeLater(s: Socket, ms: Long): ScheduledFuture<*> =
++        timer.schedule({ runCatching { s.close() } }, ms, TimeUnit.MILLISECONDS)
++
++    /**
++     * After TLS: a paired computer takes one of [MAX_CONNECTIONS] slots (refused when all are
++     * taken); an unpaired one takes one of [MAX_UNPAIRED] (the oldest is dropped when full) and
++     * lives at most [UNPAIRED_LIFETIME_MS], so strangers never use up a paired computer's slot.
++     */
++    private fun seat(s: Socket, paired: Boolean, fp: String): Boolean {
++        var evict: Socket? = null
++        val ok = synchronized(slots) {
++            if (!pending.remove(s)) return@synchronized false // dropped while handshaking
++            if (paired) {
++                if (pairedConns.size >= MAX_CONNECTIONS) return@synchronized false
++                pairedConns[s] = fp
++            } else {
++                unpairedConns.addLast(s)
++                lifetimes[s] = closeLater(s, UNPAIRED_LIFETIME_MS)
++                if (unpairedConns.size > MAX_UNPAIRED) evict = unpairedConns.removeFirst()
++            }
++            true
++        }
++        evict?.let { drop(it) }
++        if (ok && paired) changed()
++        return ok
++    }
++
++    private fun serve(ctx: Context, s: SSLSocket) {
++        try {
++            val remote = s.inetAddress
++            if (!PairingGate.admitHandshake(ctx, remote)) {
++                Log.w(TAG, "refusing a connection: over ${PairingGate.MAX_HANDSHAKES} handshakes a minute from one address")
++                return
++            }
++            s.soTimeout = HANDSHAKE_MS.toInt()
++            val handshakeDeadline = closeLater(s, HANDSHAKE_MS) // also against a byte-by-byte trickle
++            s.startHandshake()
++            handshakeDeadline.cancel(false)
++            val der = s.session.peerCertificates[0].encoded
++            val fp = Identity.sha256Hex(der)
++            val paired = Pins.isPinned(ctx, fp)
++            if (paired) PairingGate.refund(remote) // a paired computer is never limited
++            if (!seat(s, paired, fp)) {
++                Log.w(TAG, "refusing a paired connection: $MAX_CONNECTIONS already open")
++                return
++            }
++            s.soTimeout = IDLE_MS
++            val conn = ConnState(s, fp, der)
++            val reader = FrameReader(s.inputStream)
++            val writer = FrameWriter(s.outputStream)
++            try {
++                while (running) {
++                    val req = reader.readJson() ?: break
++                    if (!handle(ctx, conn, req, reader, writer)) break
++                }
++            } catch (e: FrameError) {
++                runCatching { writer.error(null, e.code, e.message ?: e.code) }
++            }
++        } catch (_: SocketTimeoutException) {
++        } catch (_: SocketException) {
++        } catch (e: IOException) {
++            Log.d(TAG, "connection ended: ${e.javaClass.simpleName}: ${e.message}")
++        } catch (e: Throwable) { // OutOfMemoryError included: lose this connection, never the launcher
++            Log.w(TAG, "connection failed: ${e.javaClass.simpleName}: ${e.message}")
++        } finally {
++            drop(s, ctx)
++        }
++    }
++
++    /** One request; false closes the connection. */
++    private fun handle(ctx: Context, conn: ConnState, req: JSONObject, reader: FrameReader, writer: FrameWriter): Boolean {
++        val fp = conn.fp
++        val id = req.opt("id")
++        val method = req.optString("method")
++        if (req.has("blob")) throw FrameError(FrameReader.BAD_FRAME, "unexpected blob frame")
++        val paired = Pins.isPinned(ctx, fp)
++        if (!paired && method !in OPEN) {
++            // the same answer whether or not the method exists, and the connection ends: any blob
++            // it meant to send is never read
++            writer.error(id, NOT_PAIRED, "this computer is not paired with the phone")
++            return false
++        }
++        val spec = METHODS[method]
++        if (spec == null) {
++            writer.error(id, OmalawnCommands.UNKNOWN_METHOD, "unknown method $method")
++            return true
++        }
++        val needsBlob = spec.kind == Kind.BLOB_IN || spec.kind == Kind.STAGE
++        // a paired computer's blob is read even when the request is then refused, so its
++        // connection stays in step
++        val blob = if (needsBlob) reader.readBlob(id) else null
++        val raw = req.opt("params")
++        if (raw != null && raw != JSONObject.NULL && raw !is JSONObject) {
++            writer.error(id, BAD_PARAMS, "params must be an object")
++            return true
++        }
++        val params = (raw as? JSONObject) ?: JSONObject()
++        val extra = params.keys().asSequence().filter { it !in spec.params }.toList()
++        if (extra.isNotEmpty()) {
++            writer.error(id, BAD_PARAMS, "unknown params for $method: ${extra.sorted().joinToString()}")
++            return true
++        }
++        when (method) {
++            "link.pair_request", "link.pair_reveal", "link.pair_wait", "link.unpair" -> return pairing(ctx, conn, id, method, params, paired, writer)
++        }
++        if (method == "launcher.wallpaper_set" && !insidePrivateDir(ctx, params)) {
++            writer.error(id, BAD_PATH, "$BAD_PATH: over the link the wallpaper must be a file staged with launcher.stage_file")
++            return true
++        }
++        try {
++            when (spec.kind) {
++                Kind.PLAIN -> writer.result(id, OmalawnCommands.dispatch(ctx, method, params, paired))
++                Kind.BLOB_OUT -> {
++                    val r = OmalawnCommands.dispatch(ctx, method, params, paired) as JSONObject
++                    val f = File(r.getString("path"))
++                    val bytes = try {
++                        f.readBytes()
++                    } finally {
++                        f.delete()
++                    }
++                    r.remove("path")
++                    writer.blob(id, bytes, r)
++                }
++                Kind.BLOB_IN -> {
++                    val f = OmalawnCommands.stageFile(ctx, "import-${UUID.randomUUID()}.db", blob!!, internal = true)
++                    params.put("path", f.absolutePath)
++                    val r = try {
++                        OmalawnCommands.dispatch(ctx, method, params, paired)
++                    } finally {
++                        f.delete() // the import deletes it too; this covers a refusal before it ran
++                    }
++                    writer.result(id, r)
++                }
++                Kind.STAGE -> {
++                    val name = if (params.isNull("name")) "" else params.get("name").toString()
++                    val f = OmalawnCommands.stageFile(ctx, name, blob!!)
++                    writer.result(id, JSONObject().put("path", f.absolutePath))
++                }
++            }
++        } catch (e: OmalawnError) {
++            writer.error(id, e.code, e.message ?: e.code)
++        } catch (e: Exception) {
++            writer.error(id, "failed", "${e.javaClass.simpleName}: ${e.message}")
++        }
++        return true
++    }
++
++    /** The pairing methods, which need the connection itself. */
++    private fun pairing(
++        ctx: Context,
++        conn: ConnState,
++        id: Any?,
++        method: String,
++        params: JSONObject,
++        paired: Boolean,
++        writer: FrameWriter,
++    ): Boolean {
++        try {
++            when (method) {
++                "link.pair_request" -> {
++                    if (paired) throw OmalawnError("already_paired", "this computer is already paired")
++                    if (conn.session != null) throw OmalawnError("pair_busy", "this connection already made a pair request")
++                    val (session, res) = Pairing.begin(ctx, conn.s, conn.fp, conn.der, params)
++                    conn.session = session
++                    writer.result(id, res)
++                }
++                "link.pair_reveal" -> {
++                    val session = conn.session ?: throw OmalawnError("no_pairing", "send link.pair_request first")
++                    try {
++                        writer.result(id, Pairing.reveal(ctx, session, params))
++                    } catch (e: OmalawnError) {
++                        if (e.code != Pairing.BAD_COMMIT) throw e
++                        writer.error(id, e.code, e.message ?: e.code)
++                        return false // the request is over; so is this connection
++                    }
++                }
++                "link.pair_wait" -> {
++                    val session = conn.session ?: throw OmalawnError("no_pairing", "send link.pair_request first")
++                    if (session.words == null) throw OmalawnError("no_pairing", "send link.pair_reveal first")
++                    val outcome = Pairing.await(ctx, session) { peerStillThere(conn.s) }
++                    val accepted = outcome == Pairing.ACCEPTED
++                    val res = JSONObject().put("accepted", accepted).put("outcome", outcome)
++                    // the phone's name only once it trusts this computer (an unpaired hello says nothing)
++                    if (accepted) res.put("name", phoneName(ctx)).put("device", Build.MODEL)
++                    writer.result(id, res)
++                    conn.session = null
++                    return accepted // Reject/timeout: the phone hangs up after answering
++                }
++                "link.unpair" -> {
++                    Pins.remove(ctx, conn.fp)
++                    Log.i(TAG, "a computer unpaired itself fp=${conn.fp.take(16)}")
++                    writer.result(id, JSONObject().put("unpaired", true))
++                    return false
++                }
++            }
++        } catch (e: OmalawnError) {
++            writer.error(id, e.code, e.message ?: e.code)
++        }
++        return true
++    }
++
++    /**
++     * During `link.pair_wait` the computer must stay silent; a short read tells whether it is still
++     * there: a timeout means yes, end of stream, a reset or any byte at all means it is gone.
++     */
++    private fun peerStillThere(s: SSLSocket): Boolean {
++        val old = s.soTimeout
++        return try {
++            s.soTimeout = 200
++            s.inputStream.read() // -1 (hung up) or an unexpected byte
++            false
++        } catch (_: SocketTimeoutException) {
++            true
++        } catch (_: IOException) {
++            false
++        } finally {
++            runCatching { s.soTimeout = old }
++        }
++    }
++
++    fun phoneName(ctx: Context): String =
++        Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL
++
++    /** Over the link a path may only name a file directly inside files/omalawn/. */
++    private fun insidePrivateDir(ctx: Context, params: JSONObject): Boolean {
++        if (params.isNull("path")) return false
++        return try {
++            val f = File(params.get("path").toString()).canonicalFile
++            f.parentFile == OmalawnCommands.privateDir(ctx).canonicalFile && f.isFile
++        } catch (_: Exception) {
++            false
++        }
++    }
++
++    /** Every client certificate passes TLS; [Pins] decides per request. */
++    private object AnyClientCert : X509TrustManager {
++        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
++            if (chain.isNullOrEmpty()) throw CertificateException("a client certificate is required")
++        }
++        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) =
++            throw CertificateException("server role only")
++        override fun getAcceptedIssuers() = emptyArray<X509Certificate>()
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+new file mode 100644
+index 0000000000..2760a9835a
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkService.kt
+@@ -0,0 +1,257 @@
++package app.lawnchair.omalawn.link
++
++import android.annotation.SuppressLint
++import android.app.KeyguardManager
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.app.ForegroundServiceStartNotAllowedException
++import android.app.Service
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ServiceInfo
++import android.net.Uri
++import android.os.Build
++import android.os.Handler
++import android.os.IBinder
++import android.os.Looper
++import android.os.PowerManager
++import android.os.SystemClock
++import android.provider.Settings
++import android.util.Log
++import androidx.core.app.NotificationCompat
++import app.lawnchair.omalawn.LayoutIo
++import com.android.launcher3.BuildConfig
++import com.android.launcher3.R
++
++/**
++ * Foreground service (type connectedDevice) that owns the link server and the mDNS advert. Its
++ * foreground state is what keeps the launcher's network open behind other apps and in Doze.
++ *
++ * It shares the launcher's process, so nothing may throw out of its lifecycle: when Android
++ * refuses the foreground start (e.g. ForegroundServiceStartNotAllowedException for a sticky
++ * restart while another app is in front), the service logs it and stops itself; the next start
++ * (home screen shown, boot, update, crash alarm) tries again.
++ *
++ * Its notification is also the phone's view of the link: how many computers are paired, which
++ * one is connected right now, whether screen control was used in the last [SCREEN_SHOWN_MS],
++ * and "Pair a computer", which opens Lawnchair's pairing screen ([PairConfirmActivity]); the
++ * screen keeps the pairing window ([PairingGate]) open while it shows.
++ */
++class LinkService : Service() {
++
++    private val main = Handler(Looper.getMainLooper())
++    private val refresh = Runnable { notifyStatus() }
++    private val changed: () -> Unit = {
++        main.removeCallbacks(refresh)
++        main.post(refresh)
++    }
++    private var refused = false // Android would not let this instance run in the foreground
++
++    override fun onCreate() {
++        super.onCreate()
++        createdAt = SystemClock.elapsedRealtime() // CrashExit: a crash soon after this is backed off by Android
++        if (BuildConfig.DEBUG) debugCrashHook()
++        val nm = getSystemService(NotificationManager::class.java)!!
++        nm.createNotificationChannel(
++            NotificationChannel(CHANNEL, "Homa Lawn link", NotificationManager.IMPORTANCE_LOW).apply {
++                description = "Shows that computers can reach this phone over the Homa Lawn link"
++                setShowBadge(false)
++            },
++        )
++        if (!goForeground()) {
++            refused = true
++            stopSelf()
++            return
++        }
++        Pairing.cancelLeftovers(this)
++        Pins.onChange(changed)
++        LinkServer.onChange(changed)
++        PairingGate.onChange(changed)
++        // a process started for this service (after a crash, an update, a boot without the home
++        // activity) would never load the home screen; give the launcher activity time to come first
++        main.postDelayed({ LayoutIo.kickLoad(this) }, LOAD_KICK_DELAY_MS)
++        Thread({
++            try {
++                Identity.ensure()
++                LinkServer.start(this)
++                Nsd.register(this, LinkServer.PORT)
++            } catch (e: Exception) {
++                Log.e(TAG, "link start failed", e)
++            }
++        }, "omalawn-link-start").start()
++    }
++
++    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        if (refused) { // onCreate could not go foreground: this instance is on its way out
++            stopSelf()
++            return START_NOT_STICKY
++        }
++        when (intent?.action) {
++            ACTION_FORGET_ALL -> {
++                Pins.clear(this)
++                Log.i(TAG, "all computers forgotten")
++            }
++            ACTION_OPEN_PAIRING -> { // the notification's action before the pairing screen; kept for old ones
++                PairingGate.openWindow()
++                Log.i(TAG, "pairing opened for ${PairingGate.WINDOW_MS / 1000} s")
++            }
++            Pairing.ACTION_REJECT -> {
++                val token = intent.getStringExtra(Pairing.EXTRA_TOKEN)
++                // on every Android version: no answer from a locked phone (12+ also asks for the
++                // unlock itself, via setAuthenticationRequired)
++                if (getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true) {
++                    Log.i(TAG, "pairing answer refused: the phone is locked")
++                    Pairing.repost(this, token)
++                } else {
++                    Pairing.decide(this, token, Pairing.REJECTED)
++                }
++            }
++            // the notification's old Accept: pins nothing any more (only PairConfirmActivity does)
++            Pairing.LEGACY_ACCEPT -> Log.w(TAG, "a pairing Accept sent to the service was ignored")
++            Pairing.ACTION_DISMISS -> Pairing.decide(this, intent.getStringExtra(Pairing.EXTRA_TOKEN), Pairing.DISMISSED)
++        }
++        // every startForegroundService() must be answered with startForeground(), even when the
++        // service already runs; it also refreshes "Keep connected" after the user granted it
++        if (!goForeground()) {
++            stopSelf()
++            return START_NOT_STICKY
++        }
++        return START_STICKY
++    }
++
++    override fun onDestroy() {
++        main.removeCallbacksAndMessages(null)
++        Pins.removeListener(changed)
++        LinkServer.removeListener(changed)
++        PairingGate.removeListener(changed)
++        if (!refused) {
++            Nsd.unregister(this)
++            LinkServer.stop()
++        }
++        super.onDestroy()
++    }
++
++    override fun onBind(intent: Intent?): IBinder? = null
++
++    /** Debug build: provider `debug_crash_link_start <n>` makes the next n service starts crash. */
++    private fun debugCrashHook() {
++        val p = getSharedPreferences(DEBUG_PREFS, MODE_PRIVATE)
++        val n = p.getInt(KEY_CRASH_STARTS, 0)
++        if (n > 0) {
++            p.edit().putInt(KEY_CRASH_STARTS, n - 1).commit()
++            throw IllegalStateException("debug_crash_link_start: deliberate crash ($n left)")
++        }
++    }
++
++    /** startForeground, or false (logged) when Android refuses it; never throws. */
++    private fun goForeground(): Boolean = try {
++        if (BuildConfig.DEBUG) debugRefuseHook()
++        val n = notification()
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
++        } else {
++            startForeground(NOTIFICATION_ID, n)
++        }
++        true
++    } catch (e: Exception) { // ForegroundServiceStartNotAllowedException, SecurityException, ...
++        Log.w(TAG, "foreground start refused, stopping the link service: ${e.javaClass.simpleName}: ${e.message}")
++        false
++    }
++
++    /** Debug build: provider `debug_refuse_foreground <n>` makes the next n foreground starts fail as Android's would. */
++    private fun debugRefuseHook() {
++        val p = getSharedPreferences(DEBUG_PREFS, MODE_PRIVATE)
++        val n = p.getInt(KEY_REFUSE_FOREGROUND, 0)
++        if (n <= 0) return
++        p.edit().putInt(KEY_REFUSE_FOREGROUND, n - 1).commit()
++        val msg = "debug_refuse_foreground: deliberate refusal (${n - 1} left)"
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) throw ForegroundServiceStartNotAllowedException(msg)
++        throw IllegalStateException(msg)
++    }
++
++    private fun notifyStatus() {
++        if (refused) return
++        runCatching { getSystemService(NotificationManager::class.java)!!.notify(NOTIFICATION_ID, notification()) }
++        // the "in use" line and the pairing window end on their own: look again when they do
++        val next = listOf(LinkServer.screenShownLeftMs(SCREEN_SHOWN_MS), PairingGate.windowLeftMs()).filter { it > 0 }.minOrNull()
++        main.removeCallbacks(refresh)
++        if (next != null) main.postDelayed(refresh, next + 200)
++    }
++
++    private fun notification(): Notification {
++        val n = Pins.count(this)
++        val lines = mutableListOf<String>()
++        val connected = LinkServer.connectedNames(this)
++        if (connected.isNotEmpty()) lines.add("Connected: ${connected.joinToString(", ")}")
++        if (LinkServer.screenShownLeftMs(SCREEN_SHOWN_MS) > 0) lines.add("Screen control in use")
++        val window = PairingGate.windowLeftMs()
++        if (window > 0) lines.add("Pairing open for ${(window + 999) / 1000} s: run homalawn pair on the computer")
++        val b = NotificationCompat.Builder(this, CHANNEL)
++            .setSmallIcon(R.drawable.ic_home_screen)
++            .setContentTitle("Homa Lawn link · $n ${if (n == 1) "computer" else "computers"} paired")
++            .setOngoing(true)
++            .setShowWhen(false)
++            .setPriority(NotificationCompat.PRIORITY_LOW)
++            .setCategory(NotificationCompat.CATEGORY_SERVICE)
++        // opens Lawnchair's pairing screen, which keeps pairing open while it shows; tapped again,
++        // it brings the same screen forward
++        val open = PendingIntent.getActivity(
++            this,
++            3,
++            Intent(this, PairConfirmActivity::class.java)
++                .setAction(PairConfirmActivity.ACTION_WAIT)
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++        b.addAction(0, "Pair a computer", open)
++        if (n > 0) {
++            val forget = PendingIntent.getService(
++                this,
++                1,
++                Intent(this, LinkService::class.java).setAction(ACTION_FORGET_ALL),
++                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++            )
++            b.addAction(0, "Forget all computers", forget)
++        }
++        val pm = getSystemService(PowerManager::class.java)!!
++        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
++            @SuppressLint("BatteryLife") // sideloaded build; the link must survive Doze
++            val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
++            val keep = PendingIntent.getActivity(this, 2, ask, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++            b.addAction(0, "Keep connected", keep)
++            lines.add("Tap \"Keep connected\" so the phone stays reachable while asleep")
++        }
++        if (lines.isNotEmpty()) {
++            b.setContentText(lines.first())
++            b.setStyle(NotificationCompat.BigTextStyle().bigText(lines.joinToString("\n")))
++        }
++        return b.build()
++    }
++
++    companion object {
++        private const val TAG = "OmalawnLink"
++        private const val CHANNEL = "omalawn_link"
++        private const val NOTIFICATION_ID = 47100
++        const val ACTION_FORGET_ALL = "app.lawnchair.omalawn.link.FORGET_ALL"
++        const val ACTION_OPEN_PAIRING = "app.lawnchair.omalawn.link.OPEN_PAIRING"
++        /** How long "Screen control in use" stays after the last screen.* call. */
++        const val SCREEN_SHOWN_MS = 30_000L
++        private const val LOAD_KICK_DELAY_MS = 5000L
++        /** elapsedRealtime of this process's LinkService.onCreate, 0 if none yet. */
++        @Volatile var createdAt = 0L
++        const val DEBUG_PREFS = "omalawn_debug"
++        const val KEY_CRASH_STARTS = "crash_link_start"
++        const val KEY_REFUSE_FOREGROUND = "refuse_foreground"
++
++        /** Starts (or pokes) the link service; false when Android refuses a start right now. */
++        fun start(ctx: Context): Boolean = try {
++            ctx.startForegroundService(Intent(ctx, LinkService::class.java))
++            true
++        } catch (e: Exception) { // ForegroundServiceStartNotAllowedException / IllegalStateException
++            Log.w(TAG, "link service not started now: ${e.javaClass.simpleName}: ${e.message}")
++            false
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+new file mode 100644
+index 0000000000..e2dde1f5f1
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+@@ -0,0 +1,45 @@
++package app.lawnchair.omalawn.link
++
++import android.Manifest
++import android.app.Activity
++import android.content.Context
++import android.content.pm.PackageManager
++import android.os.Build
++
++/**
++ * The link's notification ("Forget all computers", later the pairing prompt) is invisible on
++ * Android 13+ without POST_NOTIFICATIONS. The launcher asks once per app version, and again when
++ * something the user must answer (a pair request) arrived while it was missing.
++ */
++object NotifyPermission {
++    private const val PREFS = "omalawn_link"
++    private const val KEY_ASKED = "notify_asked_version"
++    private const val KEY_NEEDED = "notify_needed"
++    const val REQUEST_CODE = 47100
++
++    fun missing(ctx: Context) = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
++        ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
++
++    /** Task 5: a pair request came in while notifications are off; the next launcher resume asks. */
++    fun neededNow(ctx: Context) {
++        if (missing(ctx)) prefs(ctx).edit().putBoolean(KEY_NEEDED, true).apply()
++    }
++
++    /** Called from the launcher when it comes to the front. */
++    fun maybeAsk(activity: Activity) {
++        if (!missing(activity)) return
++        val p = prefs(activity)
++        val version = version(activity)
++        if (p.getString(KEY_ASKED, null) == version && !p.getBoolean(KEY_NEEDED, false)) return
++        // recorded before asking: the dialog pauses and resumes the launcher, which must not ask again
++        p.edit().putString(KEY_ASKED, version).putBoolean(KEY_NEEDED, false).commit()
++        activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
++    }
++
++    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++
++    private fun version(ctx: Context): String {
++        val i = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
++        return "${i.longVersionCode}/${i.versionName}"
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt b/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
+new file mode 100644
+index 0000000000..6a85743125
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
+@@ -0,0 +1,60 @@
++package app.lawnchair.omalawn.link
++
++import android.content.Context
++import android.net.nsd.NsdManager
++import android.net.nsd.NsdServiceInfo
++import android.util.Log
++
++/**
++ * Advertises the link on the LAN as `_omalawn._tcp`, instance "OmaLawn", TXT `v=1` only: no
++ * model, no fingerprint, nothing that tells this phone apart from another Homa Lawn phone or
++ * follows it from network to network. Only a hint for the desktop, which tries each hit and lets
++ * the pinned certificate decide. The system answers mDNS even when our sockets are unreachable,
++ * and it renames the instance on conflicts ("OmaLawn (2)").
++ */
++object Nsd {
++    const val TYPE = "_omalawn._tcp"
++    private const val TAG = "OmalawnLink"
++    private var listener: NsdManager.RegistrationListener? = null
++
++    @Synchronized
++    fun register(ctx: Context, port: Int) {
++        if (listener != null) return
++        val nsd = ctx.getSystemService(NsdManager::class.java) ?: return
++        val info = NsdServiceInfo().apply {
++            serviceName = "OmaLawn" // kept: wire compatibility
++            serviceType = TYPE
++            this.port = port
++            setAttribute("v", "1")
++        }
++        val l = object : NsdManager.RegistrationListener {
++            override fun onServiceRegistered(i: NsdServiceInfo) {
++                Log.i(TAG, "mDNS registered as '${i.serviceName}'")
++            }
++            override fun onRegistrationFailed(i: NsdServiceInfo, code: Int) {
++                Log.w(TAG, "mDNS registration failed: $code")
++                synchronized(this@Nsd) { if (listener === this) listener = null }
++            }
++            override fun onServiceUnregistered(i: NsdServiceInfo) {
++                Log.i(TAG, "mDNS unregistered")
++            }
++            override fun onUnregistrationFailed(i: NsdServiceInfo, code: Int) {
++                Log.w(TAG, "mDNS unregister failed: $code")
++            }
++        }
++        listener = l
++        try {
++            nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, l)
++        } catch (e: Exception) {
++            listener = null
++            Log.w(TAG, "mDNS registration threw", e)
++        }
++    }
++
++    @Synchronized
++    fun unregister(ctx: Context) {
++        val l = listener ?: return
++        listener = null
++        runCatching { ctx.getSystemService(NsdManager::class.java)?.unregisterService(l) }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+new file mode 100644
+index 0000000000..ce31d9d71b
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -0,0 +1,290 @@
++package app.lawnchair.omalawn.link
++
++import android.annotation.SuppressLint
++import android.app.Activity
++import android.app.KeyguardManager
++import android.content.Intent
++import android.graphics.Typeface
++import android.os.Build
++import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
++import android.os.SystemClock
++import android.util.Log
++import android.view.Gravity
++import android.view.MotionEvent
++import android.view.View
++import android.view.accessibility.AccessibilityNodeInfo
++import android.widget.Button
++import android.widget.LinearLayout
++import android.widget.TextView
++
++/**
++ * Lawnchair's pairing screen, and the only place a pairing can be accepted (final review C2).
++ * Not exported, so only Lawnchair's own PendingIntents reach it. Two ways in:
++ *
++ * - "Pair a computer" in the Homa Lawn notification ([ACTION_WAIT]): the screen says "Waiting for a
++ *   computer…" and keeps the pairing window ([PairingGate]) open while it shows, at most
++ *   [PairingGate.SCREEN_WINDOW_MS]; leaving it (Cancel, Back, Home, screen off) closes the window.
++ *   Tapping "Pair a computer" again only brings this one screen forward (singleTop). When a
++ *   computer's request arrives, the same screen switches in place to its name and four words
++ *   with Reject / Accept, and no notification is posted for it. A request still open when the
++ *   screen is left gets its notification after all.
++ * - Review on the "Pair with <name>?" notification, or a request taken while the home screen was
++ *   showing ([Pairing.EXTRA_TOKEN]): the request at once. Leaving the screen with that request
++ *   still open (re)posts its notification (Review / Reject), the same fallback as above.
++ *
++ * Accept pins the computer only on a real tap:
++ * - touches are filtered while another window covers it (`filterTouchesWhenObscured`), a touch
++ *   that Android marks as (partially) obscured is ignored, and other apps' overlays are hidden
++ *   while it shows (Android 12+);
++ * - Accept answers only to a finger lifted on it: an accessibility "click" (or any performClick
++ *   without that touch) does nothing; a finger that went down before the words had been shown
++ *   for [ARM_MS] does nothing either (a tap meant for Cancel cannot land on Accept);
++ * - not shown over the lock screen, and Accept is refused while the phone is locked.
++ *
++ * Reject works any way it is pressed. The request view closes by itself when the request ends
++ * (back to waiting while the window is still open).
++ */
++class PairConfirmActivity : Activity() {
++
++    private val main = Handler(Looper.getMainLooper())
++    private var token: String? = null // the request on screen, null while waiting
++    private var holding = false // this screen opened the pairing window and keeps it open
++    private var shownAt = 0L // uptimeMillis when the current request's words appeared
++    private var touchDownAt = 0L // uptimeMillis of the finger-down of the current gesture on Accept
++    private var touchUpAt = 0L // uptimeMillis of the last unobscured finger-up on Accept
++    private var status: TextView? = null
++
++    private val watch = object : Runnable {
++        override fun run() {
++            val t = token
++            if (t != null) {
++                if (Pairing.pending(t) == null) { // the request ended without an Accept here
++                    token = null
++                    if (holding && PairingGate.isWindowOpen()) showWaiting("That request ended.") else finish()
++                }
++            } else if (holding) {
++                val next = Pairing.forScreen()
++                when {
++                    next != null -> showRequest(next)
++                    !PairingGate.isWindowOpen() -> finish() // the 5 minutes are over
++                }
++            }
++            if (!isFinishing) main.postDelayed(this, WATCH_MS)
++        }
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
++        handle(intent)
++    }
++
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        setIntent(intent)
++        handle(intent)
++    }
++
++    private fun handle(intent: Intent) {
++        if (intent.action == ACTION_WAIT) {
++            if (!holding) {
++                holding = true
++                PairingGate.openWindow(PairingGate.SCREEN_WINDOW_MS)
++                Log.i(TAG, "pairing opened on the pairing screen (at most ${PairingGate.SCREEN_WINDOW_MS / 1000} s)")
++            }
++            Pairing.screenWaiting = true
++            if (token == null) showWaiting(null)
++            return
++        }
++        val t = intent.getStringExtra(Pairing.EXTRA_TOKEN)
++        when {
++            Pairing.pending(t) != null -> showRequest(t!!)
++            token == null && !holding -> finish()
++        }
++    }
++
++    private fun pad() = (24 * resources.displayMetrics.density).toInt()
++
++    private fun showWaiting(note: String?) {
++        token = null
++        val pad = pad()
++        val root = LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(pad, pad, pad, pad)
++            filterTouchesWhenObscured = true
++        }
++        root.addView(TextView(this).apply {
++            text = "Waiting for a computer…"
++            textSize = 26f
++            setTypeface(typeface, Typeface.BOLD)
++        })
++        root.addView(TextView(this).apply {
++            text = "On the computer run: homalawn pair"
++            textSize = 16f
++            setPadding(0, pad / 2, 0, 0)
++        })
++        status = TextView(this).apply {
++            text = note ?: ""
++            setPadding(0, pad / 2, 0, 0)
++        }
++        root.addView(status)
++        val buttons = LinearLayout(this).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.START // never where Accept will appear
++        }
++        buttons.addView(Button(this).apply {
++            text = "Cancel"
++            setOnClickListener { finish() }
++        })
++        root.addView(buttons)
++        setContentView(root)
++    }
++
++    @SuppressLint("ClickableViewAccessibility")
++    private fun showRequest(t: String) {
++        val (name, words) = Pairing.pending(t) ?: return
++        token = t
++        shownAt = SystemClock.uptimeMillis()
++        touchDownAt = 0L
++        touchUpAt = 0L
++        val pad = pad()
++        val root = LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(pad, pad, pad, pad)
++            filterTouchesWhenObscured = true
++        }
++        root.addView(TextView(this).apply {
++            text = "Pair with $name?"
++            textSize = 20f
++            setTypeface(typeface, Typeface.BOLD)
++        })
++        root.addView(TextView(this).apply {
++            text = words.joinToString(" ")
++            textSize = 30f
++            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
++            gravity = Gravity.CENTER
++            setPadding(0, pad / 2, 0, pad / 2)
++        })
++        root.addView(TextView(this).apply {
++            text = "Accept only if the computer shows the same four words. A paired computer can change this " +
++                "phone's home screen and, with screen control on, see and operate the screen."
++        })
++        status = TextView(this).apply { setPadding(0, pad / 2, 0, 0) }
++        root.addView(status)
++        val buttons = LinearLayout(this).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.END
++            filterTouchesWhenObscured = true
++        }
++        buttons.addView(Button(this).apply {
++            text = "Reject"
++            filterTouchesWhenObscured = true
++            setOnClickListener {
++                Pairing.decide(applicationContext, token, Pairing.REJECTED)
++                finish()
++            }
++        })
++        val accept = Button(this).apply {
++            text = "Accept"
++            filterTouchesWhenObscured = true
++            setOnTouchListener { _, e -> onAcceptTouch(e) }
++            setOnClickListener { onAcceptClick() }
++            // an accessibility service's "click" is not the user's finger: offer no click action
++            setAccessibilityDelegate(object : View.AccessibilityDelegate() {
++                override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean =
++                    if (action == AccessibilityNodeInfo.ACTION_CLICK) false else super.performAccessibilityAction(host, action, args)
++            })
++        }
++        buttons.addView(accept)
++        root.addView(buttons)
++        setContentView(root)
++    }
++
++    private fun obscured(e: MotionEvent): Boolean {
++        if (e.flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED != 0) return true
++        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
++            e.flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0
++    }
++
++    /** Remembers a finger lifted on Accept with nothing covering the screen; never consumes. */
++    private fun onAcceptTouch(e: MotionEvent): Boolean {
++        if (obscured(e)) {
++            touchUpAt = 0L
++            status?.text = "Another app is covering this screen; close it, then tap Accept."
++            Log.w(TAG, "pairing Accept ignored: the touch was obscured")
++            return true // swallowed: no click either
++        }
++        when (e.actionMasked) {
++            MotionEvent.ACTION_DOWN -> touchDownAt = e.downTime
++            MotionEvent.ACTION_UP -> touchUpAt = if (touchDownAt >= shownAt + ARM_MS) SystemClock.uptimeMillis() else 0L
++        }
++        return false
++    }
++
++    private fun onAcceptClick() {
++        val real = touchUpAt != 0L && SystemClock.uptimeMillis() - touchUpAt < TOUCH_TO_CLICK_MS
++        touchUpAt = 0L
++        if (!real) {
++            Log.w(TAG, "pairing Accept ignored: not a finger on the screen, or too soon after the words appeared")
++            return
++        }
++        if (getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true) {
++            status?.text = "Unlock the phone first."
++            return
++        }
++        val t = token ?: return finish()
++        if (!Pairing.acceptFromScreen(applicationContext, t)) status?.text = "This request has ended."
++        finish()
++    }
++
++    override fun onResume() {
++        super.onResume()
++        main.post(watch)
++    }
++
++    override fun onPause() {
++        main.removeCallbacks(watch)
++        super.onPause()
++    }
++
++    override fun onStop() {
++        super.onStop()
++        val shownToken = token
++        if (!holding && shownToken != null && Pairing.pending(shownToken) != null) {
++            // a request shown without the waiting screen (home screen or Review) and still open
++            Pairing.repost(applicationContext, shownToken)
++        }
++        if (holding) { // leaving the screen closes pairing; the screen itself goes away (noHistory)
++            holding = false
++            Pairing.screenWaiting = false
++            PairingGate.closeWindow()
++            Log.i(TAG, "pairing closed: the pairing screen was left")
++            // a request still open gets its notification after all (Review / Reject)
++            Pairing.repost(applicationContext, Pairing.currentToken())
++            if (!isFinishing) finish()
++        }
++    }
++
++    override fun onDestroy() {
++        main.removeCallbacks(watch)
++        if (holding) {
++            holding = false
++            Pairing.screenWaiting = false
++            PairingGate.closeWindow()
++            Pairing.repost(applicationContext, Pairing.currentToken())
++        }
++        super.onDestroy()
++    }
++
++    companion object {
++        private const val TAG = "OmalawnLink"
++        private const val WATCH_MS = 500L
++        private const val TOUCH_TO_CLICK_MS = 1000L
++        /** Accept ignores a finger that went down sooner than this after the words appeared. */
++        private const val ARM_MS = 1000L
++        /** "Pair a computer": open pairing and wait on this screen. */
++        const val ACTION_WAIT = "app.lawnchair.omalawn.link.PAIR_WAIT"
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+new file mode 100644
+index 0000000000..4a45036ebd
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pairing.kt
+@@ -0,0 +1,456 @@
++package app.lawnchair.omalawn.link
++
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.os.Build
++import android.os.Handler
++import android.os.Looper
++import android.util.Log
++import androidx.core.app.NotificationCompat
++import app.lawnchair.omalawn.OmalawnError
++import com.android.launcher3.BuildConfig
++import com.android.launcher3.R
++import java.net.Socket
++import java.security.MessageDigest
++import java.security.SecureRandom
++import java.util.UUID
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++import org.json.JSONArray
++import org.json.JSONObject
++
++/**
++ * Pairing a computer by comparing four words (spec D5). A computer that is not pinned sends
++ * `link.pair_request {name, commit}` (commit = SHA-256("omalawn-commit-v1" ‖ nonce_desktop)); the
++ * phone answers `{nonce_phone, name, expires_in}`; `link.pair_reveal {nonce_desktop}` is checked
++ * against the commitment and answered `{words}`, and the phone posts "Pair with <name>?" with
++ * Review/Reject. `link.pair_wait {}` then blocks until
++ * the answer, a dismissal, or the [TIMEOUT_MS] deadline. While the pairing screen waits in front
++ * ([screenWaiting]) it shows the request in place and no notification is posted. A request taken
++ * because the home screen was showing ([Session.viaHome]) opens the pairing screen in front with
++ * the request at once; the notification is only the fallback when that screen is left (or cannot
++ * be opened). One request at a time, at most [MAX_PER_WINDOW] per [WINDOW_MS], and only while the
++ * home screen shows (unlocked) or the user has pairing open ([PairingGate]).
++ *
++ * The notification cannot pin anything: any app with notification access can fire its actions.
++ * Review only opens [PairConfirmActivity] (not exported); a real, unobscured tap on its Accept
++ * button is the only thing that pins the computer's certificate.
++ *
++ * words = first 44 bits of SHA-256("omalawn-sas-v1" ‖ phone cert DER ‖ computer cert DER ‖
++ * nonce_phone ‖ nonce_desktop) as four 11-bit indexes into the BIP-39 English list (asset
++ * `omalawn_words.txt`). The desktop derives them on its own; a man in the middle changes them.
++ */
++object Pairing {
++    const val TIMEOUT_MS = 120_000L
++    private const val WINDOW_MS = 10 * 60_000L
++    private const val MAX_PER_WINDOW = 3
++    private const val TAG = "OmalawnLink"
++    private const val CHANNEL = "omalawn_pair"
++    private const val NOTIFICATION_ID = 47101
++    /** The action the notification's Accept used to send to the service; it pins nothing now. */
++    const val LEGACY_ACCEPT = "app.lawnchair.omalawn.link.PAIR_ACCEPT"
++    const val ACTION_REJECT = "app.lawnchair.omalawn.link.PAIR_REJECT"
++    const val ACTION_DISMISS = "app.lawnchair.omalawn.link.PAIR_DISMISS"
++    const val EXTRA_TOKEN = "token"
++
++    const val ACCEPTED = "accepted"
++    const val REJECTED = "rejected"
++    const val DISMISSED = "dismissed"
++    const val TIMEOUT = "timeout"
++    const val GONE = "gone" // the computer's connection ended first
++    const val BAD_COMMIT = "bad_commit"
++
++    private val HEX32 = Regex("[0-9a-f]{32}")
++    private val HEX64 = Regex("[0-9a-f]{64}")
++    private const val COOLDOWN_MS = 3_000L // between one prompt ending and the next appearing
++    private const val WATCH_MS = 500L // how often a waiting pair_wait checks the computer is still there
++    private val main = Handler(Looper.getMainLooper())
++    private val random = SecureRandom()
++
++    class Session(
++        val token: String,
++        val conn: Socket,
++        val fp: String,
++        val name: String,
++        val commit: ByteArray, // SHA-256("omalawn-commit-v1" ‖ nonce_desktop), sent before nonce_phone
++        val noncePhone: ByteArray,
++        val desktopDer: ByteArray,
++        val deadline: Long,
++        val viaHome: Boolean, // taken because the home screen was showing (not the pairing window)
++    ) {
++        val done = CountDownLatch(1)
++        @Volatile var outcome: String? = null
++        @Volatile var words: List<String>? = null // known only after link.pair_reveal
++        val intents = mutableListOf<PendingIntent>() // this session's actions; cancelled when it ends
++        var accept: PendingIntent? = null // the Review action (opens the confirmation screen)
++        @Volatile var visibleFrom = Long.MAX_VALUE // wall clock: when the prompt may be shown (after the cool-down)
++    }
++
++    /**
++     * True while the pairing screen waits in front ([PairConfirmActivity] opened by "Pair a
++     * computer"): it shows the request itself, so no notification is posted. When the screen is
++     * left with a request still open, the notification is posted after all (the fallback).
++     */
++    @Volatile var screenWaiting = false
++
++    private var current: Session? = null
++    private val recent = ArrayDeque<Long>() // start times of accepted requests, oldest first
++    private var lastEnd = 0L
++    private var codeSeq = 100 // PendingIntent request codes, fresh for every session
++
++    /** Debug builds only: the Review action of the last session that ended (for the stale-tap test). */
++    @Volatile private var staleAccept: PendingIntent? = null
++
++    @Volatile private var wordList: List<String>? = null
++
++    fun words(ctx: Context): List<String> = wordList ?: synchronized(this) {
++        wordList ?: ctx.assets.open("omalawn_words.txt").bufferedReader().readLines().also {
++            check(it.size == 2048) { "word list has ${it.size} words" }
++            wordList = it
++        }
++    }
++
++    fun wordsSha256(ctx: Context): String = Identity.sha256Hex(ctx.assets.open("omalawn_words.txt").readBytes())
++
++    fun sas(ctx: Context, phone: ByteArray, desktop: ByteArray, noncePhone: ByteArray, nonceDesktop: ByteArray): List<String> {
++        require(noncePhone.size == 16 && nonceDesktop.size == 16) { "nonces must be 16 bytes" }
++        val md = MessageDigest.getInstance("SHA-256")
++        md.update("omalawn-sas-v1".toByteArray(Charsets.US_ASCII))
++        md.update(phone)
++        md.update(desktop)
++        md.update(noncePhone)
++        md.update(nonceDesktop)
++        val h = md.digest()
++        var top = 0L
++        for (i in 0 until 6) top = (top shl 8) or (h[i].toLong() and 0xff)
++        top = top ushr 4 // the first 44 bits
++        val w = words(ctx)
++        return (0 until 4).map { w[((top ushr (11 * (3 - it))) and 0x7ff).toInt()] }
++    }
++
++    /** SHA-256("omalawn-commit-v1" ‖ nonce_desktop): the desktop's commitment to its nonce. */
++    fun commitment(nonceDesktop: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").run {
++        update("omalawn-commit-v1".toByteArray(Charsets.US_ASCII))
++        digest(nonceDesktop)
++    }
++
++    /** What the prompt may show of a computer's chosen name: no control or format (bidi) characters. */
++    fun cleanName(raw: String): String {
++        val sb = StringBuilder()
++        raw.codePoints().forEach { cp ->
++            if (!Character.isISOControl(cp) && Character.getType(cp) != Character.FORMAT.toInt()) sb.appendCodePoint(cp)
++        }
++        val t = sb.toString().trim()
++        return if (t.codePointCount(0, t.length) <= 64) t else t.substring(0, t.offsetByCodePoints(0, 64))
++    }
++
++    fun hex(s: String): ByteArray = ByteArray(s.length / 2) { s.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
++
++    private fun toHex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
++
++    /** Can the user see the prompt? Permission granted (13+), app and our channel not blocked. */
++    private fun canNotify(ctx: Context): Boolean {
++        if (NotifyPermission.missing(ctx)) return false
++        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return false
++        if (!nm.areNotificationsEnabled()) return false
++        val ch = nm.getNotificationChannel(CHANNEL)
++        return ch == null || ch.importance != NotificationManager.IMPORTANCE_NONE
++    }
++
++    /**
++     * `link.pair_request {name, commit}` on [conn] from the computer with certificate [desktopDer].
++     * The computer has committed to its nonce; the phone answers with its own nonce (the words cannot
++     * be known yet, so neither side can steer them). The connection moves into the single pairing
++     * slot (out of reach of other strangers, past the unpaired lifetime) with the 120 s deadline.
++     */
++    fun begin(ctx: Context, conn: Socket, fp: String, desktopDer: ByteArray, params: JSONObject): Pair<Session, JSONObject> {
++        val rawName = if (params.isNull("name")) "" else params.opt("name") as? String ?: ""
++        val name = cleanName(rawName)
++        if (name.isEmpty()) throw OmalawnError(LinkServer.BAD_PARAMS, "name must be a non-empty string")
++        val commit = (if (params.isNull("commit")) "" else params.opt("commit") as? String ?: "").lowercase()
++        if (!HEX64.matches(commit)) throw OmalawnError(LinkServer.BAD_PARAMS, "commit must be SHA-256 as 64 hex characters")
++        // the window ("Pair a computer") keeps its own flow; otherwise the home screen showing opens it
++        val viaHome = !PairingGate.isWindowOpen() && PairingGate.homeShowing(ctx)
++        if (!viaHome && !PairingGate.isWindowOpen()) {
++            Log.i(TAG, "pair request refused: the home screen is not showing and pairing is not open")
++            throw OmalawnError(
++                PairingGate.PAIRING_CLOSED,
++                "pairing is closed; open the home screen on the phone (or Pair a computer)",
++            )
++        }
++        if (PairingGate.isLocal(conn.inetAddress) && !PairingGate.localAllowed(ctx)) {
++            Log.i(TAG, "pair request refused: it came from this phone itself")
++            throw OmalawnError(PairingGate.LOCAL_PAIRING, "pairing requests from this phone itself are refused")
++        }
++        if (!canNotify(ctx)) {
++            NotifyPermission.neededNow(ctx) // the next time the home screen opens, it asks
++            Log.i(TAG, "pair request refused: notifications are off")
++            throw OmalawnError(
++                "notifications_off",
++                "notifications for Homa Lawn are off on the phone, so it cannot ask; open the home screen and allow them",
++            )
++        }
++        val noncePhone = ByteArray(16).also { random.nextBytes(it) }
++        val session = synchronized(this) {
++            if (current != null) throw OmalawnError("pair_busy", "another pairing request is waiting for an answer")
++            val now = System.currentTimeMillis()
++            while (recent.isNotEmpty() && now - recent.first() >= WINDOW_MS) recent.removeFirst()
++            if (recent.size >= MAX_PER_WINDOW) {
++                val wait = (recent.first() + WINDOW_MS - now + 59_999) / 60_000
++                throw OmalawnError("rate_limited", "try again in $wait minute${if (wait == 1L) "" else "s"}")
++            }
++            val s = Session(UUID.randomUUID().toString(), conn, fp, name, hex(commit), noncePhone, desktopDer, now + TIMEOUT_MS, viaHome)
++            if (!LinkServer.enterPairing(conn, TIMEOUT_MS) { finish(ctx, s.token, TIMEOUT) }) {
++                throw OmalawnError("pair_busy", "this connection cannot take the pairing slot")
++            }
++            recent.addLast(now)
++            current = s
++            s
++        }
++        Log.i(TAG, "pair request from \"$name\" fp=${fp.take(16)}${if (viaHome) " (home screen showing)" else ""}")
++        val res = JSONObject()
++            .put("nonce_phone", toHex(noncePhone))
++            .put("name", name)
++            .put("expires_in", TIMEOUT_MS / 1000)
++        return session to res
++    }
++
++    /**
++     * `link.pair_reveal {nonce_desktop}`: checks it against the commitment, derives the words and
++     * posts the prompt (no sooner than [COOLDOWN_MS] after the previous prompt ended). A nonce that
++     * does not match ends the request.
++     */
++    fun reveal(ctx: Context, session: Session, params: JSONObject): JSONObject {
++        if (session.words != null) throw OmalawnError("pair_busy", "the nonce was already revealed")
++        val nd = (if (params.isNull("nonce_desktop")) "" else params.opt("nonce_desktop") as? String ?: "").lowercase()
++        if (!HEX32.matches(nd)) throw OmalawnError(LinkServer.BAD_PARAMS, "nonce_desktop must be 16 bytes as 32 hex characters")
++        val nonceDesktop = hex(nd)
++        if (!MessageDigest.isEqual(commitment(nonceDesktop), session.commit)) {
++            finish(ctx, session.token, BAD_COMMIT)
++            throw OmalawnError(BAD_COMMIT, "nonce_desktop does not match the commitment")
++        }
++        val words = sas(ctx, Identity.certificate().encoded, session.desktopDer, session.noncePhone, nonceDesktop)
++        session.words = words
++        val delay = synchronized(this) { (lastEnd + COOLDOWN_MS - System.currentTimeMillis()).coerceAtLeast(0) }
++        session.visibleFrom = System.currentTimeMillis() + delay
++        main.postDelayed({
++            if (synchronized(this) { current === session } && !screenWaiting) {
++                if (!(session.viaHome && PairingGate.homeShowing(ctx) && openScreen(ctx, session))) notifyPrompt(ctx, session)
++            }
++        }, delay)
++        return JSONObject().put("words", JSONArray(words))
++    }
++
++    /**
++     * `link.pair_wait`: blocks until the session ends; never longer than its deadline (+ a margin).
++     * Every [WATCH_MS] it asks [stillThere] whether the computer is still connected; when it is not
++     * (it hung up, e.g. Ctrl-C), the request ends as [GONE] and an Accept tapped later pins nothing.
++     */
++    fun await(ctx: Context, session: Session, stillThere: () -> Boolean): String {
++        val end = session.deadline + 5_000
++        while (true) {
++            val left = end - System.currentTimeMillis()
++            if (left <= 0) return session.outcome ?: TIMEOUT
++            if (session.done.await(minOf(left, WATCH_MS), TimeUnit.MILLISECONDS)) return session.outcome ?: TIMEOUT
++            if (!stillThere()) {
++                finish(ctx, session.token, GONE)
++                return session.outcome ?: GONE
++            }
++        }
++    }
++
++    /** A prompt left by an earlier process (its session died with it) is removed at service start. */
++    fun cancelLeftovers(ctx: Context) {
++        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
++        val live = synchronized(this) { current?.token }
++        nm.activeNotifications.filter { it.id == NOTIFICATION_ID && it.tag != live }.forEach {
++            nm.cancel(it.tag, it.id)
++            Log.i(TAG, "removed a pairing prompt left by an earlier start")
++        }
++    }
++
++    /**
++     * Reject / dismissal from the notification (via LinkService), or Reject from the confirmation
++     * screen. Never [ACCEPTED]: only [acceptFromScreen] pins. A stale token does nothing.
++     */
++    fun decide(ctx: Context, token: String?, outcome: String) {
++        if (token != null && outcome != ACCEPTED) finish(ctx, token, outcome)
++    }
++
++    /** Debug provider: the pending request's token (null when none). */
++    fun currentToken(): String? = synchronized(this) { current?.token }
++
++    /** The request the waiting pairing screen should show now: its token, null when none (yet). */
++    fun forScreen(): String? = synchronized(this) {
++        current?.takeIf { it.words != null && System.currentTimeMillis() >= it.visibleFrom }?.token
++    }
++
++    /** What the confirmation screen shows for [token]: (computer name, words), null once it ended. */
++    fun pending(token: String?): Pair<String, List<String>>? = synchronized(this) {
++        current?.takeIf { it.token == token }?.let { s -> s.words?.let { s.name to it } }
++    }
++
++    /** A real tap on Accept in [PairConfirmActivity]; false when the request has ended. */
++    fun acceptFromScreen(ctx: Context, token: String): Boolean {
++        if (pending(token) == null) return false
++        finish(ctx, token, ACCEPTED)
++        return true
++    }
++
++    /** A tap that arrived while the phone was locked: refused, the prompt is shown again. */
++    fun repost(ctx: Context, token: String?) {
++        val s = synchronized(this) { current?.takeIf { it.token == token && it.words != null } } ?: return
++        main.post { if (synchronized(this) { current === s }) notifyPrompt(ctx, s) }
++    }
++
++    /** The connection of [conn] ended; a pending request from it is withdrawn. */
++    fun connectionGone(ctx: Context, conn: Socket) {
++        val s = synchronized(this) { current?.takeIf { it.conn === conn } } ?: return
++        finish(ctx, s.token, GONE)
++    }
++
++    private fun finish(ctx: Context, token: String, outcome: String) {
++        val s = synchronized(this) {
++            val c = current
++            if (c == null || c.token != token) return
++            if (outcome == ACCEPTED && c.words == null) return // nothing was shown, nothing to accept
++            current = null
++            lastEnd = System.currentTimeMillis()
++            c
++        }
++        // a computer that already hung up gets nothing pinned
++        val result = if (outcome == ACCEPTED && (s.conn.isClosed || s.conn.isInputShutdown)) GONE else outcome
++        val accepted = result == ACCEPTED
++        if (accepted) {
++            Pins.add(ctx, s.fp, s.name) // pinned before pair_wait answers
++            PairingGate.closeWindow() // one pairing per "Pair a computer"
++        }
++        s.outcome = result
++        s.done.countDown()
++        ctx.getSystemService(NotificationManager::class.java)?.cancel(s.token, NOTIFICATION_ID)
++        synchronized(s.intents) {
++            s.intents.forEach { it.cancel() } // an old notification's buttons are dead
++            if (BuildConfig.DEBUG) staleAccept = s.accept
++        }
++        Log.i(TAG, "pair request from \"${s.name}\" ended: $result")
++        LinkServer.leavePairing(s.conn, accepted, s.fp)
++    }
++
++    /** Test hook (debug provider): forget the rate window, the cool-down and the handshake counts. */
++    @Synchronized
++    fun resetRateLimit() {
++        recent.clear()
++        lastEnd = 0L
++        PairingGate.resetHandshakes()
++    }
++
++    /**
++     * Test hook (debug provider): fire the Review action of the last ended session (`stale`, must be
++     * dead) or of the pending one (`current`: opens the confirmation screen, pins nothing), as an
++     * app with notification access could.
++     */
++    fun fireAccept(which: String): String {
++        val pi = (if (which == "current") synchronized(this) { current?.accept } else staleAccept) ?: return "none"
++        return try {
++            pi.send()
++            "sent"
++        } catch (_: PendingIntent.CanceledException) {
++            "canceled"
++        }
++    }
++
++    /**
++     * Opens the pairing screen in front with [s] (the home screen is showing, so Android lets the
++     * home app start it). False when it cannot be started: the caller posts the notification.
++     */
++    private fun openScreen(ctx: Context, s: Session): Boolean = try {
++        ctx.startActivity(
++            Intent(ctx, PairConfirmActivity::class.java)
++                .putExtra(EXTRA_TOKEN, s.token)
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
++        )
++        Log.i(TAG, "pair request from \"${s.name}\" shown on the pairing screen")
++        true
++    } catch (e: Exception) {
++        Log.w(TAG, "could not open the pairing screen; posting the notification", e)
++        false
++    }
++
++    private fun notifyPrompt(ctx: Context, s: Session) {
++        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
++        val words = s.words ?: return
++        // below Android 12 actions cannot demand an unlock: keep the prompt off the lock screen
++        val lockVisibility = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++            Notification.VISIBILITY_PRIVATE
++        } else {
++            Notification.VISIBILITY_SECRET
++        }
++        nm.createNotificationChannel(
++            NotificationChannel(CHANNEL, "Homa Lawn pairing", NotificationManager.IMPORTANCE_HIGH).apply {
++                description = "Asks before a computer may control this phone through Homa Lawn"
++                lockscreenVisibility = lockVisibility
++                setShowBadge(false)
++            },
++        )
++        val actions = synchronized(s.intents) {
++            s.intents.forEach { it.cancel() }
++            s.intents.clear()
++            fun action(action: String): PendingIntent {
++                val code = synchronized(this) { ++codeSeq }
++                return PendingIntent.getService(
++                    ctx,
++                    code,
++                    Intent(ctx, LinkService::class.java).setAction(action).putExtra(EXTRA_TOKEN, s.token),
++                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT,
++                ).also { s.intents.add(it) }
++            }
++            // Review opens the confirmation screen; the notification itself cannot accept
++            val review = PendingIntent.getActivity(
++                ctx,
++                synchronized(this) { ++codeSeq },
++                Intent(ctx, PairConfirmActivity::class.java)
++                    .putExtra(EXTRA_TOKEN, s.token)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
++                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT,
++            ).also { s.intents.add(it) }
++            Triple(review, action(ACTION_REJECT), action(ACTION_DISMISS)).also { s.accept = it.first }
++        }
++        val text = words.joinToString(" ")
++        // what the lock screen shows when the user hides sensitive content: no name, no words, no buttons
++        val public = NotificationCompat.Builder(ctx, CHANNEL)
++            .setSmallIcon(R.drawable.ic_home_screen)
++            .setContentTitle("Homa Lawn pairing request")
++            .setContentText("Unlock the phone to answer")
++            .build()
++        val n = NotificationCompat.Builder(ctx, CHANNEL)
++            .setSmallIcon(R.drawable.ic_home_screen)
++            .setContentTitle("Pair with ${s.name}? $text")
++            .setContentText(text)
++            .setSubText("Homa Lawn")
++            .setStyle(
++                NotificationCompat.BigTextStyle().bigText(
++                    "$text\n\nTap Review and accept only if the computer shows the same four words. " +
++                        "A paired computer can change this phone's home screen and, with screen control on, " +
++                        "see and operate the screen.",
++                ),
++            )
++            .setPriority(NotificationCompat.PRIORITY_HIGH)
++            .setVisibility(
++                if (lockVisibility == Notification.VISIBILITY_SECRET) NotificationCompat.VISIBILITY_SECRET
++                else NotificationCompat.VISIBILITY_PRIVATE,
++            )
++            .setPublicVersion(public)
++            .setOnlyAlertOnce(true)
++            .setAutoCancel(false)
++            .setDeleteIntent(actions.third)
++            .setContentIntent(actions.first)
++            .addAction(NotificationCompat.Action.Builder(0, "Reject", actions.second).setAuthenticationRequired(true).build())
++            .addAction(NotificationCompat.Action.Builder(0, "Review", actions.first).setAuthenticationRequired(true).build())
++            .build()
++        nm.notify(s.token, NOTIFICATION_ID, n) // tagged per session: a new request never reuses an old one's
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
+new file mode 100644
+index 0000000000..113529b66a
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairingGate.kt
+@@ -0,0 +1,136 @@
++package app.lawnchair.omalawn.link
++
++import android.app.KeyguardManager
++import android.content.Context
++import android.os.SystemClock
++import android.provider.Settings
++import com.android.launcher3.BuildConfig
++import java.net.InetAddress
++import java.net.NetworkInterface
++import java.util.concurrent.CopyOnWriteArrayList
++
++/**
++ * Who may even ask to pair, and when (spec D5, final review C2/I3):
++ *
++ * - **When**: `link.pair_request` is refused (`pairing_closed`) unless the home screen is showing
++ *   ([homeShowing]: Lawnchair's launcher activity resumed and the phone not locked; the Flux model,
++ *   spec N5 of new-phone setup) or the user opened the **pairing window**. "Pair a computer" in
++ *   the Homa Lawn notification opens the pairing screen ([PairConfirmActivity]), which keeps the
++ *   window open while it shows, at most [SCREEN_WINDOW_MS], and closes it when it is left; the
++ *   debug hook opens it for [WINDOW_MS]. A successful pairing closes it again.
++ * - **Local requests** (loopback, or one of the phone's own addresses: an app on this phone) are
++ *   refused (`local_pairing`) unless the debug build's shell-only toggle `debug_allow_local_pairing`
++ *   is on. The toggle lasts until it is switched off or the phone reboots (it stores the boot
++ *   count). Tests need it: `adb forward` arrives as loopback.
++ * - A **handshake limit** per remote address: at most [MAX_HANDSHAKES] connection attempts per
++ *   [HANDSHAKE_WINDOW_MS] that did not turn out to be a paired computer (a paired computer's
++ *   handshake is given back). Loopback is exempt while the local toggle is on (the test suite
++ *   dials everything through one forwarded port).
++ */
++object PairingGate {
++    const val WINDOW_MS = 120_000L
++    /** The pairing screen keeps the window open while it shows, for at most this long. */
++    const val SCREEN_WINDOW_MS = 300_000L
++    const val MAX_HANDSHAKES = 10
++    const val HANDSHAKE_WINDOW_MS = 60_000L
++    const val PAIRING_CLOSED = "pairing_closed"
++    const val LOCAL_PAIRING = "local_pairing"
++    private const val KEY_LOCAL_BOOT = "allow_local_pairing_boot"
++
++    @Volatile private var windowUntil = 0L // elapsedRealtime; 0 = closed
++    private val listeners = CopyOnWriteArrayList<() -> Unit>()
++
++    // -- the pairing window ---------------------------------------------------------------------
++
++    fun openWindow(ms: Long = WINDOW_MS) {
++        windowUntil = SystemClock.elapsedRealtime() + ms
++        changed()
++    }
++
++    fun closeWindow() {
++        if (windowUntil == 0L) return
++        windowUntil = 0L
++        changed()
++    }
++
++    /** Milliseconds the window stays open, 0 when closed. */
++    fun windowLeftMs(): Long = (windowUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0)
++
++    fun isWindowOpen() = windowLeftMs() > 0
++
++    fun onChange(l: () -> Unit) = listeners.add(l)
++    fun removeListener(l: () -> Unit) = listeners.remove(l)
++    private fun changed() = listeners.forEach { runCatching { it() } }
++
++    // -- the home screen showing ------------------------------------------------------------------
++
++    @Volatile private var launcherResumed = false
++
++    /** From the launcher activity's onResume / onPause. */
++    fun launcherResumed(resumed: Boolean) {
++        launcherResumed = resumed
++    }
++
++    /** Lawnchair's home screen is in front and the phone is unlocked: a pair request may come in. */
++    fun homeShowing(ctx: Context): Boolean =
++        launcherResumed && ctx.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false
++
++    // -- local requests ---------------------------------------------------------------------------
++
++    /** Loopback, any-local, or an address one of this phone's own interfaces has. */
++    fun isLocal(a: InetAddress?): Boolean {
++        if (a == null) return true
++        if (a.isLoopbackAddress || a.isAnyLocalAddress) return true
++        return try {
++            NetworkInterface.getByInetAddress(a) != null
++        } catch (_: Exception) {
++            false
++        }
++    }
++
++    private fun bootCount(ctx: Context) = Settings.Global.getInt(ctx.contentResolver, Settings.Global.BOOT_COUNT, -1)
++
++    fun localAllowed(ctx: Context): Boolean {
++        if (!BuildConfig.DEBUG) return false
++        val p = ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE)
++        val stored = p.getInt(KEY_LOCAL_BOOT, -2)
++        return stored >= 0 && stored == bootCount(ctx)
++    }
++
++    /** Debug provider only (shell uid). */
++    fun setLocalAllowed(ctx: Context, on: Boolean) {
++        val e = ctx.getSharedPreferences(LinkService.DEBUG_PREFS, Context.MODE_PRIVATE).edit()
++        if (on) e.putInt(KEY_LOCAL_BOOT, bootCount(ctx)) else e.remove(KEY_LOCAL_BOOT)
++        e.commit()
++    }
++
++    // -- handshake limit --------------------------------------------------------------------------
++
++    private val attempts = HashMap<String, ArrayDeque<Long>>() // address -> attempt times, oldest first
++
++    /**
++     * A new connection from [a]: false when it is over the limit (close it without a handshake).
++     * The caller gives the attempt back with [refund] once the computer turns out to be paired.
++     */
++    fun admitHandshake(ctx: Context, a: InetAddress?): Boolean {
++        if (a != null && a.isLoopbackAddress && localAllowed(ctx)) return true
++        val key = a?.hostAddress ?: "?"
++        val now = SystemClock.elapsedRealtime()
++        synchronized(attempts) {
++            val q = attempts.getOrPut(key) { ArrayDeque() }
++            while (q.isNotEmpty() && now - q.first() >= HANDSHAKE_WINDOW_MS) q.removeFirst()
++            if (q.size >= MAX_HANDSHAKES) return false
++            q.addLast(now)
++            if (attempts.size > 256) attempts.entries.removeAll { it.value.isEmpty() } // bounded
++            return true
++        }
++    }
++
++    fun refund(a: InetAddress?) {
++        val key = a?.hostAddress ?: "?"
++        synchronized(attempts) { attempts[key]?.removeLastOrNull() }
++    }
++
++    /** Debug provider (`debug_pair_reset`): forget every address's attempts. */
++    fun resetHandshakes() = synchronized(attempts) { attempts.clear() }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt b/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
+new file mode 100644
+index 0000000000..43d40ecdde
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Pins.kt
+@@ -0,0 +1,76 @@
++package app.lawnchair.omalawn.link
++
++import android.content.Context
++import android.system.Os
++import java.io.File
++import java.util.concurrent.CopyOnWriteArrayList
++import org.json.JSONObject
++
++/**
++ * Computers allowed to use the link: certificate SHA-256 (lowercase hex) → name, kept in
++ * app-private no-backup storage (`no_backup/omalawn_link_pins.json`, 0600). Checked on every request,
++ * so forgetting a computer takes effect on its open connection too.
++ */
++object Pins {
++    private val FP = Regex("[0-9a-f]{64}")
++    private val listeners = CopyOnWriteArrayList<() -> Unit>()
++    private var cache: JSONObject? = null
++
++    private fun file(ctx: Context) = File(ctx.noBackupFilesDir, "omalawn_link_pins.json")
++
++    @Synchronized
++    private fun load(ctx: Context): JSONObject = cache ?: run {
++        val f = file(ctx)
++        val o = try {
++            if (f.isFile) JSONObject(f.readText()) else JSONObject()
++        } catch (_: Exception) {
++            JSONObject()
++        }
++        cache = o
++        o
++    }
++
++    @Synchronized
++    private fun save(ctx: Context, o: JSONObject) {
++        val f = file(ctx)
++        val tmp = File(f.path + ".tmp")
++        tmp.writeText(o.toString())
++        Os.chmod(tmp.absolutePath, 0b110_000_000)
++        if (!tmp.renameTo(f)) error("cannot save pins")
++        cache = o
++    }
++
++    fun isPinned(ctx: Context, fp: String) = synchronized(this) { load(ctx).has(fp) }
++
++    fun count(ctx: Context) = synchronized(this) { load(ctx).length() }
++
++    fun name(ctx: Context, fp: String): String? = synchronized(this) { load(ctx).optJSONObject(fp)?.optString("name") }
++
++    fun add(ctx: Context, fp: String, name: String) {
++        require(FP.matches(fp)) { "fingerprint must be 64 lowercase hex characters" }
++        synchronized(this) {
++            val o = JSONObject(load(ctx).toString())
++            o.put(fp, JSONObject().put("name", name.take(64)).put("added", System.currentTimeMillis()))
++            save(ctx, o)
++        }
++        changed()
++    }
++
++    fun remove(ctx: Context, fp: String) {
++        synchronized(this) {
++            val o = JSONObject(load(ctx).toString())
++            o.remove(fp)
++            save(ctx, o)
++        }
++        changed()
++    }
++
++    fun clear(ctx: Context) {
++        synchronized(this) { save(ctx, JSONObject()) }
++        changed()
++    }
++
++    fun onChange(l: () -> Unit) = listeners.add(l)
++    fun removeListener(l: () -> Unit) = listeners.remove(l)
++    private fun changed() = listeners.forEach { runCatching { it() } }
++}

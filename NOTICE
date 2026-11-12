@@ -1,0 +1,61 @@
+Homa Lawn
+Copyright 2026 Michał Górecki
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Homa Lawn is an independent project. It is not affiliated with or endorsed by
+Lawnchair, Omarchy, Nova Launcher, Samsung or Google. Those names and marks
+belong to their owners.
+
+
+Lawnchair and the Android Open Source Project
+---------------------------------------------
+
+This product includes patches to Lawnchair (patches/*.patch), which are applied
+to, and distributed for use with, Lawnchair:
+  Lawnchair - https://github.com/LawnchairLauncher/lawnchair
+  Copyright (c) 2024, Lawnchair (the Lawnchair contributors)
+  Copyright (c) 2005-2008, The Android Open Source Project
+  Licensed under the Apache License, Version 2.0.
+
+Lawnchair itself is not part of this repository: scripts/build-lawnchair.sh
+builds it from a separate clone of the upstream repository, at the commit named
+in patches/BASE. Copyright and license notices of upstream files modified by
+the patches are kept unchanged in those files.
+
+
+Binary releases of the phone app
+--------------------------------
+
+The phone app (HomaLawn-<version>-release.apk, published as GitHub releases
+tagged build-<N>) contains Lawnchair, Launcher3 and the libraries Lawnchair
+bundles, together with Homa Lawn's patches. The notices and license texts of
+those libraries are included in the app: Homa Lawn's settings › About ›
+Open-source licenses.
+
+One of the bundled libraries, me.xdrop:fuzzywuzzy, is licensed under the GNU
+General Public License, version 2 or later. The complete corresponding source of
+each release is:
+  - this repository at the release's tag (build-<N>), and
+  - the Lawnchair commit named in patches/BASE at that tag
+    (https://github.com/LawnchairLauncher/lawnchair), with patches/ applied by
+    scripts/build-lawnchair.sh.
+Each release's notes name both.
+
+Fonts shipped by Lawnchair (Google Sans Flex) keep their own license, the SIL
+Open Font License, Version 1.1.
+
+
+Other third-party material
+--------------------------
+
+Flux (https://github.com/bjarneo/flux), MIT License, and the BIP-39 English
+word list (https://github.com/bitcoin/bips, bip-0039/english.txt), MIT License:
+see THIRD_PARTY_LICENSES for where they are used and their license texts.
+
+The icon and banner artwork (assets/, docs/images/banner.png) was made for
+Homa Lawn and is licensed with the rest of this repository; see
+assets/README.md.
+
+Theme names and wallpapers shown in the screenshots under docs/images come from
+Omarchy (https://github.com/basecamp/omarchy) and belong to their authors.

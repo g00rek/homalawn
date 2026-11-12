@@ -1,0 +1,1543 @@
+From fbefeba88d225c56003828d2c610e32e9e36a0ab Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 17:31:46 +0200
+Subject: [PATCH] Homa Lawn: one look per computer (patch 0031)
+
+---
+ lawnchair/res/values/homar_strings.xml        |   8 +-
+ .../app/lawnchair/omalawn/HomaLawnAbout.kt    |  12 +-
+ .../src/app/lawnchair/omalawn/LookBook.kt     | 389 ++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  80 ++--
+ .../omalawn/OmalawnControlProvider.kt         |  31 ++
+ .../app/lawnchair/omalawn/ThemeWallpapers.kt  | 172 +++++---
+ .../omalawn/ThemeWallpapersScreen.kt          |  91 +++-
+ .../lawnchair/omalawn/link/ComputersScreen.kt | 214 +++++++++-
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |   4 +
+ 9 files changed, 895 insertions(+), 106 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+
+diff --git a/lawnchair/res/values/homar_strings.xml b/lawnchair/res/values/homar_strings.xml
+index 0af9089a3a..1c0041b1ac 100644
+--- a/lawnchair/res/values/homar_strings.xml
++++ b/lawnchair/res/values/homar_strings.xml
+@@ -10,10 +10,15 @@
+     <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
+     <string name="homar_wallpapers_theme">Omarchy theme: %1$s</string>
+     <string name="homar_wallpapers_sync_off">Wallpaper sync is off for this phone. Turn it on in Homa Lawn on your computer.</string>
+-    <string name="homar_wallpapers_nothing_yet">Your computer has not sent its theme\'s wallpapers yet. They appear here once Homa Lawn on your computer is connected to this phone.</string>
++    <string name="homar_wallpapers_book_unreadable">The looks stored on this phone can\'t be read. Forget all computers to clear them.</string>
+     <string name="homar_wallpapers_update_computer">Update Homa Lawn on your computer to choose the lock screen and home screen wallpapers here.</string>
+     <string name="homar_wallpapers_empty">This theme has no wallpapers.</string>
+     <string name="homar_wallpapers_no_gradients">This theme has no colours to make gradients from.</string>
++    <string name="homar_wallpapers_from">From %1$s</string>
++    <string name="homar_wallpapers_changed_last">(changed last)</string>
++    <string name="homar_wallpapers_not_sent">%1$s has not sent its wallpapers yet.</string>
++    <string name="homar_wallpapers_none_sent">No computer has sent its wallpapers yet.</string>
++    <string name="homar_wallpapers_source_changed">The look now comes from %1$s; choose again.</string>
+     <string name="homar_wallpapers_applying">Applying…</string>
+     <string name="homar_wallpapers_selected">selected</string>
+     <string name="homar_wallpapers_discard">Discard</string>
+@@ -53,4 +58,5 @@
+     <string name="homalawn_about_github">Lawnchair on GitHub</string>
+     <string name="homalawn_about_github_description">Source code and the people who made it</string>
+     <string name="homalawn_about_licences">Open-source licences</string>
++    <string name="homalawn_about_flux">Flux — MIT License</string>
+ </resources>
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+index 050f77cede..28ef75a717 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnAbout.kt
+@@ -111,13 +111,23 @@ fun HomaLawnAbout(modifier: Modifier = Modifier) {
+         }
+         item { Spacer(Modifier.height(3.dp)) }
+         item {
+-            PreferenceGroupItem(cutTop = true, cutBottom = false) {
++            PreferenceGroupItem(cutTop = true, cutBottom = true) {
+                 NavigationActionPreference(
+                     label = stringResource(R.string.homalawn_about_licences),
+                     destination = AboutLicenses,
+                 )
+             }
+         }
++        item { Spacer(Modifier.height(3.dp)) }
++        item {
++            PreferenceGroupItem(cutTop = true, cutBottom = false) {
++                Text(
++                    text = stringResource(R.string.homalawn_about_flux),
++                    style = MaterialTheme.typography.bodyLarge,
++                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
++                )
++            }
++        }
+     }
+ }
+ 
+diff --git a/lawnchair/src/app/lawnchair/omalawn/LookBook.kt b/lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+new file mode 100644
+index 0000000000..fe35b85a22
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/LookBook.kt
+@@ -0,0 +1,389 @@
++// Adapted from Flux (https://github.com/bjarneo/flux), MIT License, Copyright (c) 2026 Bjarne Oeverli
++// (android/.../theme/ThemeBook.kt and core/ComputerThemes.kt): one look per computer, the last
++// change, the scope. Differences: a look's time is the computer's changed_at (clamped to now), not
++// its arrival; looks carry the colour settings and pictures, and show() puts one on the screen.
++package app.lawnchair.omalawn
++
++import android.app.WallpaperManager
++import android.content.Context
++import app.lawnchair.omalawn.link.LinkServer
++import app.lawnchair.omalawn.link.Pins
++import java.io.File
++import java.util.UUID
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import org.json.JSONArray
++import org.json.JSONObject
++
++/**
++ * The look of every paired computer (spec section 6). files/omalawn/looks/book.json holds
++ * {scope, last, applied, computers: {fp: {key, changed_at, theme, prefs, parts, sent}}};
++ * looks/<fp>/<part>.img the pictures. Source = scope, else last. No book.json is an empty book; one
++ * that cannot be read is an error every caller sees (look_book_unreadable), never an empty book.
++ */
++object LookBook {
++    /**
++     * [parts] are the pictures held for this computer, a subset of [PARTS]; [sent] those its last
++     * put brought, which are all a `look_show` sets (a local show sets every part).
++     */
++    data class Entry(
++        val fp: String,
++        val key: String,
++        val changedAt: Long,
++        val theme: String,
++        val prefs: JSONArray,
++        val parts: Set<String>,
++        val sent: Set<String> = parts,
++    )
++
++    data class Applied(val fp: String, val key: String, val at: Long, val systemId: Int, val lockId: Int)
++
++    val PARTS = setOf("home", "lock")
++    private val SENT_PARTS = PARTS + "both" // look_put's pictures: "both" is one picture for home and lock
++    private const val BOOK = "book.json"
++    const val UNREADABLE = "look_book_unreadable"
++    private val KEY = Regex("[0-9a-f]{16}")
++
++    private val lock = Any()
++    private var loaded = false
++    private var listening = false
++    private val entries = LinkedHashMap<String, Entry>()
++    private var last: String? = null
++    private var scope: String? = null
++    private var applied: Applied? = null
++    private val _changes = MutableStateFlow(0)
++    val changes: StateFlow<Int> = _changes.asStateFlow()
++
++    fun dir(ctx: Context) = File(OmalawnCommands.privateDir(ctx), "looks").apply { mkdirs() }
++
++    /** Where [fp]'s [part] picture lives. Loads the book first, so its clean-up of unknown folders never meets a picture written for the put that follows. */
++    fun picture(ctx: Context, fp: String, part: String): File = synchronized(lock) {
++        load(ctx)
++        File(File(dir(ctx), fp), "$part.img")
++    }
++
++    /** Runs [body] and keeps its changes only if it returns normally (it ends with [save]); otherwise memory goes back to what the disk holds. */
++    private inline fun <T> change(ctx: Context, body: () -> T): T {
++        load(ctx)
++        val before = Triple(LinkedHashMap(entries), last, scope)
++        val was = applied
++        val result = try {
++            body()
++        } catch (t: Throwable) {
++            entries.clear()
++            entries.putAll(before.first)
++            last = before.second
++            scope = before.third
++            applied = was
++            throw t
++        }
++        // the look now comes from another computer: what the old one's wallpaper choice waits for is void (spec 6.5)
++        val from = before.third ?: before.second
++        if (from != null && from != (scope ?: last)) ThemeWallpapers.drop(ctx, from)
++        return result
++    }
++
++    /**
++     * Stores [e] as the look of its computer; true when the book changed. A put naming only some
++     * parts keeps the stored pictures of the parts it does not name (the entry's parts are the union).
++     */
++    fun put(ctx: Context, e: Entry, now: Long = System.currentTimeMillis()): Boolean = synchronized(lock) {
++        change(ctx) { putLocked(ctx, e, now) }
++    }
++
++    private fun putLocked(ctx: Context, e: Entry, now: Long): Boolean {
++        val old = entries[e.fp]
++        if (old?.key == e.key) {
++            val parts = e.parts + old.parts
++            if (last != null && parts == old.parts && e.sent == old.sent) return false
++            entries[e.fp] = old.copy(parts = parts, sent = e.sent)
++            if (last == null) last = e.fp
++            save(ctx)
++            return true
++        }
++        val entry = e.copy(changedAt = e.changedAt.coerceAtMost(now), parts = e.parts + (old?.parts ?: emptySet()))
++        entries.remove(e.fp)
++        entries[e.fp] = entry
++        val cur = last?.let { entries[it] }
++        val takes = when {
++            last == null || last == e.fp -> true
++            old == null -> false // a new computer does not take over
++            else -> entry.changedAt >= (cur?.changedAt ?: Long.MIN_VALUE)
++        }
++        if (takes) last = e.fp
++        save(ctx)
++        return true
++    }
++
++    /** The computer is no longer paired (forgotten or unpaired itself): its look and pictures go. */
++    fun forget(ctx: Context, fp: String) = synchronized(lock) {
++        change(ctx) { forgetLocked(ctx, fp) }
++    }
++
++    private fun forgetLocked(ctx: Context, fp: String) {
++        if (entries.remove(fp) == null) {
++            if (scope == fp) {
++                scope = null
++                save(ctx)
++            }
++            return
++        }
++        File(dir(ctx), fp).deleteRecursively()
++        if (last == fp) last = entries.values.maxByOrNull { it.changedAt }?.fp
++        if (scope == fp) scope = null
++        // `applied` stays even when it names fp: the screen still shows that look until the next show
++        save(ctx)
++    }
++
++    /** [fp] must be a paired computer (or null = latest change). */
++    fun setScope(ctx: Context, fp: String?) = synchronized(lock) {
++        change(ctx) {
++            require(fp == null || Pins.isPinned(ctx, fp)) { "not a paired computer" }
++            scope = fp
++            save(ctx)
++        }
++    }
++
++    fun scope(ctx: Context) = synchronized(lock) { load(ctx); scope }
++    fun last(ctx: Context) = synchronized(lock) { load(ctx); last }
++    fun source(ctx: Context) = synchronized(lock) { load(ctx); scope ?: last }
++    fun entry(ctx: Context, fp: String) = synchronized(lock) { load(ctx); entries[fp] }
++    fun applied(ctx: Context) = synchronized(lock) { load(ctx); applied }
++
++    internal fun setApplied(ctx: Context, a: Applied?) = synchronized(lock) {
++        change(ctx) {
++            applied = a
++            save(ctx)
++        }
++    }
++
++    /**
++     * The screen was written by something other than [show] (a link or adb wallpaper_set,
++     * pref_set, prefs_set_many or wallpaper_lock_reset; undo uses them): `applied` means "the screen
++     * holds exactly this look", so it goes, and the next put of that look is shown again. An
++     * unreadable book has no `applied` to clear (only reset leaves that state, and reset clears
++     * everything), so the write goes ahead; the look commands still report it.
++     */
++    fun screenWritten(ctx: Context) = synchronized(lock) {
++        try {
++            load(ctx)
++        } catch (e: OmalawnError) {
++            if (e.code == UNREADABLE) return@synchronized
++            throw e
++        }
++        if (applied != null) setApplied(ctx, null)
++    }
++
++    /** An empty book, no pictures (also out of an unreadable one, so it does not load it): "Forget all computers" and the tests. */
++    internal fun reset(ctx: Context) = synchronized(lock) {
++        listen(ctx)
++        entries.clear()
++        last = null
++        scope = null
++        applied = null
++        dir(ctx).listFiles()?.forEach { it.deleteRecursively() }
++        loaded = true
++        save(ctx)
++    }
++
++    /** Test hook: book.json becomes unreadable and memory forgets it, as a new process would; open screens are told. */
++    internal fun corrupt(ctx: Context) = synchronized(lock) {
++        File(dir(ctx), BOOK).writeText("{not json")
++        entries.clear()
++        last = null
++        scope = null
++        applied = null
++        loaded = false
++        _changes.value++ // screens that are open read the book again
++    }
++
++    /**
++     * `launcher.look_put` from the paired computer [fp] (spec 6.2): moves the staged pictures into
++     * looks/<fp>/ and stores the look; never touches the screen. `show` is true when [fp] is the
++     * source and this look is not the one on the screen.
++     */
++    fun putFromLink(ctx: Context, fp: String, p: JSONObject): JSONObject {
++        val key = p.optString("key").takeIf { KEY.matches(it) }
++            ?: throw OmalawnError(LinkServer.BAD_PARAMS, "${LinkServer.BAD_PARAMS}: key must be 16 lowercase hex characters")
++        val prefs = p.optJSONArray("prefs") ?: JSONArray()
++        try {
++            OmalawnCommands.checkPrefWrites(prefs)
++        } catch (e: Exception) {
++            throw OmalawnError(LinkServer.BAD_PARAMS, "${LinkServer.BAD_PARAMS}: prefs: ${e.message}")
++        }
++        val pics = p.optJSONObject("pictures") ?: JSONObject()
++        val staged = pics.keys().asSequence().toList().associateWith { part ->
++            if (part !in SENT_PARTS) throw OmalawnError(LinkServer.BAD_PARAMS, "${LinkServer.BAD_PARAMS}: pictures.$part")
++            File(pics.optString(part)).canonicalFile.also {
++                if (it.parentFile != OmalawnCommands.privateDir(ctx).canonicalFile || !it.isFile) {
++                    throw OmalawnError(LinkServer.BAD_PATH, "${LinkServer.BAD_PATH}: stage pictures with launcher.stage_file")
++                }
++            }
++        }
++        val parts = mutableSetOf<String>()
++        for ((part, src) in staged) {
++            val targets = if (part == "both") PARTS else setOf(part)
++            targets.forEach { t -> src.copyTo(picture(ctx, fp, t).apply { parentFile?.mkdirs() }, overwrite = true) }
++            src.delete()
++            parts += targets
++        }
++        put(ctx, Entry(fp, key, p.optLong("changed_at"), p.optString("theme").take(120), prefs, parts))
++        val src = source(ctx)
++        val show = src == fp && applied(ctx)?.let { it.fp == fp && it.key == key } != true
++        return JSONObject().put("stored", true).put("show", show)
++            .put("source", src?.let { who(ctx, it) } ?: JSONObject.NULL)
++            .put("scope", if (scope(ctx) == null) "latest" else "chosen")
++    }
++
++    /** `launcher.look_show`: [fp]'s look goes on the screen, if [fp] is still the source and its key the stored one. */
++    fun showFromLink(ctx: Context, fp: String, p: JSONObject): JSONObject {
++        if (source(ctx) != fp) throw OmalawnError("not_source", "not_source: the phone shows another computer's look now")
++        val e = entry(ctx, fp)
++        if (e?.key != p.optString("key")) throw OmalawnError("stale_key", "stale_key: send look_put again")
++        show(ctx, fp, e.sent)
++        return JSONObject().put("shown", true)
++    }
++
++    /**
++     * The one way a look reaches the screen (spec 6.3): its settings in one commit, then the home
++     * picture, then the lock one; [parts] limits the pictures (a `look_show` sets those its put sent).
++     */
++    fun show(ctx: Context, fp: String, parts: Set<String>? = null): Applied {
++        val e = entry(ctx, fp) ?: throw OmalawnError("no_look", "no_look: this computer has sent no look")
++        val set = parts ?: e.parts
++        if (e.prefs.length() > 0) OmalawnCommands.applyPrefWrites(ctx, e.prefs) // one commit, one reload
++        val wm = WallpaperManager.getInstance(ctx)
++        var sys = wm.getWallpaperId(WallpaperManager.FLAG_SYSTEM)
++        var lockId = wm.getWallpaperId(WallpaperManager.FLAG_LOCK)
++        if ("home" in set) sys = OmalawnCommands.setWallpaper(ctx, picture(ctx, fp, "home"), WallpaperManager.FLAG_SYSTEM)
++        if ("lock" in set) lockId = OmalawnCommands.setWallpaper(ctx, picture(ctx, fp, "lock"), WallpaperManager.FLAG_LOCK)
++        val a = Applied(fp, e.key, System.currentTimeMillis(), sys, lockId)
++        setApplied(ctx, a)
++        return a
++    }
++
++    /** A local show of [fp]'s look would replace a picture set by something else since the book last showed one. */
++    fun needsReplace(ctx: Context, fp: String): Boolean {
++        val e = entry(ctx, fp) ?: return false
++        val a = applied(ctx) ?: return e.parts.isNotEmpty()
++        val wm = WallpaperManager.getInstance(ctx)
++        return ("home" in e.parts && wm.getWallpaperId(WallpaperManager.FLAG_SYSTEM) != a.systemId) ||
++            ("lock" in e.parts && wm.getWallpaperId(WallpaperManager.FLAG_LOCK) != a.lockId)
++    }
++
++    /** `launcher.look_state` for the calling computer [fp]. */
++    fun state(ctx: Context, fp: String): JSONObject {
++        val a = applied(ctx)
++        val e = entry(ctx, fp)
++        return JSONObject()
++            .put("source", source(ctx)?.let { who(ctx, it) } ?: JSONObject.NULL)
++            .put("scope", if (scope(ctx) == null) "latest" else "chosen")
++            .put("you", JSONObject().put("key", e?.key ?: JSONObject.NULL).put("shown", e != null && a?.fp == fp && a.key == e.key))
++            .put("applied", a?.let { who(ctx, it.fp).put("at", it.at) } ?: JSONObject.NULL)
++    }
++
++    private fun who(ctx: Context, fp: String) = JSONObject().put("fp", fp).put("name", Pins.name(ctx, fp) ?: "")
++
++    fun toJson(ctx: Context): JSONObject = synchronized(lock) {
++        load(ctx)
++        JSONObject().apply {
++            put("scope", scope ?: JSONObject.NULL)
++            put("last", last ?: JSONObject.NULL)
++            put("source", (scope ?: last) ?: JSONObject.NULL)
++            put("now", System.currentTimeMillis())
++            put("applied", applied?.let(::appliedJson) ?: JSONObject.NULL)
++            put(
++                "computers",
++                JSONObject().also { c ->
++                    entries.values.forEach { e ->
++                        c.put(
++                            e.fp,
++                            JSONObject().put("key", e.key).put("changed_at", e.changedAt).put("theme", e.theme)
++                                .put("parts", JSONArray(e.parts.sorted())).put("sent", JSONArray(e.sent.sorted())),
++                        )
++                    }
++                },
++            )
++        }
++    }
++
++    private fun appliedJson(a: Applied) =
++        JSONObject().put("fp", a.fp).put("key", a.key).put("at", a.at).put("system_id", a.systemId).put("lock_id", a.lockId)
++
++    private fun text(o: JSONObject, k: String): String? = if (o.isNull(k)) null else o.optString(k).ifEmpty { null }
++
++    /** The book hears of every removal itself: the Computers screen forgets without the link server. */
++    private fun listen(ctx: Context) {
++        if (listening) return
++        listening = true
++        val app = ctx.applicationContext
++        Pins.onRemoved { fp -> forget(app, fp) }
++    }
++
++    /**
++     * Reads the book once per process; only computers that are still paired are kept, the rest lose
++     * their folders. A book.json that cannot be read throws [UNREADABLE] and stays unloaded, so every
++     * later call says so too.
++     */
++    private fun load(ctx: Context) {
++        if (loaded) return
++        listen(ctx)
++        val f = File(dir(ctx), BOOK)
++        if (!f.exists()) {
++            loaded = true
++            return
++        }
++        val o = try {
++            JSONObject(f.readText())
++        } catch (e: Exception) {
++            throw OmalawnError(UNREADABLE, "$UNREADABLE: the phone's record of computer looks cannot be read (${e.javaClass.simpleName}: ${e.message})")
++        }
++        loaded = true
++        val cs = o.optJSONObject("computers") ?: JSONObject()
++        for (fp in cs.keys().asSequence().toList()) {
++            val c = cs.optJSONObject(fp) ?: continue
++            if (!Pins.isPinned(ctx, fp)) continue
++            fun held(k: String) = c.optJSONArray(k)?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
++                .filter { it in PARTS && picture(ctx, fp, it).isFile }.toSet()
++            entries[fp] = Entry(fp, c.optString("key"), c.optLong("changed_at"), c.optString("theme"), c.optJSONArray("prefs") ?: JSONArray(), held("parts"), held("sent"))
++        }
++        dir(ctx).listFiles()?.forEach { if (it.isDirectory && it.name !in entries) it.deleteRecursively() }
++        // the remaining look that changed most recently takes over, as when a computer is forgotten
++        last = text(o, "last")?.takeIf { it in entries } ?: entries.values.maxByOrNull { it.changedAt }?.fp
++        scope = text(o, "scope")?.takeIf { Pins.isPinned(ctx, it) }
++        applied = o.optJSONObject("applied")?.let {
++            Applied(it.optString("fp"), it.optString("key"), it.optLong("at"), it.optInt("system_id"), it.optInt("lock_id"))
++        }
++    }
++
++    private fun save(ctx: Context) {
++        val o = JSONObject().apply {
++            put("scope", scope ?: JSONObject.NULL)
++            put("last", last ?: JSONObject.NULL)
++            put("applied", applied?.let(::appliedJson) ?: JSONObject.NULL)
++            put(
++                "computers",
++                JSONObject().also { c ->
++                    entries.values.forEach { e ->
++                        c.put(
++                            e.fp,
++                            JSONObject().put("key", e.key).put("changed_at", e.changedAt).put("theme", e.theme)
++                                .put("prefs", e.prefs).put("parts", JSONArray(e.parts.sorted()))
++                                .put("sent", JSONArray(e.sent.sorted())),
++                        )
++                    }
++                },
++            )
++        }
++        val f = File(dir(ctx), BOOK)
++        val tmp = File(f.parentFile, ".book-${UUID.randomUUID()}")
++        try {
++            tmp.writeText(o.toString())
++            if (!tmp.renameTo(f)) error("cannot write $BOOK")
++        } finally {
++            tmp.delete()
++        }
++        _changes.value++
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index beaf51afda..230883377c 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -66,6 +66,8 @@ object OmalawnCommands {
+         "launcher.wallpaper_lock_reset",
+         "launcher.layout_export",
+         "launcher.layout_import",
++        "launcher.look_show", // settings and pictures (patch 0031)
++        "launcher.look_put", // copies over the pictures a local show of the same computer reads (patch 0031)
+     )
+     private const val LOCK_WAIT_S = 90L
+     private val lock = ReentrantLock(true)
+@@ -95,20 +97,24 @@ object OmalawnCommands {
+                 .put("db", InvariantDeviceProfile.INSTANCE.get(ctx).dbFile ?: JSONObject.NULL)
+             "launcher.prefs_list" -> prefsList(ctx)
+             "launcher.pref_set" -> {
++                LookBook.screenWritten(ctx) // before the write: `applied` no longer holds
+                 prefSet(ctx, params)
+                 JSONObject()
+             }
+             "launcher.prefs_set_many" -> {
+-                prefSetMany(ctx, writes(params))
++                LookBook.screenWritten(ctx)
++                applyPrefWrites(ctx, writes(params))
+                 JSONObject()
+             }
+             "launcher.wallpaper_info" -> wallpaperInfo(ctx)
+             "launcher.wallpaper_backup" -> wallpaperBackup(ctx, which(params, allowBoth = false))
+             "launcher.wallpaper_set" -> {
++                LookBook.screenWritten(ctx)
+                 wallpaperSet(ctx, str(params, "path") ?: error("path required"), which(params, allowBoth = true))
+                 JSONObject()
+             }
+             "launcher.wallpaper_lock_reset" -> {
++                LookBook.screenWritten(ctx)
+                 wallpaperLockReset(ctx)
+                 JSONObject()
+             }
+@@ -116,9 +122,9 @@ object OmalawnCommands {
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
+             "launcher.app_icons" -> AppIcons.appIcons(ctx, params) // patch 0016
+             "launcher.widget_previews" -> AppIcons.widgetPreviews(ctx, params) // patch 0016
+-            "launcher.theme_wallpapers_set" -> ThemeWallpapers.set(ctx, params) // patch 0017
+-            "launcher.theme_wallpaper_choice" -> ThemeWallpapers.choice(ctx) // patch 0017
+-            "launcher.theme_wallpaper_ack" -> ThemeWallpapers.ack(ctx, params) // patch 0017
++            "launcher.theme_wallpapers_set" -> ThemeWallpapers.set(ctx, caller ?: linkOnly(), params) // patch 0017
++            "launcher.theme_wallpaper_choice" -> ThemeWallpapers.choice(ctx, caller ?: linkOnly()) // patch 0017
++            "launcher.theme_wallpaper_ack" -> ThemeWallpapers.ack(ctx, caller ?: linkOnly(), params) // patch 0017
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+             "launcher.nova_convert" -> NovaIo.convert(ctx, params) // patch 0012
+@@ -126,6 +132,10 @@ object OmalawnCommands {
+             "launcher.app_info" -> OmalawnUpdate.appInfo(ctx)
+             "launcher.update_status" -> OmalawnUpdate.status(ctx)
+             "launcher.device_profile" -> DeviceGeometry.read(ctx) // patch 0021
++            // one look per computer (patch 0031), see LookBook
++            "launcher.look_put" -> LookBook.putFromLink(ctx, caller ?: linkOnly(), params)
++            "launcher.look_show" -> LookBook.showFromLink(ctx, caller ?: linkOnly(), params)
++            "launcher.look_state" -> LookBook.state(ctx, caller ?: linkOnly())
+             else -> if (method.startsWith("screen.")) ScreenCommands.dispatch(ctx, method, params) else throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+@@ -134,6 +144,8 @@ object OmalawnCommands {
+         throw OmalawnError("failed", "${e.javaClass.simpleName}: ${e.message}")
+     }
+ 
++    private fun linkOnly(): Nothing = throw OmalawnError("link_only", "link_only: this comes from a paired computer over the link")
++
+     const val UNKNOWN_METHOD = "unknown_method"
+     const val LINK_VERSION = 1
+     private const val ENSURE_WAIT_S = 10L
+@@ -274,35 +286,41 @@ object OmalawnCommands {
+         )
+     }
+ 
+-    /** Several keys in one commit and a single reload, like Lawnchair's own grid screen (batchEdit). */
+-    private fun prefSetMany(ctx: Context, arr: JSONArray) {
+-        applyPrefs(
+-            ctx,
+-            (0 until arr.length()).map {
+-                val o = arr.getJSONObject(it)
+-                if (o.optBoolean("remove")) {
+-                    PrefWrite(o.getString("store"), o.getString("key"), "remove", "")
+-                } else {
+-                    PrefWrite(o.getString("store"), o.getString("key"), o.getString("type"), o.getString("value"))
+-                }
+-            },
+-        )
++    /**
++     * Several keys in one commit and a single reload, like Lawnchair's own grid screen (batchEdit):
++     * `prefs_set_many` and a look's settings (LookBook.show). [arr] holds {store,key,type,value} or
++     * {store,key,remove:true}.
++     */
++    fun applyPrefWrites(ctx: Context, arr: JSONArray) = applyPrefs(ctx, prefWrites(arr))
++
++    /** Throws what [applyPrefWrites] would refuse [arr] for, writing nothing (a look is checked when it arrives). */
++    fun checkPrefWrites(arr: JSONArray) = validate(prefWrites(arr))
++
++    private fun prefWrites(arr: JSONArray) = (0 until arr.length()).map {
++        val o = arr.getJSONObject(it)
++        if (o.optBoolean("remove")) {
++            PrefWrite(o.getString("store"), o.getString("key"), "remove", "")
++        } else {
++            PrefWrite(o.getString("store"), o.getString("key"), o.getString("type"), o.getString("value"))
++        }
+     }
+ 
+     private class PrefWrite(val store: String, val key: String, val type: String, val value: String)
+ 
++    private fun validate(writes: List<PrefWrite>) = writes.forEach {
++        when (it.type) {
++            "bool" -> it.value.toBooleanStrict()
++            "int" -> it.value.toInt()
++            "float" -> it.value.toFloat()
++            "string", "remove" -> Unit
++            else -> error("bad type ${it.type}")
++        }
++        if (it.store != "datastore" && it.store != "shared") error("bad store ${it.store}")
++    }
++
+     private fun applyPrefs(ctx: Context, writes: List<PrefWrite>) {
+         // Parse everything first so a bad entry changes nothing.
+-        writes.forEach {
+-            when (it.type) {
+-                "bool" -> it.value.toBooleanStrict()
+-                "int" -> it.value.toInt()
+-                "float" -> it.value.toFloat()
+-                "string", "remove" -> Unit
+-                else -> error("bad type ${it.type}")
+-            }
+-            if (it.store != "datastore" && it.store != "shared") error("bad store ${it.store}")
+-        }
++        validate(writes)
+         val ds = writes.filter { it.store == "datastore" }
+         if (ds.isNotEmpty()) {
+             runBlocking {
+@@ -443,11 +461,13 @@ object OmalawnCommands {
+         privateDir(ctx)
+         File(path).takeIf { it.parentFile?.canonicalFile == File(ctx.filesDir, "omalawn").canonicalFile }
+             ?.let { if (it.exists()) private600(it) }
+-        File(path).inputStream().use {
+-            WallpaperManager.getInstance(ctx).setStream(it, null, true, which)
+-        }
++        setWallpaper(ctx, File(path), which)
+     }
+ 
++    /** Sets [file] as the [which] wallpaper; returns the id Android gave it (setStream's result). The one way a picture is set. */
++    fun setWallpaper(ctx: Context, file: File, which: Int): Int =
++        file.inputStream().use { WallpaperManager.getInstance(ctx).setStream(it, null, true, which) }
++
+     /** Drops the lock screen's own wallpaper, so the lock screen shows the home one again. */
+     private fun wallpaperLockReset(ctx: Context) {
+         val wm = WallpaperManager.getInstance(ctx)
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 354b538368..03065047c4 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -64,6 +64,11 @@ class OmalawnControlProvider : ContentProvider() {
+      * pending request, as an app with notification access could; it must pin nothing.
+      * `debug_pin <fp> [name=…]` and `debug_unpin <fp>` add/remove a link pin without pairing;
+      * `debug_forget <fp>` forgets a computer as the phone does (a tombstone is left);
++     * `debug_walls` reads each computer's wallpaper list back (`{fp: {theme, choice_at}}`), `debug_walls_choice "<fp> <json>"`
++     * makes that computer's Apply, `debug_look_book` reads the look book back, `debug_look_reset` empties it, `debug_look_put <json>`
++     * stores a look ({fp, key, changed_at, theme, parts?}, a one-byte picture per named part),
++     * `debug_look_scope <fp>` sets the scope ("" = latest change), `debug_look_corrupt` makes
++     * book.json unreadable and unloads it (patch 0031);
+      * `debug_computers` lists them (`{"computers":[{fp,name,added,seen,online}]}`).
+      * `debug_pair_reset` forgets the pairing rate window and cool-down; `debug_pair_fire_stale` fires
+      * the Review action of the last ended pairing (must be dead), `debug_pair_fire_current` the
+@@ -99,6 +104,32 @@ class OmalawnControlProvider : ContentProvider() {
+                         },
+                     ),
+                 )
++                "debug_look_book" -> return ok(LookBook.toJson(ctx))
++                // the computers' wallpaper lists: {fp: theme}; the choice each holds is {fp: {at, ...}}
++                "debug_walls" -> return ok(
++                    JSONObject().apply {
++                        ThemeWallpapers.load(ctx)
++                        ThemeWallpapers.state.value.forEach { (fp, st) ->
++                            put(fp, JSONObject().put("theme", st.theme ?: JSONObject.NULL).put("choice_at", st.choice?.at ?: JSONObject.NULL))
++                        }
++                    },
++                )
++                // `debug_walls_choice <fp> <json>`: that computer's Apply of a look {screens, layer?, wallpaper?}
++                "debug_walls_choice" -> {
++                    val (fp, json) = (arg ?: return fail("fp and json required")).split(' ', limit = 2).takeIf { it.size == 2 } ?: return fail("fp and json required")
++                    val look = ThemeWallpapers.Look.fromJson(JSONObject(json)) ?: return fail("bad look")
++                    return ok(JSONObject().put("applied", ThemeWallpapers.apply(ctx, fp, look)))
++                }
++                "debug_look_reset" -> LookBook.reset(ctx)
++                "debug_look_put" -> {
++                    val j = JSONObject(arg ?: return fail("json required"))
++                    val parts = j.optJSONArray("parts")?.let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }.orEmpty()
++                    val fp = j.getString("fp")
++                    parts.forEach { LookBook.picture(ctx, fp, it).apply { parentFile?.mkdirs() }.writeBytes(byteArrayOf(1)) }
++                    LookBook.put(ctx, LookBook.Entry(fp, j.getString("key"), j.getLong("changed_at"), j.optString("theme"), org.json.JSONArray(), parts))
++                }
++                "debug_look_scope" -> LookBook.setScope(ctx, arg?.ifEmpty { null })
++                "debug_look_corrupt" -> LookBook.corrupt(ctx)
+                 "debug_pair_reset" -> Pairing.resetRateLimit()
+                 "debug_allow_local_pairing" -> {
+                     val on = when (arg) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
+index 5e15c269c3..a4c3d15764 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapers.kt
+@@ -2,6 +2,7 @@ package app.lawnchair.omalawn
+ 
+ import android.content.Context
+ import android.util.Base64
++import app.lawnchair.omalawn.link.Pins
+ import java.io.File
+ import java.util.UUID
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -12,7 +13,10 @@ import org.json.JSONObject
+ 
+ /**
+  * The "Wallpaper from Omarchy" screen's data (patch 0017): what the computer offers this phone's
+- * lock screen and home screen, and the choice made here.
++ * lock screen and home screen, and the choice made here. Every computer has its own list and its
++ * own pending choice (patch 0031): the methods below act on the caller's, `state` holds them by
++ * fingerprint, and the screen shows the list of the computer the look comes from
++ * ([LookBook.source]). A computer's list goes when it is forgotten or unpaired ([forget]).
+  *
+  * `launcher.theme_wallpapers_set {enabled, theme, current_id, message, target, items, gradients,
+  * screens, layer, thumbs}` replaces the list and stores the given thumbnails (base64 JPEG, one file
+@@ -37,7 +41,7 @@ import org.json.JSONObject
+  * app update, or the list on disk came from the older format the computer sent an older build): the
+  * computer then sends the whole list again. A failed ack with code `wallpaper_unsaved` (the current
+  * wallpaper cannot be saved first) makes the screen ask "Replace current wallpaper?"; its Replace
+- * stores the same choice again with `overwrite: true`. Everything lives in files/omalawn/walls/, so
++ * stores the same choice again with `overwrite: true`. Everything lives in files/omalawn/walls/<fp>/, so
+  * the last list and pictures stay on the phone while the computer is away. The change of wallpaper
+  * itself is the computer's: nothing here touches the wallpaper.
+  */
+@@ -133,6 +137,7 @@ object ThemeWallpapers {
+     )
+ 
+     data class State(
++        val fp: String? = null, // the computer this is the list of (where its pictures are)
+         val known: Boolean = false, // the computer has sent a list at least once
+         val enabled: Boolean = false, // this phone's wallpaper sync is on
+         val theme: String? = null,
+@@ -148,6 +153,7 @@ object ThemeWallpapers {
+         val unsaved: Look? = null, // the last choice failed as wallpaper_unsaved: the screen asks to replace
+         val pictures: Int = 0, // bumped whenever thumbnails arrive
+         val applied: Int = 0, // bumped whenever the computer reports a choice applied
++        val dropped: Boolean = false, // a waiting choice was dropped because the look came from another computer
+     ) {
+         val screens: Map<String, Sel> get() = look.screens
+         val layer: Map<String, Int> get() = look.layer
+@@ -172,20 +178,36 @@ object ThemeWallpapers {
+         }
+     }
+ 
+-    private val _state = MutableStateFlow(State())
+-    val state: StateFlow<State> = _state.asStateFlow()
++    private val _state = MutableStateFlow<Map<String, State>>(emptyMap())
++    val state: StateFlow<Map<String, State>> = _state.asStateFlow()
+ 
+     private val lock = Any()
+     private var loaded = false
+-    private var listed = false // a list in the current format (per screen) arrived in this process
++    private var listening = false
++    private val listed = mutableSetOf<String>() // computers whose list in the current format (per screen) arrived in this process
++    private val FP = Regex("[0-9a-f]{64}")
+     private val KEY = Regex("[0-9a-f]{16}")
+     private const val INDEX = "index.json"
+     private const val CHOICE = "choice.json"
+     const val UNSAVED = "wallpaper_unsaved"
+ 
+-    private fun dir(ctx: Context): File = File(OmalawnCommands.privateDir(ctx), "walls").apply { mkdirs() }
++    private fun root(ctx: Context): File = File(OmalawnCommands.privateDir(ctx), "walls").apply { mkdirs() }
+ 
+-    fun thumbFile(ctx: Context, key: String): File? = if (KEY.matches(key)) File(dir(ctx), "$key.jpg") else null
++    private fun dir(ctx: Context, fp: String): File {
++        require(FP.matches(fp)) { "fingerprint must be 64 lowercase hex characters" }
++        return File(root(ctx), fp).apply { mkdirs() }
++    }
++
++    /** Where a picture is (or goes); reading never creates the computer's folder. */
++    fun thumbFile(ctx: Context, fp: String, key: String): File? =
++        if (KEY.matches(key) && FP.matches(fp)) File(File(root(ctx), fp), "$key.jpg") else null
++
++    /** One computer's state; none yet is a state that knows nothing. */
++    fun stateFor(fp: String?): State = _state.value[fp] ?: State()
++
++    private fun put(fp: String, st: State) {
++        _state.value = _state.value + (fp to st.copy(fp = fp))
++    }
+ 
+     private fun screensFrom(o: JSONObject?): Map<String, Sel>? {
+         if (o == null) return null
+@@ -198,32 +220,72 @@ object ThemeWallpapers {
+     private fun screensJson(m: Map<String, Sel>): JSONObject =
+         JSONObject().apply { SCREENS.forEach { put(it, m.getValue(it).toJson()) } }
+ 
+-    /** Reads what the computer sent last, once per process. */
++    /**
++     * Reads what each paired computer sent last, once per process; the lists of computers that are
++     * not paired any more go, and so does the shared list of builds from before per-computer lists.
++     */
+     fun load(ctx: Context) {
+         synchronized(lock) {
+             if (loaded) return
+             loaded = true
+-            val d = dir(ctx)
+-            var st = State()
+-            runCatching { JSONObject(File(d, INDEX).readText()) }.getOrNull()?.let { st = fromIndex(it, st) }
+-            runCatching { JSONObject(File(d, CHOICE).readText()) }.getOrNull()?.let { c ->
+-                // a choice stored by a build from before the look model: layers and parallax as listed
+-                val look = Look.fromJson(c)?.let { l ->
+-                    if (c.has("wallpaper")) l else l.copy(layer = st.look.layer, parallax = st.look.parallax)
+-                }
+-                if (look != null && c.optLong("at") > 0) {
+-                    st = st.copy(
+-                        choice = Choice(
+-                            look,
+-                            c.optLong("at"),
+-                            c.optBoolean("received"),
+-                            c.optString("waiting").ifEmpty { null },
+-                            c.optBoolean("overwrite"),
+-                        ),
+-                    )
+-                }
++            val app = ctx.applicationContext
++            if (!listening) {
++                listening = true
++                Pins.onRemoved { fp -> forget(app, fp) }
+             }
+-            _state.value = st
++            val r = root(ctx)
++            File(r, INDEX).delete()
++            File(r, CHOICE).delete()
++            r.listFiles()?.filter { it.isFile && it.name.endsWith(".jpg") }?.forEach { it.delete() }
++            val all = mutableMapOf<String, State>()
++            r.listFiles()?.filter { it.isDirectory }?.forEach { d ->
++                if (!FP.matches(d.name) || !Pins.isPinned(ctx, d.name)) {
++                    d.deleteRecursively()
++                    return@forEach
++                }
++                var st = State()
++                runCatching { JSONObject(File(d, INDEX).readText()) }.getOrNull()?.let { st = fromIndex(it, st) }
++                runCatching { JSONObject(File(d, CHOICE).readText()) }.getOrNull()?.let { c ->
++                    val look = Look.fromJson(c)
++                    if (look != null && c.optLong("at") > 0) {
++                        st = st.copy(
++                            choice = Choice(
++                                look,
++                                c.optLong("at"),
++                                c.optBoolean("received"),
++                                c.optString("waiting").ifEmpty { null },
++                                c.optBoolean("overwrite"),
++                            ),
++                        )
++                    }
++                }
++                all[d.name] = st.copy(fp = d.name)
++            }
++            _state.value = all
++        }
++    }
++
++    /** The computer's list, pictures and choice are gone (it was forgotten or unpaired). */
++    fun forget(ctx: Context, fp: String) {
++        synchronized(lock) {
++            load(ctx)
++            if (FP.matches(fp)) File(root(ctx), fp).deleteRecursively()
++            listed.remove(fp)
++            _state.value = _state.value - fp
++        }
++    }
++
++    /**
++     * What the computer chose and waits for is dropped, its list stays (the look now comes from
++     * another; [LookBook] calls this whenever its source changes). [State.dropped] says so until
++     * the computer's next choice, for the screen's note.
++     */
++    fun drop(ctx: Context, fp: String) {
++        synchronized(lock) {
++            load(ctx)
++            val st = _state.value[fp] ?: return
++            File(dir(ctx, fp), CHOICE).delete()
++            put(fp, st.copy(choice = null, error = null, unsaved = null, dropped = st.choice != null))
+         }
+     }
+ 
+@@ -282,8 +344,8 @@ object ThemeWallpapers {
+         }
+     }
+ 
+-    private fun saveChoice(ctx: Context, c: Choice?) {
+-        val f = File(dir(ctx), CHOICE)
++    private fun saveChoice(ctx: Context, fp: String, c: Choice?) {
++        val f = File(dir(ctx, fp), CHOICE)
+         if (c == null) {
+             f.delete()
+             return
+@@ -294,15 +356,15 @@ object ThemeWallpapers {
+         write(f, o.toString().toByteArray())
+     }
+ 
+-    /** `launcher.theme_wallpapers_set`. */
+-    fun set(ctx: Context, params: JSONObject): JSONObject = synchronized(lock) {
++    /** `launcher.theme_wallpapers_set`, for the computer [fp]. */
++    fun set(ctx: Context, fp: String, params: JSONObject): JSONObject = synchronized(lock) {
+         load(ctx)
+-        val d = dir(ctx)
++        val d = dir(ctx, fp)
+         val thumbs = params.optJSONArray("thumbs") ?: JSONArray()
+         var stored = 0
+         for (i in 0 until thumbs.length()) {
+             val t = thumbs.optJSONObject(i) ?: continue
+-            val file = thumbFile(ctx, t.optString("key")) ?: throw OmalawnError("bad_params", "bad_params: thumbnail key")
++            val file = thumbFile(ctx, fp, t.optString("key")) ?: throw OmalawnError("bad_params", "bad_params: thumbnail key")
+             val bytes = try {
+                 Base64.decode(t.optString("jpeg"), Base64.DEFAULT)
+             } catch (e: IllegalArgumentException) {
+@@ -323,13 +385,14 @@ object ThemeWallpapers {
+             .put("layer", params.optJSONObject("layer") ?: JSONObject.NULL)
+             .put("format", params.optInt("format"))
+             .put("wallpaper", params.optJSONObject("wallpaper") ?: JSONObject.NULL)
+-        var st = fromIndex(index, _state.value)
+-        listed = st.perScreen
++        val before = stateFor(fp)
++        var st = fromIndex(index, before)
++        if (st.perScreen) listed.add(fp) else listed.remove(fp)
+         val c = st.choice
+         if (c != null && st.shows(c.look)) {
+             st = st.copy(choice = null, error = null) // the list shows the choice done
+         }
+-        if (st.choice == null) saveChoice(ctx, null)
++        if (st.choice == null) saveChoice(ctx, fp, null)
+         write(File(d, INDEX), index.toString().toByteArray())
+         val all = (st.items + st.gradients).flatMap { listOfNotNull(it.thumb, it.wide, it.lock) }.distinct()
+         val wanted = all.map { "$it.jpg" }.toSet()
+@@ -337,17 +400,18 @@ object ThemeWallpapers {
+         if (have.size == all.size) { // the list is complete: pictures of older lists go
+             d.listFiles()?.filter { it.name.endsWith(".jpg") && it.name !in wanted }?.forEach { it.delete() }
+         }
+-        _state.value = st.copy(pictures = _state.value.pictures + stored)
++        put(fp, st.copy(pictures = before.pictures + stored))
+         JSONObject().put("have", JSONArray(have.distinct()))
+     }
+ 
+     /**
+-     * `launcher.theme_wallpaper_choice`: the Apply the computer has not received yet, and
+-     * `needs_list` while no list in the current format has arrived in this process.
++     * `launcher.theme_wallpaper_choice`: the Apply the computer [fp] has not received yet (a choice
++     * belongs to one computer), and `needs_list` while no list in the current format has arrived
++     * from it in this process.
+      */
+-    fun choice(ctx: Context): JSONObject = synchronized(lock) {
++    fun choice(ctx: Context, fp: String): JSONObject = synchronized(lock) {
+         load(ctx)
+-        val c = _state.value.choice
++        val c = stateFor(fp).choice
+         JSONObject().put(
+             "choice",
+             if (c == null || c.received) {
+@@ -355,22 +419,22 @@ object ThemeWallpapers {
+             } else {
+                 c.look.toJson().put("at", c.at).put("format", FORMAT).apply { if (c.overwrite) put("overwrite", true) }
+             },
+-        ).put("needs_list", !listed)
++        ).put("needs_list", fp !in listed)
+     }
+ 
+     /** The install's time (the package's lastUpdateTime): `installed_at` in launcher.ping. Every
+      *  install changes it, so the computer tells our builds apart though they share one version. */
+     fun installedAt(ctx: Context): Long = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime
+ 
+-    /** `launcher.theme_wallpaper_ack`. */
+-    fun ack(ctx: Context, params: JSONObject): JSONObject = synchronized(lock) {
++    /** `launcher.theme_wallpaper_ack`, taken from the computer [fp] about its own choice. */
++    fun ack(ctx: Context, fp: String, params: JSONObject): JSONObject = synchronized(lock) {
+         load(ctx)
+         val at = params.optLong("at")
+         val stateName = params.optString("state")
+         val current = text(params, "current_id")?.takeIf { KEY.matches(it) }
+         val message = text(params, "message")
+         val code = text(params, "code")
+-        var st = _state.value
++        var st = stateFor(fp)
+         val c = st.choice
+         if (c != null && c.at == at) {
+             st = when (stateName) {
+@@ -385,11 +449,11 @@ object ThemeWallpapers {
+                 }
+                 else -> throw OmalawnError("bad_params", "bad_params: state must be received, applied, waiting or failed")
+             }
+-            saveChoice(ctx, st.choice)
++            saveChoice(ctx, fp, st.choice)
+         } else if (stateName == "applied" && current != null) {
+             st = st.copy(currentId = current, applied = st.applied + 1)
+         }
+-        _state.value = st
++        put(fp, st)
+         JSONObject().put("ok", true)
+     }
+ 
+@@ -398,23 +462,23 @@ object ThemeWallpapers {
+      * at its next look (within seconds when connected). Nothing is stored when it is what the screens
+      * show already (or what is on its way); a choice the computer has not read yet is replaced.
+      */
+-    fun apply(ctx: Context, want: Look, overwrite: Boolean = false): Boolean {
++    fun apply(ctx: Context, fp: String, want: Look, overwrite: Boolean = false): Boolean {
+         synchronized(lock) {
+             load(ctx)
+-            val st = _state.value
++            val st = stateFor(fp)
+             val look = want.normal()
+             if (!st.enabled || !st.perScreen || SCREENS.any { it !in look.screens }) return false
+             if (look.screens.values.any { !st.valid(it) }) return false
+             if (st.differs(look, st.choice?.look ?: st.look).not()) return false
+             val c = Choice(look, System.currentTimeMillis(), overwrite = overwrite)
+-            saveChoice(ctx, c)
+-            _state.value = st.copy(choice = c, error = null, unsaved = null)
++            saveChoice(ctx, fp, c)
++            put(fp, st.copy(choice = c, error = null, unsaved = null, dropped = false))
+             return true
+         }
+     }
+ 
+     /** Cancel in the overwrite question: nothing is sent; the screen keeps the choice as its draft. */
+-    fun dismissUnsaved() {
+-        synchronized(lock) { _state.value = _state.value.copy(unsaved = null) }
++    fun dismissUnsaved(fp: String) {
++        synchronized(lock) { _state.value[fp]?.let { put(fp, it.copy(unsaved = null)) } }
+     }
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+index a1f535f117..2a65b42b1b 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/ThemeWallpapersScreen.kt
+@@ -91,6 +91,7 @@ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
+ import app.lawnchair.omalawn.ThemeWallpapers.Look
+ import app.lawnchair.omalawn.ThemeWallpapers.Sel
++import app.lawnchair.omalawn.link.Pins
+ import app.lawnchair.ui.preferences.LocalIsExpandedScreen
+ import app.lawnchair.ui.preferences.LocalNavController
+ import app.lawnchair.ui.preferences.components.controls.PreferenceCategory
+@@ -165,8 +166,38 @@ private fun decode(s: String?): Look? = s?.let { runCatching { Look.fromJson(JSO
+ @Composable
+ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     val ctx = LocalContext.current
+-    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { ThemeWallpapers.load(ctx) } }
+-    val st by ThemeWallpapers.state.collectAsState()
++    // the list shown is the one of the computer the look comes from; it follows the look book
++    var source by remember { mutableStateOf<LookSource?>(null) }
++    val src = source?.fp
++    var unreadable by remember { mutableStateOf(false) } // the look book cannot be read: no source to name
++    var loaded by remember { mutableStateOf(false) } // the first read of the book is done
++    var switched by remember { mutableStateOf<String?>(null) } // the source changed while a choice waited: its name
++    var draftText by rememberSaveable { mutableStateOf<String?>(null) }
++    val book by LookBook.changes.collectAsState()
++    LaunchedEffect(book) {
++        try {
++            val next = withContext(Dispatchers.IO) {
++                ThemeWallpapers.load(ctx)
++                LookBook.source(ctx)?.let { LookSource(it, Pins.name(ctx, it).orEmpty(), LookBook.scope(ctx) == null) }
++            }
++            unreadable = false
++            val old = source?.fp
++            if (old != null && old != next?.fp) {
++                // the look now comes from another computer ([LookBook] has dropped what the old one waited for)
++                draftText = null
++                switched = if (ThemeWallpapers.state.value[old]?.dropped == true) next?.name.orEmpty().ifEmpty { UNNAMED } else null
++            }
++            source = next
++            loaded = true
++        } catch (e: OmalawnError) {
++            if (e.code != LookBook.UNREADABLE) throw e
++            unreadable = true
++            source = null
++            loaded = true
++        }
++    }
++    val all by ThemeWallpapers.state.collectAsState()
++    val st = all[src] ?: ThemeWallpapers.State()
+     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+     val choice = st.choice
+     LaunchedEffect(choice) {
+@@ -178,11 +209,11 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     }
+     // what is applied, or on its way: the draft is compared with this
+     val base: Look = (choice?.look ?: st.look).normal()
+-    var draftText by rememberSaveable { mutableStateOf<String?>(null) }
+     val draft: Look = decode(draftText)?.takeIf { d -> d.screens.values.all { st.valid(it) } } ?: base
+     val dirty = st.differs(draft, base)
+     // a lambda, not a function reference: it captures the current `base`
+     val edit: (Look) -> Unit = { l ->
++        switched = null
+         draftText = if (l != base) encode(l) else null
+     }
+     val showPicker = st.known && st.enabled && st.message == null && st.perScreen &&
+@@ -193,6 +224,7 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+             Icons.Rounded.CloudOff to stringResource(R.string.homar_wallpapers_unreachable)
+         choice != null -> null to stringResource(R.string.homar_wallpapers_applying)
+         st.error != null -> Icons.Rounded.ErrorOutline to st.error!!
++        switched != null -> Icons.Rounded.Info to stringResource(R.string.homar_wallpapers_source_changed, switched!!)
+         else -> null
+     }
+ 
+@@ -200,16 +232,16 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     // Cancel keeps the refused choice as the draft
+     val unsaved = st.unsaved
+     if (unsaved != null) {
+-        val cancel = {
++        val cancel: () -> Unit = {
+             edit(unsaved)
+-            ThemeWallpapers.dismissUnsaved()
++            src?.let { ThemeWallpapers.dismissUnsaved(it) }
+         }
+         AlertDialog(
+             onDismissRequest = cancel,
+             title = { Text(stringResource(R.string.homar_wallpapers_replace_title)) },
+             confirmButton = {
+                 TextButton(onClick = {
+-                    if (!ThemeWallpapers.apply(ctx, unsaved, overwrite = true)) cancel()
++                    if (src?.let { ThemeWallpapers.apply(ctx, it, unsaved, overwrite = true) } != true) cancel()
+                 }) { Text(stringResource(R.string.homar_wallpapers_replace)) }
+             },
+             dismissButton = {
+@@ -224,7 +256,7 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+         modifier = modifier,
+         verticalArrangement = Arrangement.spacedBy(0.dp),
+         bottomBar = {
+-            if (!showPicker) {
++            if (!showPicker && switched == null) {
+                 BottomSpacer()
+             } else {
+                 ApplyBar(
+@@ -233,19 +265,29 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+                     error = choice == null && st.error != null,
+                     onDiscard = { draftText = null },
+                     onApply = {
+-                        if (ThemeWallpapers.apply(ctx, draft)) draftText = null
++                        if (src?.let { ThemeWallpapers.apply(ctx, it, draft) } == true) {
++                            draftText = null
++                            switched = null
++                        }
+                     },
+                 )
+             }
+         },
+     ) {
+         when {
+-            !st.known -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_nothing_yet))
++            unreadable -> Notice(Icons.Rounded.ErrorOutline, stringResource(R.string.homar_wallpapers_book_unreadable))
++            !loaded -> {}
++            source == null -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_none_sent))
++            !st.known -> {
++                SourceLine(source!!)
++                Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_not_sent, source!!.name.ifEmpty { UNNAMED }))
++            }
+             !st.enabled -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_sync_off))
+             st.message != null -> Notice(Icons.Rounded.Info, st.message!!)
+             !st.perScreen -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_update_computer))
+             st.items.isEmpty() && st.gradients.isEmpty() -> Notice(Icons.Rounded.Info, stringResource(R.string.homar_wallpapers_empty))
+             else -> {
++                SourceLine(source!!)
+                 ThemeLine(st.theme)
+                 Previews(st = st, base = base, shown = draft)
+                 WallpaperPanel(st, base, draft, LOCK, stringResource(R.string.homar_wallpapers_target_lock), edit = edit)
+@@ -256,6 +298,23 @@ fun ThemeWallpapersScreen(modifier: Modifier = Modifier) {
+     }
+ }
+ 
++/** The computer whose look this screen shows, and whether it is so because it changed last (spec 6.5). */
++private const val UNNAMED = "Computer"
++
++private data class LookSource(val fp: String, val name: String, val latest: Boolean)
++
++@Composable
++private fun SourceLine(source: LookSource) {
++    val name = source.name.ifEmpty { UNNAMED }
++    Text(
++        text = stringResource(R.string.homar_wallpapers_from, name) +
++            if (source.latest) " " + stringResource(R.string.homar_wallpapers_changed_last) else "",
++        style = MaterialTheme.typography.labelLarge,
++        color = MaterialTheme.colorScheme.onSurfaceVariant,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++    )
++}
++
+ /** The followed theme's name, as a small label over the previews. */
+ @Composable
+ private fun ThemeLine(theme: String?) {
+@@ -367,7 +426,7 @@ private fun ScreenPicture(st: ThemeWallpapers.State, shown: Look, base: Look, sc
+                 screen == LOCK && item?.lock != null -> item.lock
+                 else -> item?.thumb
+             }
+-            Thumbnail(key, st.pictures, Modifier.fillMaxSize(), alignment = if (wide) Alignment.CenterStart else Alignment.Center)
++            Thumbnail(st.fp, key, st.pictures, Modifier.fillMaxSize(), alignment = if (wide) Alignment.CenterStart else Alignment.Center)
+             Layer(look.layer[screen] ?: 0)
+         }
+     }
+@@ -382,11 +441,11 @@ private fun Layer(amount: Int) {
+ }
+ 
+ @Composable
+-private fun Thumbnail(key: String?, pictures: Int, modifier: Modifier = Modifier, alignment: Alignment = Alignment.Center) {
++private fun Thumbnail(fp: String?, key: String?, pictures: Int, modifier: Modifier = Modifier, alignment: Alignment = Alignment.Center) {
+     val ctx = LocalContext.current
+-    val bitmap by produceState<ImageBitmap?>(null, key, pictures) {
++    val bitmap by produceState<ImageBitmap?>(null, fp, key, pictures) {
+         value = withContext(Dispatchers.IO) {
+-            key?.let { ThemeWallpapers.thumbFile(ctx, it) }?.takeIf { it.isFile }
++            if (fp == null) null else key?.let { ThemeWallpapers.thumbFile(ctx, fp, it) }?.takeIf { it.isFile }
+                 ?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
+         }
+     }
+@@ -830,6 +889,7 @@ private fun PicturePane(
+                     val sel = Sel(kind, item.id)
+                     PictureTile(
+                         item = item,
++                        fp = st.fp,
+                         pictures = st.pictures,
+                         named = gradient,
+                         prefix = prefix,
+@@ -850,6 +910,7 @@ private fun PicturePane(
+ @Composable
+ private fun PictureTile(
+     item: ThemeWallpapers.Item,
++    fp: String?,
+     pictures: Int,
+     named: Boolean,
+     prefix: String,
+@@ -876,7 +937,7 @@ private fun PictureTile(
+                     (if (onHome) ", $homeText" else "")
+             },
+     ) {
+-        Thumbnail(item.thumb, pictures, Modifier.fillMaxSize())
++        Thumbnail(fp, item.thumb, pictures, Modifier.fillMaxSize())
+         if (named) {
+             Text(
+                 text = item.name,
+@@ -1013,7 +1074,7 @@ private fun LayerSlider(value: Int, enabled: Boolean, description: String, onCha
+ 
+ /** Apply and Discard at the bottom, with how the last Apply goes just above them. */
+ @Composable
+-private fun ApplyBar(
++internal fun ApplyBar(
+     dirty: Boolean,
+     status: Pair<ImageVector?, String>?,
+     error: Boolean,
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+index 5be6dadb93..c8be506475 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/ComputersScreen.kt
+@@ -10,25 +10,38 @@ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.ErrorOutline
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.material3.AlertDialog
+ import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.RadioButton
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
++import app.lawnchair.omalawn.ApplyBar
++import app.lawnchair.omalawn.LookBook
++import app.lawnchair.omalawn.OmalawnCommands
++import app.lawnchair.omalawn.OmalawnError
++import com.android.launcher3.R
++import app.lawnchair.ui.preferences.components.layout.BottomSpacer
+ import app.lawnchair.ui.preferences.components.layout.PreferenceGroup
+ import app.lawnchair.ui.preferences.components.layout.PreferenceLayout
+ import app.lawnchair.ui.preferences.components.layout.PreferenceTemplate
+@@ -36,6 +49,9 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import kotlinx.serialization.Serializable
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
+ 
+ /** The settings route of the "Computers" screen (patch 0030). */
+ @Serializable
+@@ -49,7 +65,10 @@ fun NavGraphBuilder.homarComputers() {
+ /**
+  * Every paired computer with its state, "Pair a computer", and Forget (one, or all) behind a
+  * confirmation. Forgetting closes that computer's connections through [Pins]' removal listener, so
+- * nothing more is done here. The list follows [Pins] and [LinkServer] as they change.
++ * nothing more is done here (a forgotten look source hands the screen to the next look, asking
++ * first when that would replace a wallpaper something else set). Forgetting all also empties the
++ * look book, which therefore works on a damaged one. "Sync look with" is a draft until Apply
++ * (patch 0031). The list follows [Pins], [LinkServer] and [LookBook] as they change.
+  */
+ @Composable
+ fun ComputersScreen() {
+@@ -65,8 +84,20 @@ fun ComputersScreen() {
+             LinkServer.removeListener(l)
+         }
+     }
++    val book by LookBook.changes.collectAsState()
+     val computers = remember(tick) { Pins.list(ctx) }
+     val online = remember(tick) { LinkServer.connectedFps() }
++    // the book is read off the main thread; null until the first read, then the book or LookRead(null) when it cannot be read
++    var read by remember { mutableStateOf<LookRead?>(null) }
++    LaunchedEffect(tick, book) { read = LookRead(withContext(Dispatchers.IO) { readLook(ctx) }) }
++    val look = read?.view
++    var draft by rememberSaveable(look?.scope) { mutableStateOf(look?.scope ?: LATEST) }
++    val chosen = draft.takeIf { d -> d == LATEST || computers.any { it.fp == d } } ?: LATEST
++    val applyingText = stringResource(R.string.homar_wallpapers_applying)
++    var applying by remember { mutableStateOf(false) }
++    var failure by remember { mutableStateOf<String?>(null) }
++    // set while the phone asks "Replace current wallpaper?": what Replace does
++    var asking by remember { mutableStateOf<(() -> Unit)?>(null) }
+     // only the fingerprint is held: the computer shown is always the live one, and a dialog for a
+     // computer forgotten elsewhere closes
+     var open by remember { mutableStateOf<String?>(null) }
+@@ -80,7 +111,74 @@ fun ComputersScreen() {
+         }
+     }
+ 
+-    PreferenceLayout(label = "Computers", backArrowVisible = true) {
++    // a look change runs off the main thread (it sets wallpapers); the bar says "Applying…"
++    fun showing(work: () -> Unit) {
++        scope.launch {
++            applying = true
++            failure = null
++            try {
++                withContext(Dispatchers.IO) { work() }
++            } catch (e: Exception) {
++                failure = plain(e)
++            } finally {
++                applying = false
++            }
++        }
++    }
++    val app = ctx.applicationContext
++    val dirty = look != null && !applying && chosen != (look.scope ?: LATEST)
++    val sourceFp = look?.source
++
++    PreferenceLayout(
++        label = "Computers",
++        backArrowVisible = true,
++        bottomBar = {
++            if (look != null && (dirty || applying || failure != null)) {
++                ApplyBar(
++                    dirty = dirty,
++                    status = when {
++                        applying -> null to applyingText
++                        failure != null -> Icons.Rounded.ErrorOutline to failure!!
++                        else -> null
++                    },
++                    error = !applying && failure != null,
++                    onDiscard = { draft = look.scope ?: LATEST; failure = null },
++                    onApply = {
++                        val want = chosen.takeIf { it != LATEST }
++                        showing {
++                            if (wouldReplace(app, want)) asking = { showing { applyScope(app, want) } } else applyScope(app, want)
++                        }
++                    },
++                )
++            } else {
++                BottomSpacer()
++            }
++        },
++    ) {
++        if (computers.isNotEmpty() && read != null) {
++            PreferenceGroup(heading = "Look") {
++                if (look == null) {
++                    Text(stringResource(R.string.homar_wallpapers_book_unreadable), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
++                } else {
++                    Text(onScreenLine(look, computers), Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
++                    if (sourceFp != null && look.entries[sourceFp] == null) {
++                        Text(
++                            nameOf(computers, sourceFp) + " has not sent its look yet",
++                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
++                            color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        )
++                    }
++                    RadioRow("Latest change", "Shows the look of the computer whose look changed last", chosen == LATEST) {
++                        draft = LATEST; failure = null
++                    }
++                    computers.forEach { c ->
++                        RadioRow(c.name.ifEmpty { "Computer" }, look.entries[c.fp]?.theme?.ifEmpty { null } ?: "No look received yet", chosen == c.fp) {
++                            draft = c.fp; failure = null
++                        }
++                    }
++                }
++            }
++        }
+         PreferenceGroup(heading = "Paired computers") {
+             if (computers.isEmpty()) Text("No computer is paired.", Modifier.padding(16.dp))
+             computers.forEach { c ->
+@@ -88,6 +186,7 @@ fun ComputersScreen() {
+                     title = { Text(c.name.ifEmpty { "Computer" }) },
+                     description = { Text(statusLine(c, c.fp in online) + " · Paired " + date(c.added)) },
+                     startWidget = { if (c.fp in online) OnlineDot() },
++                    endWidget = { if (c.fp == sourceFp) Text("Look", color = MaterialTheme.colorScheme.primary) },
+                     modifier = Modifier.clickable { open = c.fp },
+                 )
+             }
+@@ -131,14 +230,27 @@ fun ComputersScreen() {
+     }
+     forgetting?.let { fp -> computers.firstOrNull { it.fp == fp } }?.let { c ->
+         val name = c.name.ifEmpty { "Computer" }
++        val next = look?.takeIf { it.source == c.fp }?.nextSource(c.fp)
+         AlertDialog(
+             onDismissRequest = { forgetting = null },
+             title = { Text("Forget $name?") },
+-            text = { Text("$name can no longer use this phone. It will be told the next time it connects.") },
++            text = {
++                Text(
++                    "$name can no longer use this phone. It will be told the next time it connects." +
++                        (next?.let { "\nThe phone will show ${nameOf(computers, it)}'s look." } ?: ""),
++                )
++            },
+             confirmButton = {
+                 TextButton({
+                     forgetting = null
+-                    inBackground { Pins.forget(ctx.applicationContext, c.fp) }
++                    // the look book hears of the removal itself; when the source was forgotten the screen
++                    // follows the new one (forgetting another computer leaves the screen alone)
++                    showing {
++                        Pins.forget(app, c.fp)
++                        if (look?.source == c.fp) {
++                            if (wouldReplace(app, LookBook.scope(app))) asking = { showing { showSource(app) } } else showSource(app)
++                        }
++                    }
+                 }) { Text("Forget") }
+             },
+             dismissButton = { TextButton({ forgetting = null }) { Text("Cancel") } },
+@@ -158,12 +270,35 @@ fun ComputersScreen() {
+             confirmButton = {
+                 TextButton({
+                     forgettingAll = false
+-                    inBackground { Pins.forgetAll(ctx.applicationContext) }
++                    // the book is emptied too, so a damaged one is cleared as well
++                    inBackground {
++                        Pins.forgetAll(app)
++                        LookBook.reset(app)
++                    }
+                 }) { Text("Forget") }
+             },
+             dismissButton = { TextButton({ forgettingAll = false }) { Text("Cancel") } },
+         )
+     }
++
++    if (asking != null) {
++        AlertDialog(
++            onDismissRequest = { asking = null },
++            title = { Text("Replace current wallpaper?") },
++            confirmButton = { TextButton({ asking?.invoke(); asking = null }) { Text("Replace") } },
++            dismissButton = { TextButton({ asking = null }) { Text("Cancel") } },
++        )
++    }
++}
++
++@Composable
++private fun RadioRow(title: String, description: String, selected: Boolean, onSelect: () -> Unit) {
++    PreferenceTemplate(
++        title = { Text(title) },
++        description = { Text(description) },
++        startWidget = { RadioButton(selected = selected, onClick = null) },
++        modifier = Modifier.clickable(onClick = onSelect),
++    )
+ }
+ 
+ @Composable
+@@ -193,3 +328,72 @@ private fun date(ms: Long): String = if (ms == 0L) {
+ } else {
+     java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.ENGLISH).format(java.util.Date(ms))
+ }
++
++private const val LATEST = "latest"
++
++/** What the look book holds, as the screen needs it; read once per change. */
++private class LookView(
++    val scope: String?,
++    val last: String?,
++    val source: String?,
++    val applied: LookBook.Applied?,
++    val entries: Map<String, LookBook.Entry>,
++) {
++    /** Whose look the phone shows once [gone] is forgotten: the last change, else the newest of the others. */
++    fun nextSource(gone: String): String? =
++        last?.takeIf { it != gone && it in entries } ?: entries.values.filter { it.fp != gone }.maxByOrNull { it.changedAt }?.fp
++}
++
++/** The book, or null when it cannot be read (the screen says so and "Forget all computers" clears it). */
++private fun readLook(ctx: android.content.Context): LookView? = try {
++    val entries = Pins.list(ctx).mapNotNull { c -> LookBook.entry(ctx, c.fp)?.let { c.fp to it } }.toMap()
++    LookView(LookBook.scope(ctx), LookBook.last(ctx), LookBook.source(ctx), LookBook.applied(ctx), entries)
++} catch (e: OmalawnError) {
++    if (e.code != LookBook.UNREADABLE) throw e
++    null
++}
++
++private class LookRead(val view: LookView?)
++
++/** What a person reads of a failure: the message without its machine code ("no_look: …"). */
++private fun plain(e: Exception): String = (e.message ?: e.javaClass.simpleName).replace(Regex("^[a-z_]+: "), "")
++
++private fun nameOf(computers: List<Computer>, fp: String) = computers.firstOrNull { it.fp == fp }?.name?.ifEmpty { null } ?: "Computer"
++
++private fun onScreenLine(look: LookView, computers: List<Computer>): String {
++    val a = look.applied ?: return "On screen: not from a computer"
++    val name = computers.firstOrNull { it.fp == a.fp }?.name?.ifEmpty { null } ?: "A forgotten computer"
++    val theme = look.entries[a.fp]?.theme?.ifEmpty { null }
++    return "On screen: $name's look" + (theme?.let { " ($it)" } ?: "") + ", since " + clock(a.at)
++}
++
++// English whatever the phone's language is
++private fun clock(ms: Long): String {
++    val day = java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
++    return SimpleDateFormat(if (ms >= day) "HH:mm" else "MMM d", Locale.ENGLISH).format(Date(ms))
++}
++
++/** [fp]'s current look is the one on the screen already. */
++private fun isShown(ctx: android.content.Context, fp: String): Boolean =
++    LookBook.applied(ctx)?.let { it.fp == fp && it.key == LookBook.entry(ctx, fp)?.key } == true
++
++/** Showing the look would replace a picture something else set since the book last showed one. */
++private fun wouldReplace(ctx: android.content.Context, want: String?): Boolean {
++    val next = want ?: LookBook.last(ctx) ?: return false
++    return LookBook.entry(ctx, next) != null && !isShown(ctx, next) && LookBook.needsReplace(ctx, next)
++}
++
++private fun applyScope(ctx: android.content.Context, fp: String?) {
++    OmalawnCommands.serially {
++        LookBook.setScope(ctx, fp)
++        showSource(ctx)
++    }
++}
++
++/** The source's look goes on the screen unless it is there already; a source with no look leaves the screen alone. */
++private fun showSource(ctx: android.content.Context) {
++    OmalawnCommands.serially {
++        val src = LookBook.source(ctx) ?: return@serially
++        if (LookBook.entry(ctx, src) != null && !isShown(ctx, src)) LookBook.show(ctx, src)
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index c0d316bbd0..a79de1d725 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -107,6 +107,10 @@ object LinkServer {
+         "launcher.nova_convert" to Spec(setOf("glance_row", "pin"), Kind.BLOB_IO),
+         "launcher.update_status" to Spec(emptySet()), // the last offered update's outcome
+         "launcher.device_profile" to Spec(emptySet()), // where the home screen draws (patch 0021), see DeviceGeometry
++        // one look per computer (patch 0031), see LookBook
++        "launcher.look_put" to Spec(setOf("key", "changed_at", "theme", "prefs", "pictures")),
++        "launcher.look_show" to Spec(setOf("key")),
++        "launcher.look_state" to Spec(emptySet()),
+         // screen control (patch 0004): pinned computers only, like everything above but OPEN
+         "screen.status" to Spec(emptySet()),
+         "screen.tree" to Spec(emptySet()),

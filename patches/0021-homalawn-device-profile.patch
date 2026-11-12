@@ -1,0 +1,204 @@
+From 491f95dbb46e382c9aa84eb8da25049cfb4a06d9 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Sat, 17 Oct 2026 15:57:59 +0200
+Subject: [PATCH] homalawn device profile: where the home screen really draws,
+ for the desktop preview
+
+New command launcher.device_profile (link and provider) reports the home
+screen's geometry in screen pixels: the screen and its density, the system
+bar insets, the grid, the workspace's grid of cells (position, cell size,
+gaps), the icon size, label text size and icon-to-label padding and where
+the icon sits in its cell, the dock's cells and icon size, the page
+indicator and whether it shows, the folder icon size and widget padding.
+It is measured from the launcher's laid-out views when there are any
+(source: views), else summed from Lawnchair's DeviceProfile (source:
+profile). The desktop's home-screen preview draws from these numbers.
+---
+ .../app/lawnchair/omalawn/DeviceGeometry.kt   | 152 ++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   1 +
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |   1 +
+ 3 files changed, 154 insertions(+)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+new file mode 100644
+index 0000000000..e43eaeb55d
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/DeviceGeometry.kt
+@@ -0,0 +1,152 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import android.graphics.Rect
++import android.view.View
++import com.android.launcher3.BubbleTextView
++import com.android.launcher3.CellLayout
++import com.android.launcher3.DeviceProfile
++import com.android.launcher3.InvariantDeviceProfile
++import com.android.launcher3.Launcher
++import com.android.launcher3.util.Executors.MAIN_EXECUTOR
++import java.util.concurrent.FutureTask
++import java.util.concurrent.TimeUnit
++import org.json.JSONObject
++
++/**
++ * `launcher.device_profile`: where the home screen really draws things, so the computer's preview
++ * can draw the same (patch 0021). Every length is in the phone's screen pixels, every position
++ * from the screen's top left corner.
++ *
++ * `{source, screen: {w, h, density}, insets: {left, top, right, bottom}, grid: {cols, rows},
++ * workspace: {x, y, w, h, cell_w, cell_h, gap_x, gap_y}, icon: {size, text_size, drawable_padding,
++ * top, labels}, hotseat: {x, y, w, h, cell_w, cell_h, gap_x, count, icon_size, icon_top},
++ * page_indicator: {x, y, w, h, visible, pages?}, folder_icon_size, widget_padding: {left, top, right,
++ * bottom}}`. `workspace` is the grid of cells (the cell layout's content, without its padding):
++ * cell (x, y) starts at `x + x * (cell_w + gap_x)`. `icon.top` is the icon's top inside its cell;
++ * the label starts `drawable_padding` below the icon. `source` says how it was read: `views` from
++ * the launcher's laid-out screen (exact), `profile` from Lawnchair's DeviceProfile alone (no
++ * launcher activity yet: the same sums, without what only the views know).
++ */
++object DeviceGeometry {
++    private const val WAIT_S = 5L
++
++    fun read(ctx: Context): JSONObject {
++        val task = FutureTask { onMain(ctx) }
++        MAIN_EXECUTOR.execute(task)
++        return task.get(WAIT_S, TimeUnit.SECONDS)
++    }
++
++    private fun onMain(ctx: Context): JSONObject {
++        val launcher = Launcher.ACTIVITY_TRACKER.getCreatedContext<Launcher>()
++        val dp: DeviceProfile = launcher?.deviceProfile ?: InvariantDeviceProfile.INSTANCE.get(ctx).getDeviceProfile(ctx)
++        val insets = dp.insets
++        val out = JSONObject()
++            .put("screen", JSONObject().put("w", dp.deviceProperties.widthPx).put("h", dp.deviceProperties.heightPx).put("density", ctx.resources.displayMetrics.density))
++            .put("insets", rect(insets))
++            .put("grid", JSONObject().put("cols", dp.inv.numColumns).put("rows", dp.inv.numRows))
++            .put("folder_icon_size", dp.folderIconSizePx)
++            .put("widget_padding", rect(dp.widgetPadding))
++        val page = launcher?.workspace?.let { w -> (w.getPageAt(w.currentPage) ?: w.getPageAt(0)) as? CellLayout }
++        val viewsReady = page != null && page.shortcutsAndWidgets.width > 0 && launcher.hotseat.width > 0
++        if (viewsReady) {
++            out.put("source", "views")
++            out.put("workspace", cells(page!!))
++            val sample = (0 until page.shortcutsAndWidgets.childCount)
++                .map { page.shortcutsAndWidgets.getChildAt(it) }
++                .firstOrNull { it is BubbleTextView } as BubbleTextView?
++            out.put("icon", icon(dp, sample))
++            val hot = launcher!!.hotseat
++            // the dock's first page (Lawnchair can page a long dock): its cells, else the dock itself
++            val hotLayout: CellLayout? = hot.currentPageLayout ?: hot.getPageAt(0)
++            val hotCells = hotLayout?.shortcutsAndWidgets
++            val h = if (hotLayout != null) cells(hotLayout) else box(hot)
++            val hotIcon = hotCells?.let { c -> (0 until c.childCount).map { c.getChildAt(it) }.firstOrNull { it is BubbleTextView } } as BubbleTextView?
++            val b = Rect()
++            hotIcon?.getIconBounds(b)
++            out.put(
++                "hotseat",
++                h.put("count", dp.numShownHotseatIcons)
++                    .put("icon_size", hotIcon?.iconSize ?: dp.iconSizePx)
++                    .put("icon_top", if (hotIcon != null) b.top else (dp.hotseatCellHeightPx - dp.iconSizePx) / 2),
++            )
++            val ind = launcher.workspace.pageIndicator as? View
++            out.put(
++                "page_indicator",
++                (if (ind != null) box(ind) else JSONObject().put("x", 0).put("y", 0).put("w", 0).put("h", 0))
++                    .put("visible", ind != null && ind.isShown && ind.alpha > 0.01f && ind.height > 0)
++                    .put("pages", launcher.workspace.pageCount),
++            )
++        } else {
++            out.put("source", "profile")
++            profile(dp, out)
++        }
++        return out
++    }
++
++    /** A cell layout's grid of cells, on the screen. */
++    private fun cells(c: CellLayout): JSONObject {
++        val content = c.shortcutsAndWidgets
++        val p = IntArray(2)
++        content.getLocationOnScreen(p)
++        // the space between cells, from what the layout itself measured
++        val gx = if (c.countX > 1) (content.width - c.countX * c.cellWidth) / (c.countX - 1) else 0
++        val gy = if (c.countY > 1) (content.height - c.countY * c.cellHeight) / (c.countY - 1) else 0
++        return JSONObject().put("x", p[0]).put("y", p[1]).put("w", content.width).put("h", content.height)
++            .put("cell_w", c.cellWidth).put("cell_h", c.cellHeight)
++            .put("gap_x", maxOf(0, gx)).put("gap_y", maxOf(0, gy))
++    }
++
++    private fun box(v: View): JSONObject {
++        val p = IntArray(2)
++        v.getLocationOnScreen(p)
++        return JSONObject().put("x", p[0]).put("y", p[1]).put("w", v.width).put("h", v.height)
++    }
++
++    private fun icon(dp: DeviceProfile, sample: BubbleTextView?): JSONObject {
++        val b = Rect()
++        sample?.getIconBounds(b)
++        return JSONObject()
++            .put("size", sample?.iconSize ?: dp.iconSizePx)
++            .put("text_size", dp.iconTextSizePx)
++            .put("drawable_padding", dp.iconDrawablePaddingPx)
++            .put("top", if (sample != null) b.top else maxOf(0, dp.cellYPaddingPx))
++            .put("labels", dp.iconTextSizePx > 0)
++    }
++
++    /** Without laid-out views: Launcher3's own sums (insets + workspace padding + cell layout padding). */
++    private fun profile(dp: DeviceProfile, out: JSONObject) {
++        val ins = dp.insets
++        val cols = dp.inv.numColumns
++        val rows = dp.inv.numRows
++        val bx = dp.cellLayoutBorderSpacePx.x
++        val by = dp.cellLayoutBorderSpacePx.y
++        val x = ins.left + dp.workspacePadding.left + dp.cellLayoutPaddingPx.left
++        val y = ins.top + dp.workspacePadding.top + dp.cellLayoutPaddingPx.top
++        out.put(
++            "workspace",
++            JSONObject().put("x", x).put("y", y)
++                .put("w", cols * dp.cellWidthPx + (cols - 1) * bx).put("h", rows * dp.cellHeightPx + (rows - 1) * by)
++                .put("cell_w", dp.cellWidthPx).put("cell_h", dp.cellHeightPx).put("gap_x", bx).put("gap_y", by),
++        )
++        out.put("icon", icon(dp, null))
++        val n = maxOf(1, dp.numShownHotseatIcons)
++        val hy = dp.deviceProperties.heightPx - dp.hotseatBarSizePx
++        val hw = dp.deviceProperties.widthPx - ins.left - ins.right
++        out.put(
++            "hotseat",
++            JSONObject().put("x", ins.left).put("y", hy).put("w", hw).put("h", dp.hotseatCellHeightPx)
++                .put("cell_w", (hw - (n - 1) * dp.hotseatBorderSpace) / n).put("cell_h", dp.hotseatCellHeightPx)
++                .put("gap_x", dp.hotseatBorderSpace).put("count", dp.numShownHotseatIcons)
++                .put("icon_size", dp.iconSizePx).put("icon_top", (dp.hotseatCellHeightPx - dp.iconSizePx) / 2),
++        )
++        out.put(
++            "page_indicator",
++            JSONObject().put("x", 0).put("y", hy - dp.workspacePageIndicatorHeight).put("w", dp.deviceProperties.widthPx)
++                .put("h", dp.workspacePageIndicatorHeight).put("visible", dp.workspacePageIndicatorHeight > 0),
++        )
++    }
++
++    private fun rect(r: Rect): JSONObject =
++        JSONObject().put("left", r.left).put("top", r.top).put("right", r.right).put("bottom", r.bottom)
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 4f3b3a10d7..6edad96b10 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -124,6 +124,7 @@ object OmalawnCommands {
+             "launcher.request_media_permission" -> MediaPermission.request(ctx)
+             "launcher.app_info" -> OmalawnUpdate.appInfo(ctx)
+             "launcher.update_status" -> OmalawnUpdate.status(ctx)
++            "launcher.device_profile" -> DeviceGeometry.read(ctx) // patch 0021
+             else -> if (method.startsWith("screen.")) ScreenCommands.dispatch(ctx, method, params) else throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index a36bfc0c78..078708b6ee 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -103,6 +103,7 @@ object LinkServer {
+         // Nova import (patch 0012): the backup in, the converted launcher DB out; see NovaIo
+         "launcher.nova_convert" to Spec(setOf("glance_row", "pin"), Kind.BLOB_IO),
+         "launcher.update_status" to Spec(emptySet()), // the last offered update's outcome
++        "launcher.device_profile" to Spec(emptySet()), // where the home screen draws (patch 0021), see DeviceGeometry
+         // screen control (patch 0004): pinned computers only, like everything above but OPEN
+         "screen.status" to Spec(emptySet()),
+         "screen.tree" to Spec(emptySet()),

@@ -1,0 +1,884 @@
+From 4d657bacbc0189e09577b66853f5b06bbac72c9a Mon Sep 17 00:00:00 2001
+From: omalawn <omalawn@local>
+Date: Mon, 5 Oct 2026 14:45:13 +0200
+Subject: [PATCH] omalawn screen: read and operate the screen over the link
+
+Lawnchair's accessibility service declares window content, gestures,
+screenshots and interactive windows, keeps the serviceInfo built from its XML
+(it used to replace it and drop the flags) and describes honestly what it
+lets a paired computer do. screen.* (tree, tap, long_press, swipe, type, key,
+shot, launch, status) is reachable by pinned link peers only; the shell-only
+provider offers screen_status. launcher.ping no longer creates the device
+profile (db is null until the home screen is open).
+launcher.request_media_permission reports whether the wallpaper can be read
+and, where a prompt can fix it (Android 12 and older), posts a notification
+whose tap opens the system prompt; Android 13+ answers not_grantable.
+---
+ lawnchair/AndroidManifest.xml                 |   9 +
+ lawnchair/res/values/strings.xml              |   3 +
+ .../LawnchairAccessibilityService.kt          |  25 +-
+ .../app/lawnchair/omalawn/MediaPermission.kt  | 143 +++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  20 +-
+ .../omalawn/OmalawnControlProvider.kt         |  17 +-
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  26 +-
+ .../omalawn/screen/ScreenCommands.kt          | 403 ++++++++++++++++++
+ res/xml/accessibility_service_config.xml      |  11 +-
+ .../widget/PendingAppWidgetHostView.java      |   3 +
+ 10 files changed, 637 insertions(+), 23 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index 8317c106cc..c423901c5f 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -182,6 +182,15 @@
+             android:exported="false"
+             android:foregroundServiceType="connectedDevice" />
+ 
++        <!-- Homa Lawn: opened only by its own "needs access to photos" notification -->
++        <activity
++            android:name="app.lawnchair.omalawn.MediaPermissionActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:noHistory="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
++
+         <!-- system broadcasts reach a non-exported receiver; nothing else can trigger it -->
+         <receiver
+             android:name="app.lawnchair.omalawn.link.BootReceiver"
+diff --git a/lawnchair/res/values/strings.xml b/lawnchair/res/values/strings.xml
+index 85342e735e..1afc558226 100644
+--- a/lawnchair/res/values/strings.xml
++++ b/lawnchair/res/values/strings.xml
+@@ -161,6 +161,9 @@
+     <string name="my_folder_label">My folder</string>
+     <string name="sort_active_items_action">Sort active items</string>
+ 
++    <!-- Homa Lawn: what the accessibility service really does (English only on purpose) -->
++    <string name="omalawn_accessibility_service_summary" translatable="false">Lets Homa Lawn on your paired computer read and operate this screen</string>
++    <string name="omalawn_accessibility_service_description" translatable="false">This lets Homa Lawn on a computer you paired with this phone read what is on the screen, take screenshots, and tap, swipe, type and press Back, Home or Recents for you. It works only while the computer is connected over the Homa Lawn link; computers you have not paired cannot use it. Lawnchair also uses it to lock the phone and open Recents from home screen gestures.\n\nTurn it off here at any time, or remove a computer with \"Forget all computers\" in the Homa Lawn notification.</string>
+     <!-- A11y description -->
+     <string name="accessibility_service_description">To perform certain actions when you use a gesture, such as locking your phone, Lawnchair requires accessibility access.\n\nLawnchair doesn\'t watch your actions, though all accessibility services require this privilege. Lawnchair discards any event sent by the system.\n\nTo lock your phone or open the Recents screen, Lawnchair uses the performGlobalAction accessibility service.</string>
+ 
+diff --git a/lawnchair/src/app/lawnchair/LawnchairAccessibilityService.kt b/lawnchair/src/app/lawnchair/LawnchairAccessibilityService.kt
+index e1ff4489ce..7f2253bd38 100644
+--- a/lawnchair/src/app/lawnchair/LawnchairAccessibilityService.kt
++++ b/lawnchair/src/app/lawnchair/LawnchairAccessibilityService.kt
+@@ -17,28 +17,23 @@
+ package app.lawnchair
+ 
+ import android.accessibilityservice.AccessibilityService
+-import android.accessibilityservice.AccessibilityServiceInfo
+ import android.content.Intent
+ import android.view.accessibility.AccessibilityEvent
+ 
+ class LawnchairAccessibilityService : AccessibilityService() {
+ 
+     override fun onServiceConnected() {
+-        serviceInfo = AccessibilityServiceInfo().apply {
+-            // Set the type of events that this service wants to listen to.  Others
+-            // won't be passed to this service.
+-            eventTypes = 0
+-
+-            // If you only want this service to work with specific applications, set their
+-            // package names here.  Otherwise, when the service is activated, it will listen
+-            // to events from all applications.
+-            packageNames = emptyArray()
+-        }
++        // Homa Lawn: keep the serviceInfo the system built from accessibility_service_config.xml.
++        // Replacing it with a fresh AccessibilityServiceInfo (as Lawnchair did) would drop
++        // flagRetrieveInteractiveWindows / flagReportViewIds, which screen.* needs. The XML already
++        // asks for no events (eventTypes 0) from no particular package.
+         lawnchairApp.accessibilityService = this
++        current = this
+     }
+ 
+     override fun onDestroy() {
+         lawnchairApp.accessibilityService = null
++        if (current === this) current = null
+         super.onDestroy()
+     }
+ 
+@@ -47,4 +42,12 @@ class LawnchairAccessibilityService : AccessibilityService() {
+     override fun onInterrupt() {}
+ 
+     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
++
++    companion object {
++        /** The bound service, for Homa Lawn's screen commands (any thread). */
++        @Volatile
++        @JvmStatic
++        var current: LawnchairAccessibilityService? = null
++            private set
++    }
+ }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt b/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
+new file mode 100644
+index 0000000000..f7b19c57cc
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/MediaPermission.kt
+@@ -0,0 +1,143 @@
++package app.lawnchair.omalawn
++
++import android.Manifest
++import android.app.Activity
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.app.WallpaperManager
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.os.Bundle
++import android.os.SystemClock
++import android.provider.Settings
++import androidx.core.app.NotificationCompat
++import app.lawnchair.omalawn.link.NotifyPermission
++import org.json.JSONObject
++
++/**
++ * Android lets an app read the current wallpaper (for a backup before it is replaced) only with a
++ * storage permission Lawnchair never asks for. `launcher.request_media_permission` asks for it the
++ * only way a request from a computer may: a notification, whose tap opens the system permission
++ * prompt through [MediaPermissionActivity]. Nothing pops up by itself.
++ *
++ * Which permission: the wallpaper service checks READ_EXTERNAL_STORAGE (plus the photo app op), or
++ * "All files access". Android 13+ never grants READ_EXTERNAL_STORAGE to an app that targets 13+
++ * (Lawnchair targets 35): its prompt answers "denied" without showing anything, and the photo
++ * permission it does show is not enough (checked on API 35). There the request answers
++ * `why: not_grantable` and posts nothing; the prompt path is for Android 12 and older.
++ */
++object MediaPermission {
++    private const val CHANNEL = "omalawn_requests"
++    private const val NOTIFICATION_ID = 47102
++    const val REQUEST_CODE = 47102
++    const val EXTRA_PERMISSION = "permission"
++
++    /** What the trampoline may ask for (the debug hook proves the path with the photo permission). */
++    val ASKABLE = setOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.READ_MEDIA_IMAGES)
++
++    /** The real test: can Lawnchair open the current wallpaper right now? */
++    fun canReadWallpaper(ctx: Context): Boolean = try {
++        WallpaperManager.getInstance(ctx).getWallpaperFile(WallpaperManager.FLAG_SYSTEM)?.close()
++        true
++    } catch (_: SecurityException) {
++        false
++    }
++
++    /** The permission whose prompt makes the wallpaper readable, or null when no prompt can. */
++    private fun promptable(ctx: Context): String? =
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || ctx.applicationInfo.targetSdkVersion < Build.VERSION_CODES.TIRAMISU) {
++            Manifest.permission.READ_EXTERNAL_STORAGE
++        } else {
++            null
++        }
++
++    /**
++     * {granted, asked[, why]}: asked is true when the notification is now on the phone. [force]
++     * (debug hook only) posts the prompt for [force] even where it cannot unlock the wallpaper.
++     */
++    fun request(ctx: Context, force: String? = null): JSONObject {
++        if (force == null && canReadWallpaper(ctx)) {
++            cancel(ctx)
++            return JSONObject().put("granted", true).put("asked", false)
++        }
++        val perm = force ?: promptable(ctx)
++            ?: return JSONObject().put("granted", false).put("asked", false).put("why", "not_grantable")
++        if (force == null && ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED) {
++            // granted and still unreadable: another prompt would change nothing
++            return JSONObject().put("granted", false).put("asked", false).put("why", "not_grantable")
++        }
++        if (NotifyPermission.missing(ctx)) {
++            NotifyPermission.neededNow(ctx) // the launcher asks for notifications when it next comes up
++            return JSONObject().put("granted", false).put("asked", false).put("why", "notifications_off")
++        }
++        val nm = ctx.getSystemService(NotificationManager::class.java)!!
++        nm.createNotificationChannel(
++            NotificationChannel(CHANNEL, "Homa Lawn requests", NotificationManager.IMPORTANCE_DEFAULT).apply {
++                description = "Permissions Homa Lawn on your computer needs from you"
++            },
++        )
++        val tap = PendingIntent.getActivity(
++            ctx,
++            REQUEST_CODE,
++            Intent(ctx, MediaPermissionActivity::class.java)
++                .putExtra(EXTRA_PERMISSION, perm)
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++        val n = NotificationCompat.Builder(ctx, CHANNEL)
++            .setSmallIcon(android.R.drawable.ic_menu_gallery)
++            .setContentTitle("Homa Lawn needs access to photos to back up your wallpaper")
++            .setContentText("Tap to allow. Homa Lawn uses it only to read the current wallpaper.")
++            .setContentIntent(tap)
++            .setAutoCancel(true)
++            .setOnlyAlertOnce(true)
++            .build()
++        nm.notify(NOTIFICATION_ID, n)
++        return JSONObject().put("granted", false).put("asked", true)
++    }
++
++    fun cancel(ctx: Context) {
++        ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
++    }
++}
++
++/**
++ * Invisible, not exported: opened only by [MediaPermission]'s notification. Shows the system
++ * prompt; when Android no longer shows it (denied for good), opens Lawnchair's App info instead.
++ */
++class MediaPermissionActivity : Activity() {
++    private var askedAt = 0L
++    private var perm: String? = null
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        val p = intent.getStringExtra(MediaPermission.EXTRA_PERMISSION)?.takeIf { it in MediaPermission.ASKABLE }
++        if (p == null || checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED && MediaPermission.canReadWallpaper(this)) {
++            MediaPermission.cancel(this)
++            finish()
++            return
++        }
++        perm = p
++        askedAt = SystemClock.elapsedRealtime()
++        requestPermissions(arrayOf(p), MediaPermission.REQUEST_CODE)
++    }
++
++    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
++        val p = perm
++        if (p != null && checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED) {
++            MediaPermission.cancel(this)
++        } else if (SystemClock.elapsedRealtime() - askedAt < 400) {
++            // answered at once: Android did not show the prompt, so only App info can grant it now
++            startActivity(
++                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
++            )
++        }
++        finish()
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 45c3f68d31..52139ad8cc 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -17,8 +17,10 @@ import androidx.datastore.preferences.core.floatPreferencesKey
+ import androidx.datastore.preferences.core.intPreferencesKey
+ import androidx.datastore.preferences.core.stringPreferencesKey
+ import app.lawnchair.omalawn.link.Identity
++import app.lawnchair.omalawn.screen.ScreenCommands
+ import app.lawnchair.preferences2.PreferenceManager2
+ import app.lawnchair.preferences2.ReloadHelper
++import com.android.launcher3.InvariantDeviceProfile
+ import com.android.launcher3.LauncherAppState
+ import com.android.launcher3.widget.LauncherAppWidgetProviderInfo
+ import java.io.File
+@@ -34,10 +36,15 @@ import org.json.JSONObject
+ /** A command failure with a stable machine code; [message] is what the caller shows. */
+ class OmalawnError(val code: String, message: String) : Exception(message)
+ 
++/** A result made of bytes plus metadata; only the link can carry it (as one blob frame). */
++class Blob(val bytes: ByteArray, val meta: JSONObject)
++
+ /**
+  * Every omalawn command, shared by the shell-only [OmalawnControlProvider] and the link server.
+  * Callers do their own authentication; this object only executes. Results are JSONObject,
+- * JSONArray or ByteArray. Every failure surfaces as [OmalawnError].
++ * JSONArray or [Blob]. Every failure surfaces as [OmalawnError]. `screen.*` lives in
++ * [ScreenCommands]; which caller may reach which method is the caller's decision (the provider
++ * passes `screen.status` only).
+  */
+ object OmalawnCommands {
+ 
+@@ -60,7 +67,8 @@ object OmalawnCommands {
+     private const val LOCK_WAIT_S = 90L
+     private val lock = ReentrantLock(true)
+ 
+-    private fun <T> serially(block: () -> T): T {
++    /** Runs [block] holding the one write lock (also taken by screen gestures, typing and keys). */
++    fun <T> serially(block: () -> T): T {
+         if (!lock.tryLock(LOCK_WAIT_S, TimeUnit.SECONDS)) {
+             throw OmalawnError(BUSY, "$BUSY: another change has been running for over ${LOCK_WAIT_S}s")
+         }
+@@ -81,7 +89,7 @@ object OmalawnCommands {
+             // little; touches nothing that blocks on the main thread (db is null until it exists)
+             "launcher.ensure_loaded" -> JSONObject()
+                 .put("loaded", LayoutIo.ensureLoaded(ctx, ENSURE_WAIT_S))
+-                .put("db", com.android.launcher3.InvariantDeviceProfile.INSTANCE.getNoCreate()?.dbFile ?: JSONObject.NULL)
++                .put("db", InvariantDeviceProfile.INSTANCE.get(ctx).dbFile ?: JSONObject.NULL)
+             "launcher.prefs_list" -> prefsList(ctx)
+             "launcher.pref_set" -> {
+                 prefSet(ctx, params)
+@@ -101,7 +109,8 @@ object OmalawnCommands {
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
+-            else -> throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
++            "launcher.request_media_permission" -> MediaPermission.request(ctx)
++            else -> if (method.startsWith("screen.")) ScreenCommands.dispatch(ctx, method, params) else throw OmalawnError(UNKNOWN_METHOD, "unknown method $method")
+         }
+     } catch (e: OmalawnError) {
+         throw e
+@@ -193,7 +202,8 @@ object OmalawnCommands {
+     private fun ping(ctx: Context) = JSONObject()
+         .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
+         .put("package", ctx.packageName)
+-        .put("db", LauncherAppState.getIDP(ctx).dbFile)
++        // null until something has opened the home screen; reading it never creates the app state
++        .put("db", InvariantDeviceProfile.INSTANCE.get(ctx).dbFile ?: JSONObject.NULL)
+         // true once the workspace has been loaded from the DB (LoaderTask finished); false while
+         // the launcher is starting, loading, or has never been started in this process
+         .put("model_loaded", LauncherAppState.getInstance(ctx).model.isModelLoaded())
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 209b7cde63..9235207917 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -18,8 +18,9 @@ import org.json.JSONObject
+ 
+ /**
+  * Desktop control surface for the omalawn CLI over adb. Only adb shell (uid 2000) or root may call
+- * it. Each provider method `x` is the command `launcher.x` in [OmalawnCommands]; `arg` and string
+- * extras become its params.
++ * it. Each provider method `x` is the command `launcher.x` in [OmalawnCommands] (and `screen_status`
++ * is `screen.status`; no other screen command is reachable here); `arg` and string extras become
++ * its params.
+  */
+ class OmalawnControlProvider : ContentProvider() {
+ 
+@@ -37,9 +38,11 @@ class OmalawnControlProvider : ContentProvider() {
+         if (uid != Process.SHELL_UID && uid != Process.ROOT_UID) return fail("forbidden uid $uid")
+         val ctx = context!!.applicationContext
+         if (method.startsWith("debug_")) return debug(ctx, method, arg, extras)
++        // of the screen commands only the on/off state is offered here; the rest is link-only
++        val full = if (method == "screen_status") "screen.status" else "launcher.$method"
+         return try {
+-            when (val r = OmalawnCommands.dispatch(ctx, "launcher.$method", params(method, arg, extras))) {
+-                is ByteArray -> fail("$method returns binary data, which this provider cannot carry")
++            when (val r = OmalawnCommands.dispatch(ctx, full, params(method, arg, extras))) {
++                is ByteArray, is Blob -> fail("$method returns binary data, which this provider cannot carry")
+                 else -> ok(r)
+             }
+         } catch (e: OmalawnError) {
+@@ -66,7 +69,8 @@ class OmalawnControlProvider : ContentProvider() {
+      * nonce_phone, nonce_desktop as hex) returns the four words, the commitment to nonce_desktop and the word list's SHA-256.
+      * `debug_crash_link_start <n>` makes the next n link service starts crash (persisted, survives
+      * the process); `debug_crash_link_left` reads what is left; `debug_crash_budget_reset` forgets
+-     * CrashExit's armed restart alarms and its restart marker.
++     * CrashExit's armed restart alarms and its restart marker. `debug_media_prompt` posts the
++     * photo-access notification of `launcher.request_media_permission` unconditionally.
+      */
+     private fun debug(ctx: Context, method: String, arg: String?, extras: Bundle?): Bundle {
+         if (!BuildConfig.DEBUG) return fail("unknown method $method")
+@@ -120,6 +124,9 @@ class OmalawnControlProvider : ContentProvider() {
+                     ),
+                 )
+                 "debug_crash_budget_reset" -> CrashExit.resetBudget(ctx)
++                // posts the photo-access prompt notification even where it cannot unlock the
++                // wallpaper (Android 13+), so the notification → prompt path can be tested
++                "debug_media_prompt" -> return ok(MediaPermission.request(ctx, force = android.Manifest.permission.READ_MEDIA_IMAGES))
+                 "debug_pair_fire_stale" -> return ok(JSONObject().put("stale", Pairing.fireAccept("stale")))
+                 "debug_pair_fire_current" -> return ok(JSONObject().put("current", Pairing.fireAccept("current")))
+                 "debug_sas" -> {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 30f7a2eed0..c5d49de3ad 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -5,6 +5,7 @@ import android.os.Build
+ import android.os.SystemClock
+ import android.provider.Settings
+ import android.util.Log
++import app.lawnchair.omalawn.Blob
+ import app.lawnchair.omalawn.OmalawnCommands
+ import app.lawnchair.omalawn.OmalawnError
+ import java.io.File
+@@ -88,6 +89,17 @@ object LinkServer {
+         "launcher.layout_export" to Spec(setOf("via"), Kind.BLOB_OUT),
+         "launcher.layout_import" to Spec(setOf("db"), Kind.BLOB_IN),
+         "launcher.stage_file" to Spec(setOf("name"), Kind.STAGE),
++        "launcher.request_media_permission" to Spec(emptySet()),
++        // screen control (patch 0004): pinned computers only, like everything above but OPEN
++        "screen.status" to Spec(emptySet()),
++        "screen.tree" to Spec(emptySet()),
++        "screen.tap" to Spec(setOf("x", "y", "node")),
++        "screen.long_press" to Spec(setOf("x", "y", "node", "ms")),
++        "screen.swipe" to Spec(setOf("x1", "y1", "x2", "y2", "ms")),
++        "screen.type" to Spec(setOf("text", "node")),
++        "screen.key" to Spec(setOf("name")),
++        "screen.shot" to Spec(emptySet(), Kind.BLOB_OUT),
++        "screen.launch" to Spec(setOf("package")),
+     )
+ 
+     @Volatile private var running = false
+@@ -395,11 +407,23 @@ object LinkServer {
+             writer.error(id, BAD_PATH, "$BAD_PATH: over the link the wallpaper must be a file staged with launcher.stage_file")
+             return true
+         }
++        // the phone's notification says "Screen control in use" for a while after every read or
++        // action while screen control is on
++        if (method.startsWith("screen.") && method != "screen.status" &&
++            app.lawnchair.LawnchairAccessibilityService.current != null
++        ) {
++            noteScreenUse()
++        }
+         try {
+             when (spec.kind) {
+                 Kind.PLAIN -> writer.result(id, OmalawnCommands.dispatch(ctx, method, params, paired))
+                 Kind.BLOB_OUT -> {
+-                    val r = OmalawnCommands.dispatch(ctx, method, params, paired) as JSONObject
++                    val out = OmalawnCommands.dispatch(ctx, method, params, paired)
++                    if (out is Blob) {
++                        writer.blob(id, out.bytes, out.meta)
++                        return true
++                    }
++                    val r = out as JSONObject
+                     val f = File(r.getString("path"))
+                     val bytes = try {
+                         f.readBytes()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+new file mode 100644
+index 0000000000..c68543752a
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/screen/ScreenCommands.kt
+@@ -0,0 +1,403 @@
++package app.lawnchair.omalawn.screen
++
++import android.accessibilityservice.AccessibilityService
++import android.accessibilityservice.GestureDescription
++import android.app.AppOpsManager
++import android.content.Context
++import android.content.Intent
++import android.graphics.Bitmap
++import android.graphics.Path
++import android.graphics.Point
++import android.graphics.Rect
++import android.hardware.display.DisplayManager
++import android.os.Build
++import android.os.Bundle
++import android.os.Process
++import android.os.SystemClock
++import android.view.Display
++import android.view.accessibility.AccessibilityNodeInfo
++import android.view.accessibility.AccessibilityWindowInfo
++import app.lawnchair.LawnchairAccessibilityService
++import app.lawnchair.omalawn.Blob
++import app.lawnchair.omalawn.OmalawnCommands
++import app.lawnchair.omalawn.OmalawnError
++import java.io.ByteArrayOutputStream
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.locks.ReentrantLock
++import org.json.JSONArray
++import org.json.JSONObject
++
++/**
++ * `screen.*`: read and operate the screen through Lawnchair's accessibility service, for a paired
++ * computer over the link (the shell-only provider exposes `screen.status` only). Nothing here runs
++ * on its own: every call is one request, and the tree is read on demand (the service takes no
++ * events).
++ *
++ * Node ids ("n0", "n1", …) name the nodes of the last `screen.tree` and are valid until the next.
++ */
++object ScreenCommands {
++    const val SCREEN_OFF = "screen_off"
++    const val RATE_LIMITED = "rate_limited"
++    const val STALE_NODE = "stale_node"
++    const val BAD_PARAMS = "bad_params"
++    const val NO_WINDOW = "no_window"
++    const val NOT_EDITABLE = "not_editable"
++    const val GESTURE_FAILED = "gesture_failed"
++    const val SHOT_FAILED = "shot_failed"
++    const val NOT_FOUND = "not_found"
++    const val BUSY = "busy"
++
++    /** Android refuses screenshots closer than 333 ms apart; a little margin over that. */
++    const val SHOT_INTERVAL_MS = 340L
++    private const val MAX_NODES = 1500
++    private const val MAX_DEPTH = 80
++    private const val MAX_TEXT = 10_000
++    private const val MAX_GESTURE_MS = 10_000L
++    private const val TAP_MS = 50L
++    private const val LONG_PRESS_MS = 800L
++    private const val SWIPE_MS = 300L
++    private const val LOCK_WAIT_S = 15L
++    private const val ROOT_TRIES = 6
++    private const val ROOT_RETRY_MS = 200L
++    private val PACKAGE = Regex("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")
++
++    private val KEYS = mapOf(
++        "back" to AccessibilityService.GLOBAL_ACTION_BACK,
++        "home" to AccessibilityService.GLOBAL_ACTION_HOME,
++        "recents" to AccessibilityService.GLOBAL_ACTION_RECENTS,
++        "notifications" to AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS,
++        "quick_settings" to AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS,
++    )
++
++    /** One screen action at a time across every connection; the node table belongs to it. */
++    private val lock = ReentrantLock(true)
++    private var nodes: List<AccessibilityNodeInfo> = emptyList()
++    private var lastShot = 0L // elapsedRealtime of the last screenshot request
++    private val shotExecutor = Executors.newSingleThreadExecutor { r ->
++        Thread(r, "omalawn-screen-shot").apply { isDaemon = true }
++    }
++
++    fun dispatch(ctx: Context, method: String, params: JSONObject): Any {
++        if (method == "screen.status") return status(ctx)
++        val svc = LawnchairAccessibilityService.current
++            ?: throw OmalawnError(SCREEN_OFF, "Turn on Lawnchair in Settings › Accessibility")
++        if (!lock.tryLock(LOCK_WAIT_S, TimeUnit.SECONDS)) {
++            throw OmalawnError(BUSY, "$BUSY: another screen action has been running for over ${LOCK_WAIT_S}s")
++        }
++        try {
++            // what changes the screen also waits for (and holds off) launcher writes: a tap never
++            // lands in the middle of a layout import or a reload
++            if (method in ACTIONS) return OmalawnCommands.serially { act(ctx, svc, method, params) }
++            return act(ctx, svc, method, params)
++        } finally {
++            lock.unlock()
++        }
++    }
++
++    private val ACTIONS = setOf("screen.tap", "screen.long_press", "screen.swipe", "screen.type", "screen.key")
++
++    private fun act(ctx: Context, svc: LawnchairAccessibilityService, method: String, params: JSONObject): Any = when (method) {
++        "screen.tree" -> tree(svc)
++        "screen.tap" -> {
++            val (x, y) = point(ctx, params)
++            gesture(svc, Path().apply { moveTo(x, y) }, TAP_MS)
++            JSONObject().put("x", x.toInt()).put("y", y.toInt())
++        }
++        "screen.long_press" -> {
++            val (x, y) = point(ctx, params)
++            gesture(svc, Path().apply { moveTo(x, y) }, ms(params, LONG_PRESS_MS))
++            JSONObject().put("x", x.toInt()).put("y", y.toInt())
++        }
++        "screen.swipe" -> {
++            val (x1, y1) = coords(ctx, params, "x1", "y1")
++            val (x2, y2) = coords(ctx, params, "x2", "y2")
++            gesture(svc, Path().apply { moveTo(x1, y1); lineTo(x2, y2) }, ms(params, SWIPE_MS))
++            JSONObject()
++        }
++        "screen.type" -> type(svc, params)
++        "screen.key" -> key(svc, params)
++        "screen.shot" -> shot(svc)
++        "screen.launch" -> launch(ctx, params)
++        else -> throw OmalawnError("unknown_method", "unknown method $method")
++    }
++
++    // -- status ----------------------------------------------------------------------------
++
++    private fun status(ctx: Context) = JSONObject()
++        .put("enabled", LawnchairAccessibilityService.current != null)
++        .put("restricted", restricted(ctx) ?: JSONObject.NULL)
++
++    /**
++     * Whether Android's "restricted settings" would stop the user from turning the service on,
++     * read from the app op behind App info › ⋮ › "Allow restricted settings": errored → true,
++     * explicitly allowed → false. Never touched: false on Android 13–14 (they mark untrusted
++     * installs errored); null on 15+, where Enhanced Confirmation judges the install source, which
++     * an app cannot ask.
++     */
++    private fun restricted(ctx: Context): Boolean? {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
++        return try {
++            val ops = ctx.getSystemService(AppOpsManager::class.java)!!
++            when (ops.unsafeCheckOpRawNoThrow(OP_RESTRICTED, Process.myUid(), ctx.packageName)) {
++                AppOpsManager.MODE_ERRORED, AppOpsManager.MODE_IGNORED -> true
++                AppOpsManager.MODE_ALLOWED -> false
++                else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) null else false
++            }
++        } catch (_: Exception) {
++            null
++        }
++    }
++
++    private const val OP_RESTRICTED = "android:access_restricted_settings"
++
++    // -- tree ------------------------------------------------------------------------------
++
++    private fun tree(svc: AccessibilityService): JSONObject {
++        // the service takes no events, so the platform's node cache would go stale between calls
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) svc.clearCache()
++        // while an app opens or closes there is no active window for a moment
++        var root: AccessibilityNodeInfo? = null
++        for (i in 0 until ROOT_TRIES) {
++            root = svc.rootInActiveWindow ?: appWindowRoot(svc)
++            if (root != null) break
++            Thread.sleep(ROOT_RETRY_MS)
++        }
++        if (root == null) throw OmalawnError(NO_WINDOW, "$NO_WINDOW: no window to read (is the screen off or locked?)")
++        val kept = ArrayList<AccessibilityNodeInfo>()
++        val out = JSONArray()
++        walk(root, 0, 0, kept, out)
++        nodes = kept
++        return JSONObject()
++            .put("package", root.packageName?.toString() ?: JSONObject.NULL)
++            .put("nodes", out)
++            .put("truncated", kept.size >= MAX_NODES)
++    }
++
++    private fun appWindowRoot(svc: AccessibilityService): AccessibilityNodeInfo? =
++        svc.windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }?.root
++            ?: svc.windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }?.root
++
++    /** Depth-first; [depth] counts kept ancestors only, so the computer can indent the list. */
++    private fun walk(n: AccessibilityNodeInfo, level: Int, depth: Int, kept: MutableList<AccessibilityNodeInfo>, out: JSONArray) {
++        if (kept.size >= MAX_NODES || level > MAX_DEPTH || !n.isVisibleToUser) return
++        val text = n.text?.toString()?.takeIf { it.isNotBlank() }
++        val desc = n.contentDescription?.toString()?.takeIf { it.isNotBlank() }
++        val keep = text != null || desc != null || n.isClickable || n.isEditable || n.isScrollable || n.isCheckable
++        var childDepth = depth
++        if (keep) {
++            val r = Rect().also { n.getBoundsInScreen(it) }
++            val o = JSONObject()
++                .put("id", "n${kept.size}")
++                .put("class", n.className?.toString()?.substringAfterLast('.') ?: "")
++                .put("bounds", JSONArray(listOf(r.left, r.top, r.right, r.bottom)))
++                .put("click", n.isClickable)
++                .put("focus", n.isFocused)
++                .put("edit", n.isEditable)
++                .put("scroll", n.isScrollable)
++                .put("depth", depth)
++            if (text != null) o.put("text", text)
++            if (desc != null) o.put("desc", desc)
++            if (n.isCheckable) o.put("checkable", true).put("checked", n.isChecked)
++            kept.add(n)
++            out.put(o)
++            childDepth = depth + 1
++        }
++        for (i in 0 until n.childCount) {
++            val c = n.getChild(i) ?: continue
++            walk(c, level + 1, childDepth, kept, out)
++        }
++    }
++
++    private fun node(params: JSONObject): AccessibilityNodeInfo {
++        val id = params.optString("node")
++        val i = id.removePrefix("n").toIntOrNull()
++        val n = i?.let { nodes.getOrNull(it) }
++            ?: throw OmalawnError(STALE_NODE, "$STALE_NODE: no node $id in the last screen.tree; read the tree again")
++        if (!n.refresh()) throw OmalawnError(STALE_NODE, "$STALE_NODE: node $id is gone from the screen; read the tree again")
++        return n
++    }
++
++    // -- gestures --------------------------------------------------------------------------
++
++    private fun screenSize(ctx: Context): Point {
++        val p = Point()
++        @Suppress("DEPRECATION")
++        ctx.getSystemService(DisplayManager::class.java)!!.getDisplay(Display.DEFAULT_DISPLAY).getRealSize(p)
++        return p
++    }
++
++    /** {x, y} or {node}: a node is tapped at the centre of its part that is on the screen. */
++    private fun point(ctx: Context, params: JSONObject): Pair<Float, Float> {
++        if (params.has("node") && !params.isNull("node")) {
++            val r = Rect().also { node(params).getBoundsInScreen(it) }
++            val size = screenSize(ctx)
++            if (!r.intersect(0, 0, size.x, size.y) || r.isEmpty) {
++                throw OmalawnError(STALE_NODE, "$STALE_NODE: node ${params.optString("node")} is not on the screen")
++            }
++            return r.exactCenterX() to r.exactCenterY()
++        }
++        return coords(ctx, params, "x", "y")
++    }
++
++    private fun coords(ctx: Context, params: JSONObject, kx: String, ky: String): Pair<Float, Float> {
++        val x = number(params, kx)
++        val y = number(params, ky)
++        val size = screenSize(ctx)
++        if (x < 0 || y < 0 || x >= size.x || y >= size.y) {
++            throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: ($kx, $ky) = (${x.toInt()}, ${y.toInt()}) is off the ${size.x}x${size.y} screen")
++        }
++        return x.toFloat() to y.toFloat()
++    }
++
++    private fun number(params: JSONObject, k: String): Double {
++        val v = params.opt(k)
++        val d = when (v) {
++            is Number -> v.toDouble()
++            is String -> v.toDoubleOrNull()
++            else -> null
++        }
++        if (d == null || d.isNaN() || d.isInfinite()) throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: $k must be a number")
++        return d
++    }
++
++    private fun ms(params: JSONObject, default: Long): Long {
++        if (!params.has("ms") || params.isNull("ms")) return default
++        val v = number(params, "ms").toLong()
++        if (v < 1 || v > MAX_GESTURE_MS) throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: ms must be 1..$MAX_GESTURE_MS")
++        return v
++    }
++
++    private fun gesture(svc: AccessibilityService, path: Path, ms: Long) {
++        val g = GestureDescription.Builder()
++            .addStroke(GestureDescription.StrokeDescription(path, 0, ms))
++            .build()
++        val done = CountDownLatch(1)
++        var completed = false
++        val cb = object : AccessibilityService.GestureResultCallback() {
++            override fun onCompleted(gestureDescription: GestureDescription?) {
++                completed = true
++                done.countDown()
++            }
++
++            override fun onCancelled(gestureDescription: GestureDescription?) {
++                done.countDown()
++            }
++        }
++        if (!svc.dispatchGesture(g, cb, null)) {
++            throw OmalawnError(GESTURE_FAILED, "$GESTURE_FAILED: Android refused the gesture")
++        }
++        if (!done.await(ms + 5_000, TimeUnit.MILLISECONDS)) {
++            throw OmalawnError(GESTURE_FAILED, "$GESTURE_FAILED: the gesture did not finish")
++        }
++        if (!completed) throw OmalawnError(GESTURE_FAILED, "$GESTURE_FAILED: the gesture was cancelled (a touch on the phone, or the screen changed)")
++    }
++
++    // -- text and keys ---------------------------------------------------------------------
++
++    private fun type(svc: AccessibilityService, params: JSONObject): JSONObject {
++        if (!params.has("text") || params.isNull("text")) throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: text required")
++        val text = params.get("text").toString()
++        if (text.length > MAX_TEXT) throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: text longer than $MAX_TEXT characters")
++        val target = if (params.has("node") && !params.isNull("node")) {
++            node(params)
++        } else {
++            svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
++                ?: throw OmalawnError(NOT_EDITABLE, "$NOT_EDITABLE: no text field has the focus; tap one first or pass node")
++        }
++        if (!target.isEditable) throw OmalawnError(NOT_EDITABLE, "$NOT_EDITABLE: that node is not a text field")
++        val args = Bundle().apply {
++            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
++        }
++        // a field that has only just appeared may refuse once; ask again with fresh node state
++        if (!target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
++            Thread.sleep(250)
++            if (!target.refresh() || !target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
++                throw OmalawnError(NOT_EDITABLE, "$NOT_EDITABLE: the text field refused the text")
++            }
++        }
++        return JSONObject().put("typed", text.length)
++    }
++
++    private fun key(svc: AccessibilityService, params: JSONObject): JSONObject {
++        val name = params.optString("name")
++        val action = KEYS[name]
++            ?: throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: key must be one of ${KEYS.keys.joinToString()}")
++        if (!svc.performGlobalAction(action)) throw OmalawnError(GESTURE_FAILED, "$GESTURE_FAILED: Android refused the $name key")
++        return JSONObject().put("key", name)
++    }
++
++    // -- screenshot ------------------------------------------------------------------------
++
++    private fun shot(svc: AccessibilityService): Blob {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
++            throw OmalawnError(SHOT_FAILED, "$SHOT_FAILED: screenshots need Android 11 or newer")
++        }
++        val now = SystemClock.elapsedRealtime()
++        val wait = lastShot + SHOT_INTERVAL_MS - now
++        if (lastShot != 0L && wait > 0) {
++            throw OmalawnError(RATE_LIMITED, "$RATE_LIMITED: at most one screenshot every $SHOT_INTERVAL_MS ms; try again in $wait ms")
++        }
++        lastShot = now
++        val done = CountDownLatch(1)
++        var png: ByteArray? = null
++        var w = 0
++        var h = 0
++        var failure: OmalawnError? = null
++        svc.takeScreenshot(
++            Display.DEFAULT_DISPLAY,
++            shotExecutor,
++            object : AccessibilityService.TakeScreenshotCallback {
++                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
++                    try {
++                        val hb = result.hardwareBuffer
++                        val bmp = try {
++                            Bitmap.wrapHardwareBuffer(hb, result.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
++                        } finally {
++                            hb.close()
++                        }
++                        if (bmp == null) {
++                            failure = OmalawnError(SHOT_FAILED, "$SHOT_FAILED: the screenshot could not be read")
++                        } else {
++                            w = bmp.width
++                            h = bmp.height
++                            png = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
++                            bmp.recycle()
++                        }
++                    } catch (e: Throwable) {
++                        failure = OmalawnError(SHOT_FAILED, "$SHOT_FAILED: ${e.javaClass.simpleName}: ${e.message}")
++                    } finally {
++                        done.countDown()
++                    }
++                }
++
++                override fun onFailure(errorCode: Int) {
++                    failure = when (errorCode) {
++                        AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
++                            OmalawnError(RATE_LIMITED, "$RATE_LIMITED: Android allows about three screenshots a second; try again shortly")
++                        AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ->
++                            OmalawnError(SHOT_FAILED, "$SHOT_FAILED: the app on screen does not allow screenshots")
++                        else -> OmalawnError(SHOT_FAILED, "$SHOT_FAILED: Android refused the screenshot (error $errorCode)")
++                    }
++                    done.countDown()
++                }
++            },
++        )
++        if (!done.await(10, TimeUnit.SECONDS)) throw OmalawnError(SHOT_FAILED, "$SHOT_FAILED: no screenshot within 10 s")
++        failure?.let { throw it }
++        return Blob(png!!, JSONObject().put("width", w).put("height", h).put("format", "png"))
++    }
++
++    // -- apps ------------------------------------------------------------------------------
++
++    private fun launch(ctx: Context, params: JSONObject): JSONObject {
++        val pkg = params.optString("package")
++        if (!PACKAGE.matches(pkg)) throw OmalawnError(BAD_PARAMS, "$BAD_PARAMS: package must be a package name like com.android.settings")
++        val i = ctx.packageManager.getLaunchIntentForPackage(pkg)
++            ?: throw OmalawnError(NOT_FOUND, "$NOT_FOUND: $pkg is not installed or has nothing to open")
++        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
++        ctx.startActivity(i)
++        return JSONObject().put("package", pkg).put("activity", i.component?.className ?: JSONObject.NULL)
++    }
++}
+diff --git a/res/xml/accessibility_service_config.xml b/res/xml/accessibility_service_config.xml
+index 682ffb8b6c..83003a9d96 100644
+--- a/res/xml/accessibility_service_config.xml
++++ b/res/xml/accessibility_service_config.xml
+@@ -1,5 +1,14 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!-- Homa Lawn: the service also lets the paired computer read and operate the screen (screen.*),
++     so it declares window content, gestures and screenshots. Events stay off (eventTypes 0):
++     the tree is read on demand. The description names this honestly, in one language only, so
++     no older translation of Lawnchair's "does not watch anything" text can show instead. -->
+ <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:description="@string/accessibility_service_description"
++    android:description="@string/omalawn_accessibility_service_description"
++    android:summary="@string/omalawn_accessibility_service_summary"
+     android:packageNames=""
++    android:canRetrieveWindowContent="true"
++    android:canPerformGestures="true"
++    android:canTakeScreenshot="true"
++    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+     />
+diff --git a/src/com/android/launcher3/widget/PendingAppWidgetHostView.java b/src/com/android/launcher3/widget/PendingAppWidgetHostView.java
+index 0bda27bd39..5f34a06c15 100644
+--- a/src/com/android/launcher3/widget/PendingAppWidgetHostView.java
++++ b/src/com/android/launcher3/widget/PendingAppWidgetHostView.java
+@@ -176,6 +176,9 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView
+         mStartState = info.restoreStatus;
+         mDisabledForSafeMode = LauncherAppState.getInstance(context).isSafeModeEnabled();
+         mLabel = label;
++        // omalawn: the label is drawn on the canvas only; say it to accessibility too, so the
++        // screen tree shows "Tap to finish setup" instead of an unlabelled view
++        setContentDescription(label);
+ 
+         mPaint = new TextPaint();
+         mPaint.setColor(Themes.getAttrColor(getContext(), android.R.attr.textColorPrimary));

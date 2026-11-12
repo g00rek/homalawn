@@ -1,0 +1,446 @@
+From 6bdfcc18967d478be72b03a971511c4dc19fa569 Mon Sep 17 00:00:00 2001
+From: homar <homar@local>
+Date: Fri, 16 Oct 2026 13:07:45 +0200
+Subject: [PATCH] homar nova import: convert a Nova backup with Lawnchair's own
+ converter
+
+New command launcher.nova_convert (link kind BLOB_IO: the .novabackup in,
+the converted launcher DB out; over adb through the provider with a staged
+path). It runs upstream's NovaBackupConverter (parseInfo, then the new
+stageWorkspaceDb: the exact DB convertAndRestore would restore) and leaves
+the launcher, its grid and its settings alone; `pin` pins the backup's deep
+shortcuts as the restore does. The computer applies the result through the
+in-process layout import after writing the grid settings the converter
+would write, so the link survives and the change is undoable (upstream's
+RestoreDbTask + restart would kill the process mid-call).
+
+On Lawnchair 16-dev the converter is an older forward-port than 15
+beta3's: it lacks the At a Glance row shift, the subgrid flag, rounding of
+Nova's fractional cells and dropping items outside the grid, all of which
+the desktop's nova.py relies on. This patch brings 16-dev's converter to
+15 beta3's version (upstream's own code, commits on 15-dev not yet
+forward-ported; 16's GridType argument kept), so that part can go when
+upstream catches up.
+---
+ .../lawnchair/backup/NovaBackupConverter.kt   |  80 +++++++++++--
+ lawnchair/src/app/lawnchair/omalawn/NovaIo.kt | 111 ++++++++++++++++++
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   1 +
+ .../omalawn/OmalawnControlProvider.kt         |   1 +
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  24 +++-
+ 5 files changed, 204 insertions(+), 13 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/NovaIo.kt
+
+diff --git a/lawnchair/src/app/lawnchair/backup/NovaBackupConverter.kt b/lawnchair/src/app/lawnchair/backup/NovaBackupConverter.kt
+index 754c815222..c330712d2f 100644
+--- a/lawnchair/src/app/lawnchair/backup/NovaBackupConverter.kt
++++ b/lawnchair/src/app/lawnchair/backup/NovaBackupConverter.kt
+@@ -10,6 +10,7 @@ import android.os.Process
+ import android.util.Log
+ import app.lawnchair.DeviceProfileOverrides
+ import app.lawnchair.preferences.PreferenceManager
++import app.lawnchair.preferences2.PreferenceManager2
+ import com.android.launcher3.GridType
+ import com.android.launcher3.InvariantDeviceProfile
+ import com.android.launcher3.LauncherSettings.Favorites
+@@ -20,6 +21,7 @@ import com.android.launcher3.pm.UserCache
+ import com.android.launcher3.provider.RestoreDbTask
+ import com.android.launcher3.shortcuts.ShortcutKey
+ import com.android.launcher3.shortcuts.ShortcutRequest
++import com.patrykmichalik.opto.core.firstBlocking
+ import java.io.File
+ import java.io.FileInputStream
+ import java.io.FileOutputStream
+@@ -27,6 +29,7 @@ import java.net.URISyntaxException
+ import java.util.UUID
+ import java.util.zip.ZipInputStream
+ import javax.xml.parsers.DocumentBuilderFactory
++import kotlin.math.roundToInt
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ 
+@@ -71,6 +74,7 @@ class NovaBackupConverter(
+     }
+ 
+     private val novaGridRegex = Regex("(\\d+)x(\\d+)")
++    private val novaSubgridRegex = Regex("subgrid", RegexOption.IGNORE_CASE)
+ 
+     data class NovaBackupInfo(
+         val columns: Int?,
+@@ -82,6 +86,7 @@ class NovaBackupConverter(
+         val shortcutCount: Int,
+         val iconPackPackage: String?,
+         val iconPackLabel: String?,
++        val isSubgrid: Boolean = false,
+     )
+ 
+     private data class NovaConfig(
+@@ -89,6 +94,7 @@ class NovaBackupConverter(
+         val rows: Int?,
+         val dockCols: Int?,
+         val iconPackPackage: String?,
++        val isSubgrid: Boolean = false,
+     )
+ 
+     private data class ItemCounts(
+@@ -131,6 +137,7 @@ class NovaBackupConverter(
+                 iconPackLabel = novaConfig.iconPackPackage?.let { packageName ->
+                     resolveIconPackLabel(packageName)
+                 },
++                isSubgrid = novaConfig.isSubgrid,
+             )
+         } finally {
+             tempDir.deleteRecursively()
+@@ -147,11 +154,14 @@ class NovaBackupConverter(
+             val novaDbFile = File(tempDir, NOVA_DB)
+             require(novaDbFile.exists()) { "Missing $NOVA_DB" }
+ 
++            val smartspaceEnabled = PreferenceManager2.getInstance(context)
++                .enableSmartspace.firstBlocking()
++
+             val stagedDbFile = File(tempDir, NOVA_WORKSPACE_DB)
+-            val importedDeepShortcuts = createRestoredDb(novaDbFile, stagedDbFile)
++            val importedDeepShortcuts = createRestoredDb(novaDbFile, stagedDbFile, info, smartspaceEnabled)
+ 
+             val columns = info.columns
+-            val rows = info.rows
++            val rows = if (smartspaceEnabled && info.rows != null) info.rows + 1 else info.rows
+             val hotseatCount = info.hotseatCount
+             if (columns != null && rows != null && hotseatCount != null) {
+                 val gridInfo = DeviceProfileOverrides.DBGridInfo(
+@@ -171,7 +181,7 @@ class NovaBackupConverter(
+                 gridState.writeToPrefs(context)
+                 InvariantDeviceProfile.INSTANCE.get(context).dbFile = gridInfo.dbFile
+             }
+-            writeGridToLawnchairPrefs(info)
++            writeGridToLawnchairPrefs(info, smartspaceEnabled)
+ 
+             val restoredDbFile = context.getDatabasePath(LawnchairBackup.RESTORED_DB_FILE_NAME)
+             restoredDbFile.parentFile?.mkdirs()
+@@ -186,6 +196,33 @@ class NovaBackupConverter(
+         }
+     }
+ 
++    /**
++     * Homa Lawn (patch 0012): the conversion half of [convertAndRestore] without the restore. Writes the
++     * launcher DB that [convertAndRestore] would restore into [out] (same rows, same schema) and
++     * returns the deep shortcuts it references; the launcher, its grid and its settings are left
++     * alone. [smartspaceEnabled] stands for the "Add extra row to show At a Glance" switch.
++     */
++    suspend fun stageWorkspaceDb(
++        info: NovaBackupInfo,
++        smartspaceEnabled: Boolean,
++        out: File,
++    ): Map<String, Set<String>> = withContext(Dispatchers.IO) {
++        val tempDir = File(context.cacheDir, "$NOVA_TEMP_DIR_PREFIX${UUID.randomUUID()}")
++        tempDir.mkdirs()
++        try {
++            extractFromZip(uri, tempDir, setOf(NOVA_DB))
++            val novaDbFile = File(tempDir, NOVA_DB)
++            require(novaDbFile.exists()) { "Missing $NOVA_DB" }
++            out.delete()
++            createRestoredDb(novaDbFile, out, info, smartspaceEnabled)
++        } finally {
++            tempDir.deleteRecursively()
++        }
++    }
++
++    /** Homa Lawn (patch 0012): pins the deep shortcuts [stageWorkspaceDb] returned, as the restore does. */
++    fun pinDeepShortcuts(shortcuts: Map<String, Set<String>>) = pinImportedDeepShortcuts(shortcuts)
++
+     private fun resolveIconPackLabel(packageName: String): String = try {
+         val pm = context.packageManager
+         pm.getApplicationInfo(packageName, 0).loadLabel(pm).toString()
+@@ -193,11 +230,12 @@ class NovaBackupConverter(
+         packageName
+     }
+ 
+-    private fun writeGridToLawnchairPrefs(info: NovaBackupInfo) {
++    private fun writeGridToLawnchairPrefs(info: NovaBackupInfo, smartspaceEnabled: Boolean) {
+         val prefs = PreferenceManager.getInstance(context)
++        val adjustedRows = if (smartspaceEnabled && info.rows != null) info.rows + 1 else info.rows
+         prefs.sp.edit().apply {
+             info.columns?.let { putInt(prefs.workspaceColumns.key, it) }
+-            info.rows?.let { putInt(prefs.workspaceRows.key, it) }
++            adjustedRows?.let { putInt(prefs.workspaceRows.key, it) }
+             info.hotseatCount?.let { putInt(prefs.hotseatColumns.key, it) }
+             info.iconPackPackage?.let { putString(prefs.iconPackPackage.key, it) }
+         }.commit()
+@@ -210,6 +248,7 @@ class NovaBackupConverter(
+         var rows: Int? = null
+         var dockCols: Int? = null
+         var iconPackPackage: String? = null
++        var isSubgrid = false
+ 
+         val stringNodes = root.getElementsByTagName(NOVA_XML_TAG_STRING)
+         for (i in 0 until stringNodes.length) {
+@@ -218,6 +257,7 @@ class NovaBackupConverter(
+             val text = node.textContent ?: continue
+             when (name) {
+                 NOVA_XML_KEY_DESKTOP_GRID -> {
++                    isSubgrid = novaSubgridRegex.containsMatchIn(text)
+                     val match = novaGridRegex.find(text) ?: continue
+                     rows = match.groupValues[1].toIntOrNull() ?: continue
+                     columns = match.groupValues[2].toIntOrNull() ?: continue
+@@ -238,7 +278,7 @@ class NovaBackupConverter(
+             if (name == NOVA_XML_KEY_DOCK_COLS) dockCols = value
+         }
+ 
+-        return NovaConfig(columns, rows, dockCols, iconPackPackage)
++        return NovaConfig(columns, rows, dockCols, iconPackPackage, isSubgrid)
+     }
+ 
+     private fun countItems(dbFile: File): ItemCounts {
+@@ -276,6 +316,8 @@ class NovaBackupConverter(
+     private fun createRestoredDb(
+         novaDbFile: File,
+         targetDbFile: File,
++        info: NovaBackupInfo,
++        smartspaceEnabled: Boolean,
+     ): Map<String, Set<String>> {
+         val profileId = UserCache.INSTANCE.get(context)
+             .getSerialNumberForUser(Process.myUserHandle())
+@@ -294,7 +336,7 @@ class NovaBackupConverter(
+             novaDb.use { src ->
+                 db.beginTransaction()
+                 try {
+-                    insertNovaItems(src, db, profileId, importedDeepShortcuts)
++                    insertNovaItems(src, db, profileId, importedDeepShortcuts, info, smartspaceEnabled)
+                     db.setTransactionSuccessful()
+                 } finally {
+                     db.endTransaction()
+@@ -309,6 +351,8 @@ class NovaBackupConverter(
+         db: SQLiteDatabase,
+         profileId: Long,
+         importedDeepShortcuts: MutableMap<String, MutableSet<String>>,
++        info: NovaBackupInfo,
++        smartspaceEnabled: Boolean,
+     ) {
+         val smartFolderMap = buildSmartFolderMap(src)
+ 
+@@ -355,11 +399,25 @@ class NovaBackupConverter(
+                     null
+                 }
+                 val intent = importedDeepShortcut?.toLauncherIntentUri() ?: rawIntent
+-                val cellX = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_CELL_X)).toInt()
+-                val cellY = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_CELL_Y)).toInt()
++                val cellX = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_CELL_X)).roundToInt()
++                val rawCellY = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_CELL_Y)).roundToInt()
++                val cellY = if (isDesktop && smartspaceEnabled) rawCellY + 1 else rawCellY
+                 val screen = if (isHotseat) cellX else cursor.getInt(cursor.getColumnIndexOrThrow(NOVA_COL_SCREEN))
+-                val spanX = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_SPAN_X)).toInt().coerceAtLeast(1)
+-                val spanY = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_SPAN_Y)).toInt().coerceAtLeast(1)
++                var spanX = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_SPAN_X)).roundToInt().coerceAtLeast(1)
++                var spanY = cursor.getDouble(cursor.getColumnIndexOrThrow(NOVA_COL_SPAN_Y)).roundToInt().coerceAtLeast(1)
++
++                // Clamp to grid bounds when grid dimensions are known
++                val maxCols = info.columns
++                val maxRows = if (smartspaceEnabled && info.rows != null) info.rows + 1 else info.rows
++                if (maxCols != null && isDesktop) {
++                    spanX = spanX.coerceAtMost(maxCols)
++                    if (cellX + spanX > maxCols) continue
++                }
++                if (maxRows != null && isDesktop) {
++                    spanY = spanY.coerceAtMost(maxRows)
++                    if (cellY + spanY > maxRows) continue
++                }
++                if (maxCols != null && isHotseat && cellX >= maxCols) continue
+                 val icon = getBlobOrNull(cursor, NOVA_COL_ICON)
+                 val appWidgetProvider = getStringOrNull(cursor, NOVA_COL_APP_WIDGET_PROVIDER)
+                 val rank = when {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/NovaIo.kt b/lawnchair/src/app/lawnchair/omalawn/NovaIo.kt
+new file mode 100644
+index 0000000000..1578013964
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/NovaIo.kt
+@@ -0,0 +1,111 @@
++package app.lawnchair.omalawn
++
++import android.content.Context
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.system.Os
++import app.lawnchair.DeviceProfileOverrides
++import app.lawnchair.backup.NovaBackupConverter
++import app.lawnchair.preferences2.PreferenceManager2
++import com.patrykmichalik.opto.core.firstBlocking
++import java.io.File
++import kotlinx.coroutines.runBlocking
++import org.json.JSONObject
++
++/**
++ * `launcher.nova_convert` (patch 0012): a Nova Launcher backup (.novabackup zip) turned into a
++ * launcher DB by Lawnchair's own [NovaBackupConverter], without restoring it. The launcher, its
++ * grid and its settings are not touched (only `pin` pins the backup's deep shortcuts, as the
++ * restore does). The computer applies the result itself through the in-process layout import,
++ * after the grid settings the converter would have written, so the link stays up and the change
++ * can be undone; upstream's restore (RestoreDbTask + restart) would kill the process mid-call.
++ *
++ * Params: `path` (the staged backup, inside files/omalawn/; the link sets it), `glance_row`
++ * (true/false: the restore screen's "Add extra row to show At a Glance" switch; missing = the current
++ * At a Glance setting, as upstream reads it), `pin` (true: pin the deep shortcuts).
++ * Result: `path` of the converted DB (the link sends it as the blob) plus what the restore screen
++ * shows and the grid the converted rows need.
++ */
++object NovaIo {
++    const val BAD_BACKUP = "bad_backup"
++    private const val BAD_PATH = "bad_path"
++
++    fun convert(ctx: Context, params: JSONObject): JSONObject {
++        val path = if (params.isNull("path")) throw OmalawnError(BAD_PATH, "$BAD_PATH: path required") else params.getString("path")
++        val dir = OmalawnCommands.privateDir(ctx).canonicalFile
++        val file = File(path).canonicalFile
++        if (file.parentFile != dir) throw OmalawnError(BAD_PATH, "$BAD_PATH: $path is not inside ${dir.path}")
++        try {
++            if (!file.isFile) throw OmalawnError(BAD_PATH, "$BAD_PATH: $path does not exist")
++            Os.chmod(file.absolutePath, 0b110_000_000)
++            val glance = flag(params, "glance_row")
++                ?: PreferenceManager2.getInstance(ctx).enableSmartspace.firstBlocking()
++            val pin = flag(params, "pin") ?: false
++            val converter = NovaBackupConverter(ctx, Uri.fromFile(file))
++            val info = try {
++                runBlocking { converter.parseInfo() }
++            } catch (e: Exception) {
++                throw OmalawnError(BAD_BACKUP, "$BAD_BACKUP: not a Nova backup Lawnchair can read (${e.javaClass.simpleName}: ${e.message})")
++            }
++            val out = File(dir, "export-nova-${System.currentTimeMillis()}.db")
++            val shortcuts = try {
++                runBlocking { converter.stageWorkspaceDb(info, glance, out) }
++            } catch (e: Exception) {
++                out.delete()
++                throw OmalawnError(BAD_BACKUP, "$BAD_BACKUP: Lawnchair could not convert it (${e.javaClass.simpleName}: ${e.message})")
++            } finally {
++                for (suffix in listOf("-journal", "-wal", "-shm")) File(out.path + suffix).delete()
++            }
++            var handedOver = false // the caller takes (and deletes) the DB only from a successful answer
++            try {
++                Os.chmod(out.absolutePath, 0b110_000_000)
++                if (pin) converter.pinDeepShortcuts(shortcuts)
++                val rows = info.rows?.let { if (glance) it + 1 else it }
++                val r = JSONObject()
++                    .put("path", out.absolutePath)
++                    .put("columns", info.columns ?: JSONObject.NULL)
++                    .put("nova_rows", info.rows ?: JSONObject.NULL)
++                    .put("rows", rows ?: JSONObject.NULL)
++                    .put("hotseat", info.hotseatCount ?: JSONObject.NULL)
++                    .put("glance_row", glance)
++                    .put("subgrid", info.isSubgrid)
++                    .put("apps", info.appCount)
++                    .put("widgets", info.widgetCount)
++                    .put("folders", info.folderCount)
++                    .put("shortcuts", info.shortcutCount)
++                    .put("deep_shortcuts", shortcuts.values.sumOf { it.size })
++                    .put("pinned", pin && shortcuts.isNotEmpty())
++                val pack = info.iconPackPackage?.ifEmpty { null }
++                r.put("icon_pack", pack ?: JSONObject.NULL)
++                if (pack != null) {
++                    val installed = try {
++                        ctx.packageManager.getApplicationInfo(pack, 0)
++                        true
++                    } catch (_: PackageManager.NameNotFoundException) {
++                        false
++                    }
++                    r.put("icon_pack_label", info.iconPackLabel ?: pack).put("icon_pack_installed", installed)
++                }
++                if (info.columns != null && rows != null && info.hotseatCount != null) {
++                    r.put("db", DeviceProfileOverrides.DBGridInfo(info.hotseatCount, rows, info.columns).dbFile)
++                }
++                handedOver = true
++                return r
++            } finally {
++                if (!handedOver) out.delete()
++            }
++        } finally {
++            file.delete()
++        }
++    }
++
++    /** true/false as a JSON boolean or its text; missing or null reads as null. */
++    private fun flag(p: JSONObject, k: String): Boolean? {
++        if (p.isNull(k)) return null
++        return when (val v = p.get(k)) {
++            is Boolean -> v
++            else -> v.toString().toBooleanStrictOrNull()
++                ?: throw OmalawnError("bad_params", "bad_params: $k must be true or false, not $v")
++        }
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index 296d489667..9f634e13ac 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -115,6 +115,7 @@ object OmalawnCommands {
+             "launcher.widget_status" -> widgetStatus(ctx, str(params, "id")?.toInt() ?: error("id required"))
+             "launcher.layout_export" -> LayoutIo.exportDb(ctx, params)
+             "launcher.layout_import" -> LayoutIo.importDb(ctx, params)
++            "launcher.nova_convert" -> NovaIo.convert(ctx, params) // patch 0012
+             "launcher.request_media_permission" -> MediaPermission.request(ctx)
+             "launcher.app_info" -> OmalawnUpdate.appInfo(ctx)
+             "launcher.update_status" -> OmalawnUpdate.status(ctx)
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+index 3280ed7d31..bded9d3d80 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnControlProvider.kt
+@@ -174,6 +174,7 @@ class OmalawnControlProvider : ContentProvider() {
+             "wallpaper_set" -> "path"
+             "widget_status" -> "id"
+             "layout_import" -> "path"
++            "nova_convert" -> "path"
+             else -> null
+         }
+         if (argName != null && arg != null) p.put(argName, arg)
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index 7a3c1cfd4c..e5ecebc101 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -63,7 +63,7 @@ object LinkServer {
+     /** Methods an unpinned computer may call. */
+     private val OPEN = setOf("link.hello", "link.pair_request", "link.pair_reveal", "link.pair_wait")
+ 
+-    private enum class Kind { PLAIN, BLOB_OUT, BLOB_IN, STAGE, UPDATE }
++    private enum class Kind { PLAIN, BLOB_OUT, BLOB_IN, STAGE, UPDATE, BLOB_IO }
+ 
+     /** Method → (accepted params, how bytes travel). Unknown methods and params are refused. */
+     private class Spec(val params: Set<String>, val kind: Kind = Kind.PLAIN)
+@@ -94,6 +94,8 @@ object LinkServer {
+         // app updates (patch 0005): the APK in chunks of at most 8 MiB, see OmalawnUpdate
+         "launcher.update_offer" to Spec(setOf("name", "sha256", "size", "offset"), Kind.UPDATE),
+         "launcher.app_info" to Spec(emptySet()),
++        // Nova import (patch 0012): the backup in, the converted launcher DB out; see NovaIo
++        "launcher.nova_convert" to Spec(setOf("glance_row", "pin"), Kind.BLOB_IO),
+         "launcher.update_status" to Spec(emptySet()), // the last offered update's outcome
+         // screen control (patch 0004): pinned computers only, like everything above but OPEN
+         "screen.status" to Spec(emptySet()),
+@@ -390,7 +392,8 @@ object LinkServer {
+             writer.error(id, OmalawnCommands.UNKNOWN_METHOD, "unknown method $method")
+             return true
+         }
+-        val needsBlob = spec.kind == Kind.BLOB_IN || spec.kind == Kind.STAGE || spec.kind == Kind.UPDATE
++        val needsBlob = spec.kind == Kind.BLOB_IN || spec.kind == Kind.STAGE || spec.kind == Kind.UPDATE ||
++            spec.kind == Kind.BLOB_IO
+         // a paired computer's blob is read even when the request is then refused, so its
+         // connection stays in step
+         val blob = if (needsBlob) reader.readBlob(id) else null
+@@ -448,6 +451,23 @@ object LinkServer {
+                     }
+                     writer.result(id, r)
+                 }
++                Kind.BLOB_IO -> {
++                    val f = OmalawnCommands.stageFile(ctx, "import-nova-${UUID.randomUUID()}.zip", blob!!, internal = true)
++                    params.put("path", f.absolutePath)
++                    val r = try {
++                        OmalawnCommands.dispatch(ctx, method, params, paired) as JSONObject
++                    } finally {
++                        f.delete() // the conversion deletes it too; this covers a refusal before it ran
++                    }
++                    val out = File(r.getString("path"))
++                    val bytes = try {
++                        out.readBytes()
++                    } finally {
++                        out.delete()
++                    }
++                    r.remove("path")
++                    writer.blob(id, bytes, r)
++                }
+                 Kind.STAGE -> {
+                     val name = if (params.isNull("name")) "" else params.get("name").toString()
+                     val f = OmalawnCommands.stageFile(ctx, name, blob!!)

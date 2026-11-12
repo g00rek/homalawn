@@ -1,0 +1,14 @@
+[Unit]
+Description=Homa Lawn phone service
+# Runs inside the desktop session: it reads Omarchy's themes and talks to the Omarchy shell, and
+# Omarchy's environment (OMARCHY_PATH, PATH) reaches the user manager only when uwsm brings the
+# session up, before graphical-session.target. Started earlier, `omarchy` finds no themes.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/homalawn serve
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

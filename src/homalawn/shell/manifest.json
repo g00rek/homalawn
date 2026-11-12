@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "homalawn",
+  "name": "Homa Lawn",
+  "version": "0.1.0",
+  "description": "Run your phone's home screen from Omarchy: layout, wallpaper & style, history and agents.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Homa Lawn",
+    "description": "The Homa Lawn mark, in the accent colour while a phone is connected. Click to open Homa Lawn.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
