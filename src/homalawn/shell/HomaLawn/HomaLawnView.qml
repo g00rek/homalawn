@@ -5,11 +5,12 @@ import "Status.js" as Status
 // The Homa Lawn window's content: a rail on the left, a page header ("<Section>  <phone>") and the
 // selected page below it.
 //
-// The rail, top to bottom: the paired phones (name and status dot), "+ Add phone", a divider, the
-// selected phone's sections (Overview … Agents), and at the bottom the global Service page. It
-// opens labelled and pushes the content; ☰ collapses it to icons (tooltips; phones show their
-// initial). A window too narrow for both keeps it collapsed, and ☰ then lays the labelled rail over
-// the content until a pick. A section holding changes not applied yet carries an accent dot.
+// The rail, top to bottom: the phone picker (one button naming the phone the pages work on, with
+// its status; a click lists the paired phones and "Add phone…"), a divider, that phone's sections
+// (Overview … Agents), and at the bottom the global Service page. It opens labelled and pushes the
+// content; ☰ collapses it to icons (tooltips; the picker shows the phone's initial). A window too
+// narrow for both keeps it collapsed, and ☰ then lays the labelled rail over the content until a
+// pick. A section holding changes not applied yet carries an accent dot.
 //
 // States the view owns for every page: the service not running (one block, one Start), a phone
 // offline (one line; a page that needs the phone shows only that line), and toasts (dropped when
@@ -179,11 +180,38 @@ Rectangle {
     phone = (live || phones[0]).id
   }
 
+  // The picker's choice: that phone, on the page shown if it is a phone's page, else on Overview.
+  function pickPhone(id) {
+    if (!phones.some(p => p.id === id)) return false
+    phone = id
+    if (!isPhoneSection(section)) section = "overview"
+    railPeek = false
+    return true
+  }
+
+  // The picker's rows, one per paired phone.
+  readonly property var phoneRows: phones.map(p => ({ id: p.id, name: p.name, status: phoneStateText(p),
+                                                       brief: phoneStateBrief(p), dot: phoneDot(p) }))
+  readonly property alias phonePicker: phonePicker
+
+  // Escape: close what is open over the window (the picker's list); false when nothing was.
+  function dismiss() {
+    if (!phonePicker.open) return false
+    phonePicker.open = false
+    return true
+  }
+
   function phoneStateText(p) {
     if (!p) return ""
     var why = Status.problemOf(p)
     if (why) return "needs attention: " + why
     return p.connected ? "connected" : "offline"
+  }
+
+  // The same in a word or two, for the picker's button (what needs attention is in its list).
+  function phoneStateBrief(p) {
+    if (!p) return ""
+    return Status.problemOf(p) ? "needs attention" : (p.connected ? "connected" : "offline")
   }
 
   // The phone's dot: green connected, grey offline, the warning colour while it needs attention
@@ -227,7 +255,7 @@ Rectangle {
 
   onPhonesChanged: choosePhone()
   onPhoneChanged: { toast.clear(); loadInfo(); loadLastChange() }
-  onShownChanged: { toast.clear(); railPeek = false }
+  onShownChanged: { toast.clear(); railPeek = false; phonePicker.open = false }
   onServiceUpChanged: { loadInfo(); loadLastChange() }
   onPhoneOnlineChanged: { loadInfo(); loadLastChange() }
   onBusyEntryChanged: if (!busyEntry) loadLastChange()
@@ -476,32 +504,16 @@ Rectangle {
 
       Item { width: 1; height: 4 }
 
-      Repeater {
-        model: view.phones
-        RailButton {
-          required property var modelData
-          code: Icons.phone
-          initial: String(modelData.name || "?").trim().charAt(0).toUpperCase()
-          label: modelData.name
-          tip: modelData.name + " · " + view.phoneStateText(modelData)
-          expanded: view.railExpanded
-          current: modelData.id === view.phone
-          showDot: true
-          dot: view.phoneDot(modelData)
-          onClicked: {
-            view.phone = modelData.id
-            if (!view.isPhoneSection(view.section)) view.section = "overview"
-            view.railPeek = false
-          }
-        }
-      }
-
-      RailButton {
-        code: Icons.add
-        label: "Add phone"
+      PhonePicker {
+        id: phonePicker
+        rows: view.phoneRows
+        current: view.phone
         expanded: view.railExpanded
-        selected: view.shown === "add"
-        onClicked: { view.section = "add"; view.railPeek = false }
+        active: view.serviceUp
+        idleText: view.serviceDown ? "service not running" : ""
+        overlay: view
+        onPicked: id => view.pickPhone(id)
+        onAddPhone: { view.section = "add"; view.railPeek = false }
       }
 
       Item {

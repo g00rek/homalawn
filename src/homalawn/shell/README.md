@@ -35,7 +35,8 @@ The window's patterns, one component each, used by every page:
 
 | Pattern | Component | Rule |
 | --- | --- | --- |
-| Rail | `RailButton` in `HomaLawnView` | Phones, "+ Add phone", a divider, the selected phone's sections, Service at the bottom. Labelled (224 px) and pushing the content by default; ☰ collapses it to icons (tooltips, phones as initials). Below 1100 px of window width it stays collapsed and ☰ lays it over the content until a pick. An accent dot marks a section with changes not applied yet. |
+| Rail | `PhonePicker`, `RailButton` in `HomaLawnView` | The phone picker, a divider, the chosen phone's sections, Service at the bottom. Labelled (224 px) and pushing the content by default; ☰ collapses it to icons (tooltips). Below 1100 px of window width it stays collapsed and ☰ lays it over the content until a pick. An accent dot marks a section with changes not applied yet. |
+| Phone picker | `PhonePicker` | One bordered button at the top of the rail: the chosen phone's name, under it its status with the dot (in a word or two: connected, offline, needs attention), and a chevron. A click opens a list over the rail and the page: every paired phone (name, dot, full status, a check on the chosen one), a divider, "Add phone…". Choosing a phone keeps the page if it is a phone's page, else shows Overview. A click elsewhere or Escape closes the list (Escape closes the window only when no list is open). No phone paired: "No phone yet" with +, and a click opens Add phone. Service not running: dimmed, nothing to choose. Rail collapsed: a square with the phone's initial and dot, tooltip "<name> · <status>", the list opens to the right of the rail. |
 | Apply | `ApplyBar` | At the bottom of every editing page (Home screen, Wallpaper & style, Search & gestures, Overview's addresses): "No changes" / "N changes — not applied yet" / "Applying…" / "Applied", Discard, Apply. Nothing else applies. |
 | Confirm | `ConfirmBar` | Where the action was pressed: the question, one line on what happens, Cancel and the action (a red outline when it cannot be taken back). Restore, Unpair, Replace current wallpaper, Update app, Restart. |
 | Status | `StatusLine` | One full-width line under the header (an error, the phone offline), at most one action. |
@@ -84,6 +85,9 @@ tools/test-offscreen.sh summon DIR look
 tools/test-offscreen.sh call   DIR snapshot look:DIR/shots/look.png
 tools/test-offscreen.sh call   DIR facts           # JSON: section, phone, rail, drafts (sections with changes not applied), offline, serviceUp/Down, phones, serving
 tools/test-offscreen.sh call   DIR rail open       # or closed: the ☰ button (in a narrow window, open lays the rail over the content)
+tools/test-offscreen.sh call   DIR pick ID         # choose a phone, as its row in the phone picker does
+tools/test-offscreen.sh call   DIR picker open     # the phone picker: open, close, click (the button), add ("Add phone…"), "choose ID", esc (the Escape key)
+tools/test-offscreen.sh call   DIR pickerFacts     # JSON: the picker's title, status, tip, open, rows (name, status, chosen), addRow, where the list is drawn
 tools/test-offscreen.sh call   DIR ask update      # raise a confirm without answering: "restore NAME" (History), update (Overview), restart (Service), cancel
 tools/test-offscreen.sh call   DIR probe phones    # log: "homalawn test: probe phones ok"
 tools/test-offscreen.sh call   DIR size 900x640    # lay the window out at another size

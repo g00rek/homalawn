@@ -1,20 +1,18 @@
 import QtQuick
 import ".."
 
-// One entry of the window's left rail: a glyph (or, for a phone, its initial while the rail is
-// collapsed) in a 48 px square, with its label beside it when the rail is expanded. `dot` (a
-// colour) marks a state, e.g. a phone's connection; `draft` puts an accent dot after the label
+// One entry of the window's left rail: a glyph in a 48 px square, with its label beside it when
+// the rail is expanded. `dot` (a colour) marks a state, e.g. the service not running; `draft` puts
+// an accent dot after the label
 // (on the glyph's corner when collapsed): this section holds changes not applied yet. Collapsed,
 // hovering shows the label as a tooltip.
 Item {
   id: button
   property int code: 0
-  property string initial: ""          // shown instead of the glyph while collapsed
   property string label: ""
   property string tip: label
   property bool expanded: false
   property bool selected: false
-  property bool current: false        // the phone the sections work on: bold, accent ring
   property bool active: true
   property color dot: "transparent"
   property bool showDot: false
@@ -44,11 +42,10 @@ Item {
     color: Theme.accent
   }
 
-  readonly property color ink: button.selected || button.current ? Theme.brightForeground : (button.active ? Theme.foreground : Theme.darkForeground)
+  readonly property color ink: button.selected ? Theme.brightForeground : (button.active ? Theme.foreground : Theme.darkForeground)
 
   Glyph {
     id: glyph
-    visible: button.expanded || button.initial === ""
     x: 8 + Math.round((48 - width) / 2)
     anchors.verticalCenter: parent.verticalCenter
     code: button.code
@@ -56,29 +53,9 @@ Item {
     color: button.ink
   }
   Rectangle {
-    id: letter
-    visible: !glyph.visible
-    x: 8 + Math.round((48 - width) / 2)
-    anchors.verticalCenter: parent.verticalCenter
-    width: 26
-    height: 26
-    radius: 13
-    color: "transparent"
-    border.color: button.selected || button.current ? Theme.accent : Theme.muted
-    border.width: button.current ? 2 : 1
-    Txt {
-      anchors.centerIn: parent
-      text: button.initial
-      font.bold: true
-      color: button.ink
-    }
-  }
-
-  Rectangle {
     visible: button.showDot
-    readonly property Item mark: glyph.visible ? glyph : letter
-    x: mark.x + mark.width - 7
-    y: mark.y + mark.height - 9
+    x: glyph.x + glyph.width - 7
+    y: glyph.y + glyph.height - 9
     width: 9
     height: 9
     radius: 4.5
@@ -96,7 +73,7 @@ Item {
     text: button.label
     elide: Text.ElideRight
     color: button.ink
-    font.bold: button.selected || button.current
+    font.bold: button.selected
   }
 
   // Changes not applied yet: right after the label, or on the glyph's corner when collapsed.

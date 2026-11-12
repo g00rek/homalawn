@@ -6,6 +6,8 @@
 #   test-offscreen.sh summon DIR [SECTION]
 #   test-offscreen.sh call   DIR FUNCTION [ARG]     snapshot SECTION:PNG | facts | probe METHOD
 #                                                  | rail open|closed | pick ID   | info
+#                                                  | picker open|close|click|add|"choose ID"|esc
+#                                                  | pickerFacts
 #                                                  | history rows|"restore NAME" | size WxH
 #                                                  | lookFacts | lookEdit JSON | undo | retry
 #                                                  | overwrite yes|no | homeFacts | homeEdit JSON
@@ -167,5 +169,5 @@ case $cmd in
     dir=$(realpath -m -- "${1:?stop needs DIR}")
     pid=$(shell_pid "$dir")
     if [[ -n $pid ]]; then kill "$pid"; echo "stopped test shell $pid"; else echo "no test shell in $dir"; fi ;;
-  *) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 2 ;;
+  *) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac

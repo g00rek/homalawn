@@ -44,11 +44,15 @@ omarchy-shell shell summon homalawn '{"page":"look"}'
 
 ## The window
 
-The rail on the left lists, from the top: your phones (name and a status dot), **Add phone**, a
-divider, the selected phone's sections (**Overview**, **Home screen**, **Wallpaper & style**,
-**Search & gestures**, **History**, **Agents**), and at the bottom **Service**. The **☰** button
-folds the rail down to icons. A dot next to a section means it holds changes that are not applied
-yet.
+The rail on the left starts with the phone picker: a button that names the phone you are working
+on, with its status under the name. Click it to see all your phones and choose another one. The
+last row of that list is **Add phone…**. With no phone paired the button says **No phone yet**, and
+a click opens Add phone.
+
+Below the picker are the chosen phone's sections (**Overview**, **Home screen**, **Wallpaper &
+style**, **Search & gestures**, **History**, **Agents**), and at the bottom **Service**. The **☰**
+button folds the rail down to icons; the picker then shows the phone's first letter. A dot next to
+a section means it holds changes that are not applied yet.
 
 Three patterns hold on every page:
 

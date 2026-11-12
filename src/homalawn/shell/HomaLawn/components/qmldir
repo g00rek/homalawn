@@ -15,6 +15,7 @@ Glyph 1.0 Glyph.qml
 singleton Icons 1.0 Icons.qml
 Card 1.0 Card.qml
 RailButton 1.0 RailButton.qml
+PhonePicker 1.0 PhonePicker.qml
 Wallpaper 1.0 Wallpaper.qml
 Stepper 1.0 Stepper.qml
 DragSource 1.0 DragSource.qml

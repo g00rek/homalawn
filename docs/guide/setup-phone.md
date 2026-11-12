@@ -114,7 +114,7 @@ happens on the phone, so look at the words before tapping. More on what pairing 
 details and **Forget** it. **Forget all computers** removes every one.
 
 **Several phones.** A computer can be paired with several phones; `homalawn phones` lists them and
-the window shows each in its rail.
+the window's phone picker (the button at the top of the rail) lists them.
 
 **Unpairing.** On the computer: **Unpair** on the window's Overview, or `homalawn unpair NAME`. Both
 sides forget each other (when the phone is reachable; otherwise the phone is told at its next

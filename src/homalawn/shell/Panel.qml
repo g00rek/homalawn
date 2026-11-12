@@ -58,6 +58,13 @@ Item {
     window.visible = true
   }
 
+  // Escape: first closes what is open over the window (the phone picker's list), else the window.
+  function pressEscape() {
+    if (view && view.dismiss()) return "list"
+    window.visible = false
+    return "window"
+  }
+
   // The shell is hiding us; it already knows, so do not tell it back.
   function close() {
     hiding = true
@@ -82,7 +89,7 @@ Item {
 
     Shortcut {
       sequence: "Escape"
-      onActivated: window.visible = false
+      onActivated: panel.pressEscape()
     }
 
     Loader {

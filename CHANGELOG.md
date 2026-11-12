@@ -40,7 +40,8 @@ Omarchy computer.
 
 - **A bar icon** in omarchy-shell: connected, offline, service down, a phone that needs attention,
   and updates in its tooltip.
-- **The Homa Lawn window**: phones and **Add phone** in the rail, and per phone **Overview**,
+- **The Homa Lawn window**: a phone picker at the top of the rail (your phones and **Add phone…**),
+  and per phone **Overview**,
   **Home screen**, **Wallpaper & style**, **Search & gestures**, **History** and **Agents**, plus
   **Service**.
 - **Add phone › New phone**: a QR code the phone's camera opens to download Homa Lawn, the taps

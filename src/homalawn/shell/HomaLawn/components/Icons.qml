@@ -15,4 +15,6 @@ QtObject {
   readonly property int settings: 0xF0493      // cog
   readonly property int check: 0xF012C
   readonly property int close: 0xF0156
+  readonly property int chevronDown: 0xF0140
+  readonly property int chevronUp: 0xF0143
 }

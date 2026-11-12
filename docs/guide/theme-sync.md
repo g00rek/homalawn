@@ -11,7 +11,7 @@ the icon style) is its **wallpaper & style**.
 
 ## In the window
 
-Open the window from the bar icon, pick the phone in the rail, then **Wallpaper & style**. The
+Open the window from the bar icon, choose the phone with the picker at the top of the rail, then **Wallpaper & style**. The
 settings are per phone. Everything you change is a draft that the preview on the right shows at
 once; nothing reaches the phone until you press **Apply** in the bar at the bottom (**Discard**
 drops the draft).

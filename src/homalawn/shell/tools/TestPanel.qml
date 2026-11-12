@@ -110,11 +110,44 @@ Panel {
     return "refused"
   }
 
-  // Choose a phone in the rail by id.
+  // Choose a phone by id, as picking its row in the rail's phone picker does.
   function pick(id) {
     if (!view) return "window closed"
-    view.phone = String(id || "")
+    view.pickPhone(String(id || ""))
     return view.phone
+  }
+
+  // The rail's phone picker. "open" / "close": its list; "click": the button itself (with no phone
+  // paired that goes to Add phone); "add": the list's "Add phone…" row; "choose ID": a phone's row
+  // (both need the list open); "esc": the Escape key (closes the list, else the window). Answers
+  // pickerFacts, or "refused".
+  function picker(arg) {
+    if (!view) return "window closed"
+    var p = view.phonePicker, text = String(arg || "")
+    var ok = true
+    if (text === "open") { if (!p.open) ok = p.press() && p.open }
+    else if (text === "close") p.open = false
+    else if (text === "click") ok = p.press()
+    else if (text === "add") ok = p.add()
+    else if (text.indexOf("choose ") === 0) ok = p.choose(text.slice(7))
+    else if (text === "esc") return pressEscape()
+    else return "usage: open|close|click|add|choose ID|esc"
+    return ok ? pickerFacts() : "refused"
+  }
+
+  // The phone picker as JSON: what the button says, whether its list is open, the list's rows
+  // (chosen: the checked one) and where the list is drawn in the window.
+  function pickerFacts() {
+    if (!view) return JSON.stringify({ picker: null, why: "window closed" })
+    var p = view.phonePicker
+    var list = p.open ? findChild(view, o => o !== p && o.visible && o.z === 100 && o.hasOwnProperty("at")) : null
+    return JSON.stringify({
+      title: p.title, status: p.status, tip: p.tip, active: p.active, expanded: p.expanded, open: p.open,
+      button: [p.width, p.height],
+      rows: p.rows.map(r => ({ id: r.id, name: r.name, status: r.status, chosen: r.id === p.current })),
+      addRow: p.active && !p.empty ? "Add phone…" : null,
+      list: list ? { x: list.x, y: list.y, width: list.width, height: list.height } : null
+    })
   }
 
   // What the Overview knows of the selected phone (phone.info), as JSON in the log.
