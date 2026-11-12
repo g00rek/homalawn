@@ -255,11 +255,20 @@ Item {
       }
       Txt {
         width: parent.width
-        text: perm.granted === true || perm.grant === "" ? perm.why : perm.grant
+        text: perm.why
         visible: text !== ""
         wrapMode: Text.Wrap
         font.pixelSize: Theme.small
         color: Theme.darkForeground
+      }
+      // Not allowed: the steps that allow it, right under the row they belong to.
+      Txt {
+        width: parent.width
+        text: perm.grant
+        visible: perm.granted === false && text !== ""
+        wrapMode: Text.Wrap
+        font.pixelSize: Theme.small
+        color: Theme.foreground
       }
     }
   }
@@ -403,18 +412,21 @@ Item {
           label: "Home app"
           granted: page.permissions ? page.permissions.home : null
           why: "Your computer reaches the phone through the home screen."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Home app and choose Homa Lawn."
         }
         Permission {
           visible: !!page.permissions
           label: "Run in background"
           granted: page.permissions ? page.permissions.background : null
           why: "Lets your computer reach the phone while it sleeps."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Run in background and choose Allow."
         }
         Permission {
           visible: !!page.permissions
           label: "Notifications"
           granted: page.permissions ? page.permissions.notifications : null
           why: "For pairing requests and updates that need a tap."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Notifications and choose Allow."
         }
         Permission {
           visible: !!page.permissions
@@ -422,6 +434,7 @@ Item {
           optional: true
           granted: page.permissions ? page.permissions.screen_control : null
           why: "Lets this computer or its agents see and operate the screen."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Screen control, then turn on Homa Lawn in Android's Accessibility list. If Android says the setting is restricted: Settings › Apps › Homa Lawn › ⋮ › Allow restricted settings, then try again."
         }
         Permission {
           visible: !!page.permissions
@@ -429,9 +442,13 @@ Item {
           optional: true
           granted: page.permissions ? page.permissions.install_updates : null
           why: "Lets updates from your computer install."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Install updates and turn on Allow from this source."
         }
         Txt {
-          visible: !!page.permissions
+          // with one not allowed, its own row says how; this line is for changing the others
+          visible: !!page.permissions && page.permissions.home !== false && page.permissions.background !== false
+            && page.permissions.notifications !== false && page.permissions.screen_control !== false
+            && page.permissions.install_updates !== false
           width: parent.width
           topPadding: 6
           wrapMode: Text.Wrap
