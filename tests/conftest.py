@@ -7,6 +7,10 @@ import pytest
 # old app next to it; HOMALAWN_PACKAGE picks one explicitly.
 DEVICE_PACKAGE = os.environ.setdefault("HOMALAWN_PACKAGE", "app.homalawn.debug")
 
+# Help text is compared as plain text: CI (GITHUB_ACTIONS) makes Typer colour it, which splits
+# option names with escape codes. Set before Typer is imported; it reads this once.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
 
 @pytest.fixture(autouse=True)
 def _own_config(request, tmp_path, monkeypatch):

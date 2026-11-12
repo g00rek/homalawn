@@ -157,7 +157,7 @@ def test_shot_waits_once_when_rate_limited(linked, monkeypatch):
         return {"width": 1, "height": 1}, PNG
     phone.handlers["screen.shot"] = shot
     assert screen.shot(t) == PNG
-    assert len(calls) == 2 and sleeps == [screen.SHOT_RETRY_S]
+    assert len(calls) == 2 and sleeps.count(screen.SHOT_RETRY_S) == 1  # time.sleep is patched for every thread
 
 
 def test_link_screenshot_waits_once_when_rate_limited(linked, monkeypatch):
@@ -174,7 +174,7 @@ def test_link_screenshot_waits_once_when_rate_limited(linked, monkeypatch):
         return {"width": 1, "height": 1}, PNG
     phone.handlers["screen.shot"] = shot
     assert t.screenshot() == PNG
-    assert len(calls) == 2 and sleeps == [screen.SHOT_RETRY_S] == [0.4]
+    assert len(calls) == 2 and sleeps.count(screen.SHOT_RETRY_S) == 1 and screen.SHOT_RETRY_S == 0.4
 
 
 def test_link_screenshot_retries_only_once(linked, monkeypatch):
@@ -189,7 +189,7 @@ def test_link_screenshot_retries_only_once(linked, monkeypatch):
     phone.handlers["screen.shot"] = shot
     with pytest.raises(ProviderError) as e:
         screen.shot(t)
-    assert e.value.code == "rate_limited" and len(calls) == 2 and len(sleeps) == 1
+    assert e.value.code == "rate_limited" and len(calls) == 2 and sleeps.count(screen.SHOT_RETRY_S) == 1
 
 
 def test_screen_status_over_adb_is_the_provider_method():
