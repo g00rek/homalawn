@@ -1,4 +1,4 @@
-From 64feb71d1bad38e88714357796ce48ced29167c5 Mon Sep 17 00:00:00 2001
+From 5fadaea69df24fc9a3300a6deca7c92fb71fdc55 Mon Sep 17 00:00:00 2001
 From: g00rek <76205606+g00rek@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 11:16:40 +0100
 Subject: [PATCH] Homa Lawn: launcher objects built on the main thread, never

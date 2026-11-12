@@ -1,4 +1,4 @@
-From 60a363c2e6da05809cdb6e0edca62c1d155d4572 Mon Sep 17 00:00:00 2001
+From ce801c564ce3ce2c0e44f382dc0e4ad7eb0f06ce Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Wed, 14 Oct 2026 23:46:59 +0200
 Subject: [PATCH] homar label gap: a setting for the space between icon and

@@ -14,7 +14,7 @@ about the **phone app**: the APK that `homalawn setup`, `homalawn update`, `homa
 - **Tag** `build-<N>`, **title** "Homa Lawn build <N>".
 - **Assets**:
   - `HomaLawn-<versionName>-release.apk`, exactly the file `scripts/build-lawnchair.sh release`
-    makes, for example `HomaLawn-16.0-dev.59396cd+homalawn.325-release.apk`. The tool reads the
+    makes, for example `HomaLawn-16.0-dev.c4fe52d+homalawn.345-release.apk`. The tool reads the
     version (and with it N) from this name alone.
   - `HomaLawn-<versionName>-release.apk.sha256`, in `sha256sum` format. The tool uses it when
     GitHub's own digest for the asset is missing.

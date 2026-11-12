@@ -1,4 +1,4 @@
-From 491f95dbb46e382c9aa84eb8da25049cfb4a06d9 Mon Sep 17 00:00:00 2001
+From 7ad18e41a62d13874573245fd7ad7801f3c8e99f Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Sat, 17 Oct 2026 15:57:59 +0200
 Subject: [PATCH] homalawn device profile: where the home screen really draws,

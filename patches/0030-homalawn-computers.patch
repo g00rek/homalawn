@@ -1,4 +1,4 @@
-From 0bca2fee5d9b80cbbad7d58ddc81a9892f61660c Mon Sep 17 00:00:00 2001
+From f9af7986dbc44be8e64a8adbf6a48bdaee865971 Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Fri, 23 Oct 2026 14:13:32 +0200
 Subject: [PATCH] homalawn computers: the link knows the calling computer; Pins

@@ -1,4 +1,4 @@
-From dc61094b3e983e5f9ef73e607c6e09d035cdadfe Mon Sep 17 00:00:00 2001
+From c6b8357186a21affb46f74d46b6045ae2188d877 Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Thu, 15 Oct 2026 07:58:01 +0200
 Subject: [PATCH] homar search gesture: app search with the keyboard at once

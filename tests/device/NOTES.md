@@ -310,3 +310,12 @@ Observed on the AVD (API 35) unless marked *assumed*. AOSP references are androi
   "Last ANR service:" section of `dumpsys activity services`, which keeps the service of the last
   ANR (from the startup freeze) until a reboot; it now looks only at running entries
   (`* ServiceRecord{`).
+
+## `dumpsys activity top` cut off by a frozen Settings (2026-11-12, build 344, Lawnchair c4fe52d)
+- settings_icon's place check failed twice in a row on the new base although the icon was on the
+  screen: Settings tasks left in the background by earlier tests are listed by `dumpsys activity
+  top` before the launcher, Android's freezer had frozen the Settings process ("freezing 27789
+  com.android.settings"), its activity dump timed out, and the whole dump hit dumpsys's 10 s limit
+  ("SERVICE 'activity' DUMP TIMEOUT") before Lawnchair's part. Not a launcher change. `shown()`
+  now dumps only the launcher's own activity (`dumpsys activity <pkg>/app.lawnchair.LawnchairLauncher`,
+  0.1 s).

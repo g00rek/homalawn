@@ -5,8 +5,8 @@ app's identity and version, the patch policy, the patches, changing and rebasing
 
 The phone app is upstream Lawnchair with the patches in `patches/` applied in order. `lawnchair/` is
 a clone of upstream (gitignored); `scripts/build-lawnchair.sh` resets it to the upstream commit
-named by the first word of `patches/BASE` (now Lawnchair 16-dev `59396cd`, the nightly
-CI_5432-59396cd of 2026-11-02), applies every patch and builds Homa Lawn's APKs:
+named by the first word of `patches/BASE` (now Lawnchair 16-dev `c4fe52d`, the nightly
+CI_5537-c4fe52d of 2026-11-11), applies every patch and builds Homa Lawn's APKs:
 
 - the **release** build `app.homalawn`, what phones run: not debuggable, shrunk by R8, signed with
   a release key (see [Signing](#signing));
@@ -62,7 +62,7 @@ repository) never numbers a build below one a phone already runs. From it:
 
 - versionCode = upstream's versionCode + the build number;
 - versionName = `<upstream major>.0-dev.<upstream base>+homalawn.<build number>`, for example
-  `16.0-dev.59396cd+homalawn.325`, with `.dirty` added when the patches or the build scripts have
+  `16.0-dev.c4fe52d+homalawn.345`, with `.dirty` added when the patches or the build scripts have
   uncommitted changes;
 - the release tag is `build-<build number>` (see [releasing.md](releasing.md)).
 
@@ -153,15 +153,24 @@ The base is the first word of `patches/BASE` (the rest of the line is a comment)
 upstream CI built green (a nightly), never an untested branch head.
 
 1. In a scratch clone **outside** `lawnchair/` (the script hard-resets it), check out the OLD base
-   and apply the patches as one commit each (`git am patches/*.patch`).
-2. Rebase them with a real three-way merge: `git rebase --onto <new> <old>`. Resolve each conflict
-   in the commit that owns the file, and fix compile errors from upstream API changes in the commit
-   that introduced the line. Keep the patch policy: our code stays in `omalawn/`, upstream files
-   keep only thin hooks.
-3. Re-export every patch from its own commit:
-   `git format-patch -1 --stdout --no-signature <commit> > patches/00NN-<name>.patch`.
-4. Put the new commit in `patches/BASE` and run the script until every patch applies clean and the
-   APK builds; then run the unit and device tests.
+   and apply the patches as one commit each:
+   ```sh
+   git -C lawnchair fetch origin 16-dev && git -C lawnchair update-ref refs/heads/upstream-new FETCH_HEAD
+   git clone --shared --no-checkout lawnchair /tmp/hl-rebase && cd /tmp/hl-rebase
+   git checkout -b ours <old> && git am ../path/to/patches/*.patch
+   ```
+2. Rebase them with a real three-way merge: `git rebase --onto upstream-new <old>`. Resolve each
+   conflict in the commit that owns the file, and fix compile errors from upstream API changes in
+   the commit that introduced the line. Keep the patch policy: our code stays in `omalawn/`,
+   upstream files keep only thin hooks. Then list the files both sides changed
+   (`comm -12 <(git diff --name-only <old> upstream-new | sort) <(git diff --name-only upstream-new ours | sort)`)
+   and read upstream's change in each: a clean merge can still change what a hook relies on.
+3. Re-export every patch from its own commit, in order, over the file of the same number:
+   `git format-patch -1 --stdout --no-signature <commit> > patches/00NN-<name>.patch`
+   (`git rev-list --reverse upstream-new..ours` lists the commits in patch order).
+4. Put the new commit in `patches/BASE` (with the nightly's name in the comment: the asset of
+   upstream's `nightly` release is `…-CI_<run>-<sha7>.apk`) and run the script until every patch
+   applies clean and the APK builds; then run the unit and device tests.
 
 For example, the move from 15 beta3 to 16-dev needed real conflict work only in the hooks: the app
 and launcher classes (link start, the folded `onNewIntent`), the label-gap hooks in the refactored
@@ -172,6 +181,10 @@ the icon cache's `CacheLookupFlag`, `newIcon` creation flags, `PreferenceGroup` 
 One behavior needed a new hook: on 16 the search field loses focus when the keyboard goes down,
 so Back from "Search (instant)" reaches `LawnchairLauncher.onStateBack`; patch 0015 sends it home
 there (without it the drawer stayed open on an empty page).
+
+The move from `59396cd` to `c4fe52d` (27 upstream commits, 2026-11-12) conflicted only in
+`LawnchairApp.onCreate` (patches 0003 and 0020: the link start now comes after upstream's new
+DecorReattachGuard and baseline-profile install); everything else merged and built unchanged.
 
 Thanks to the patch policy most of the code is in our own folder and a rebase mostly touches the
 hooks.

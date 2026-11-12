@@ -4,6 +4,16 @@ All notable changes to Homa Lawn. The format follows [Keep a Changelog](https://
 and the desktop tool uses [Semantic Versioning](https://semver.org/). The phone app's releases are
 numbered by build (`build-<N>`); each desktop release names the phone build it was made with.
 
+## Unreleased
+
+### Phone app
+
+- Built on a newer Lawnchair 16-dev (`c4fe52d`, 2026-11-11, was `59396cd` of 2026-11-02). From
+  upstream: fewer launcher crashes (dropping items on the home screen, pinning shortcuts, folders
+  with an empty preview, the widget picker on Android 13, starting the home screen on Android 14+),
+  no more hang after a crash in some languages, faster first start on installs outside Play, and
+  an optional "Tilt to swipe pages" setting while rearranging the home screen.
+
 ## 0.1.0 — first public release
 
 The first public release of Homa Lawn: an Android home screen built on Lawnchair 16, run from an

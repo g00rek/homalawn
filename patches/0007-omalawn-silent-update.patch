@@ -1,4 +1,4 @@
-From a4d50082fec7611d760aef2afa20ac7b2ed8b1f2 Mon Sep 17 00:00:00 2001
+From d861200492af93d89b59410736a1c1025f1e28fe Mon Sep 17 00:00:00 2001
 From: omalawn <omalawn@local>
 Date: Tue, 13 Oct 2026 20:31:51 +0200
 Subject: [PATCH] omalawn silent update: install itself without a tap (Android

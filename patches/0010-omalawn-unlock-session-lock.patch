@@ -1,4 +1,4 @@
-From 9b591a0b4077bfdf2d29adc64f8c7adab1941863 Mon Sep 17 00:00:00 2001
+From a52bc3b1bef814c77b86b7f802129c75de61296a Mon Sep 17 00:00:00 2001
 From: omalawn <omalawn@local>
 Date: Fri, 16 Oct 2026 13:07:45 +0200
 Subject: [PATCH] omalawn: deferred update after a restart prepares its session

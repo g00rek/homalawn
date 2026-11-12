@@ -1,4 +1,4 @@
-From 1f1cb354464700eee15dbdb5ffba4db4ddae8cfb Mon Sep 17 00:00:00 2001
+From b063f416e1b8234e7199445bc237a13b646a0d00 Mon Sep 17 00:00:00 2001
 From: omalawn <omalawn@local>
 Date: Fri, 2 Oct 2026 12:13:59 +0200
 Subject: [PATCH] omalawn in-process layout export/import

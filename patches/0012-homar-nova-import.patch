@@ -1,4 +1,4 @@
-From 6bdfcc18967d478be72b03a971511c4dc19fa569 Mon Sep 17 00:00:00 2001
+From 9e893d1d29c5b6ef08a2c107bc8f74a46215fa31 Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Fri, 16 Oct 2026 13:07:45 +0200
 Subject: [PATCH] homar nova import: convert a Nova backup with Lawnchair's own

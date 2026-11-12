@@ -1,4 +1,4 @@
-From f2fe655aecf576341cb439357070d0bb3ad25b5b Mon Sep 17 00:00:00 2001
+From 0d9d5fccc4d31cce5c3833340f9d39869f656dc1 Mon Sep 17 00:00:00 2001
 From: omalawn <omalawn@local>
 Date: Fri, 2 Oct 2026 13:17:42 +0200
 Subject: [PATCH] omalawn link: TLS server, foreground service, mDNS
@@ -2159,10 +2159,10 @@ index 0000000000..942040ed50
 +zone
 +zoo
 diff --git a/lawnchair/src/app/lawnchair/LawnchairApp.kt b/lawnchair/src/app/lawnchair/LawnchairApp.kt
-index 029e65cd0f..0977b01bb7 100644
+index 8aa0a0de86..b8d00cceff 100644
 --- a/lawnchair/src/app/lawnchair/LawnchairApp.kt
 +++ b/lawnchair/src/app/lawnchair/LawnchairApp.kt
-@@ -64,12 +64,25 @@ class LawnchairApp : LauncherApplication() {
+@@ -70,6 +70,15 @@ class LawnchairApp : LauncherApplication() {
      internal var accessibilityService: LawnchairAccessibilityService? = null
      val isVibrateOnIconAnimation: Boolean by unsafeLazy { getSystemUiBoolean("config_vibrateOnIconAnimation", false) }
  
@@ -2178,16 +2178,17 @@ index 029e65cd0f..0977b01bb7 100644
      override fun onCreate() {
          super.onCreate()
          instance = this
-         QuickStepContract.sRecentsDisabled = !recentsEnabled
-         Flowerpot.Manager.getInstance(this)
-         registerActivityLifecycleCallbacks(activityHandler)
+@@ -79,6 +88,10 @@ class LawnchairApp : LauncherApplication() {
+         // Framework crash workaround on Android 15 and below, see DecorReattachGuard.
+         DecorReattachGuard.install(this)
+         scheduleBaselineProfileInstall()
 +        // Homa Lawn link: main process only (the :bugReport process runs this too). Android may
 +        // refuse the start while the launcher is in the background; LawnchairLauncher.onResume,
 +        // the boot receiver and START_STICKY cover that.
 +        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || android.app.Application.getProcessName() == packageName) app.lawnchair.omalawn.link.LinkService.start(this)
      }
  
-     fun hideClockInStatusBar() {
+     /**
 diff --git a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt b/lawnchair/src/app/lawnchair/LawnchairLauncher.kt
 index f415675229..41533fb5aa 100644
 --- a/lawnchair/src/app/lawnchair/LawnchairLauncher.kt

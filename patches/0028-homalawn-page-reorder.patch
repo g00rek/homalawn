@@ -1,4 +1,4 @@
-From 0fc2bdd6347bb75ef71d4ea62deff037bfcfa8e6 Mon Sep 17 00:00:00 2001
+From 03faef200d36ef19d392da5c0c9898c1619f663c Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Mon, 19 Oct 2026 17:07:20 +0200
 Subject: [PATCH] homalawn page reorder: edit-mode page reorder moves pages,
@@ -165,7 +165,7 @@ index db1bebcc0e..a42cad6007 100644
              android:paddingStart="12dp"
              android:paddingEnd="12dp"
 diff --git a/lawnchair/res/values/dimens.xml b/lawnchair/res/values/dimens.xml
-index 32e3bbba57..d20c72391f 100644
+index 49de50a614..4d1a07ac03 100644
 --- a/lawnchair/res/values/dimens.xml
 +++ b/lawnchair/res/values/dimens.xml
 @@ -29,7 +29,9 @@
@@ -339,7 +339,7 @@ index 2a1f23ff1e..b883cb951a 100644
      )
  }
 diff --git a/src/com/android/launcher3/Workspace.java b/src/com/android/launcher3/Workspace.java
-index 816ea455d8..6533e7bde1 100644
+index 1c885932c2..ad40980e6e 100644
 --- a/src/com/android/launcher3/Workspace.java
 +++ b/src/com/android/launcher3/Workspace.java
 @@ -62,7 +62,6 @@ import android.os.Parcelable;
@@ -350,7 +350,7 @@ index 816ea455d8..6533e7bde1 100644
  import android.view.HapticFeedbackConstants;
  import android.view.Gravity;
  import android.view.LayoutInflater;
-@@ -257,7 +256,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -258,7 +257,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
  
      private boolean mStripScreensOnPageStopMoving = false;
  
@@ -358,7 +358,7 @@ index 816ea455d8..6533e7bde1 100644
      public boolean mHasOnLayoutBeenCalled = false;
  
      private boolean mWorkspaceFadeInAdjacentScreens;
-@@ -1095,10 +1093,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -1109,10 +1107,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
              return;
          }
  
@@ -369,7 +369,7 @@ index 816ea455d8..6533e7bde1 100644
          if (mLauncher.isInState(EDIT_MODE)) {
              return;
          }
-@@ -3413,15 +3407,10 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -3465,15 +3459,10 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
          }
          int defaultPage = getDefaultPage();
          int defaultScreenId = getScreenIdForPageIndex(defaultPage);
@@ -389,7 +389,7 @@ index 816ea455d8..6533e7bde1 100644
          for (int i = 0; i < panelCount; i++) {
              int fromIndex = fromStart + i;
              int targetIndex = targetStart + i;
-@@ -3431,12 +3420,7 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -3483,12 +3472,7 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
              mScreenOrder.set(targetIndex, fromScreenId);
          }
          applyScreenOrderToChildViews();
@@ -403,7 +403,7 @@ index 816ea455d8..6533e7bde1 100644
          int remappedDefaultPage = mScreenOrder.indexOf(defaultScreenId);
          if (remappedDefaultPage >= 0 && remappedDefaultPage != defaultPage) {
              setDefaultPage(remappedDefaultPage);
-@@ -3553,10 +3537,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -3605,10 +3589,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
          return persistedScreenIds.contains(screenId) && !isExtraEmptyScreen;
      }
  
@@ -414,7 +414,7 @@ index 816ea455d8..6533e7bde1 100644
      private void persistCurrentScreenOrderSync() {
          if (mLauncher.isWorkspaceLoading()) {
              return;
-@@ -3601,21 +3581,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
+@@ -3653,21 +3633,6 @@ public class Workspace<T extends View & PageIndicator> extends PagedView<T>
          applyScreenOrderToChildViews();
      }
  

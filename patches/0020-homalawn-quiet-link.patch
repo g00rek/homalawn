@@ -1,4 +1,4 @@
-From fb8585e8d96724142b6dacbdf88d0c23414bf344 Mon Sep 17 00:00:00 2001
+From 3b07251b5967bca19905355663e1eb2f89f7af60 Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Sat, 17 Oct 2026 14:23:04 +0200
 Subject: [PATCH] homalawn quiet link: no status notification, no foreground
@@ -100,13 +100,13 @@ index 315c8cc12f..8651aeb789 100644
      <string name="homar_wallpapers_label">Wallpaper from Omarchy</string>
      <string name="homar_wallpapers_description">Pick this phone\'s wallpapers from your computer\'s theme</string>
 diff --git a/lawnchair/src/app/lawnchair/LawnchairApp.kt b/lawnchair/src/app/lawnchair/LawnchairApp.kt
-index 0977b01bb7..d62c675c51 100644
+index b8d00cceff..ef3b09ac35 100644
 --- a/lawnchair/src/app/lawnchair/LawnchairApp.kt
 +++ b/lawnchair/src/app/lawnchair/LawnchairApp.kt
-@@ -79,9 +79,9 @@ class LawnchairApp : LauncherApplication() {
-         QuickStepContract.sRecentsDisabled = !recentsEnabled
-         Flowerpot.Manager.getInstance(this)
-         registerActivityLifecycleCallbacks(activityHandler)
+@@ -88,9 +88,9 @@ class LawnchairApp : LauncherApplication() {
+         // Framework crash workaround on Android 15 and below, see DecorReattachGuard.
+         DecorReattachGuard.install(this)
+         scheduleBaselineProfileInstall()
 -        // Homa Lawn link: main process only (the :bugReport process runs this too). Android may
 -        // refuse the start while the launcher is in the background; LawnchairLauncher.onResume,
 -        // the boot receiver and START_STICKY cover that.

@@ -65,8 +65,12 @@ def crash_log(d):
 
 
 def shown(d, pkg, screen, x, y):
-    """Is the app in Lawnchair's loaded model (what it draws) at that desktop cell?"""
-    dump = d.shell("dumpsys", "activity", "top")
+    """Is the app in Lawnchair's loaded model (what it draws) at that desktop cell?
+    Only the launcher's own activity is dumped: `dumpsys activity top` also asks every other app's
+    task, and one Android has frozen in the background (a Settings left open by an earlier test)
+    answers only after a timeout, so the whole dump hits dumpsys's 10 s limit and is cut off before
+    Lawnchair's part."""
+    dump = d.shell("dumpsys", "activity", f"{PKG}/app.lawnchair.LawnchairLauncher")
     pat = re.compile(r"targetComponent=ComponentInfo\{" + re.escape(pkg) + r"/[^}]*\} screen=" + str(screen)
                      + r" cell\(" + f"{x},{y}" + r"\)")
     return bool(pat.search(dump))

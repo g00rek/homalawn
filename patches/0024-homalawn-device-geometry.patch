@@ -1,4 +1,4 @@
-From 7071713eda050dcf3ad07545d1c2eb03e10050f9 Mon Sep 17 00:00:00 2001
+From 0eddb1d628a8dd856e916df707b8395474aca2a4 Mon Sep 17 00:00:00 2001
 From: homar <homar@local>
 Date: Sat, 17 Oct 2026 22:06:03 +0200
 Subject: [PATCH] homalawn device geometry: one reading from the DeviceProfile,

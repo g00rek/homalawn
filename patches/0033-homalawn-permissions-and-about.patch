@@ -1,4 +1,4 @@
-From 8dac0c19491b6a9b04b368892d800746dd11eb96 Mon Sep 17 00:00:00 2001
+From 4b8de9e44d3771a4e81cd78bc7971395bc9bd4c1 Mon Sep 17 00:00:00 2001
 From: g00rek <76205606+g00rek@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 00:09:08 +0100
 Subject: [PATCH] Homa Lawn: settings in three groups, Permissions,
@@ -174,7 +174,7 @@ index 1c0041b1ac..cdc971b50d 100644
 +    <string name="homalawn_about_flux_description">Code adapted in the Computers screen and in Wallpaper &amp; style</string>
  </resources>
 diff --git a/lawnchair/res/values/strings.xml b/lawnchair/res/values/strings.xml
-index 1afc558226..21cfad6a83 100644
+index d55e05be45..a320f03449 100644
 --- a/lawnchair/res/values/strings.xml
 +++ b/lawnchair/res/values/strings.xml
 @@ -162,8 +162,8 @@
