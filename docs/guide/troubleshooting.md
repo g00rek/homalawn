@@ -13,6 +13,20 @@ Homa Lawn to **Never auto sleeping apps** (in Samsung's battery settings, under 
 window's Overview shows this permission for each phone. See
 [Run in background](setup-phone.md#run-in-background).
 
+## The first tap after going home does nothing (Samsung)
+
+On a Samsung phone with gesture navigation, the swipe that goes home is drawn by Samsung's own
+launcher, which still handles gestures and recent apps. Its animation lasts about 0.8 s, and until
+it ends every touch goes to Samsung's launcher, not to Homa Lawn: the home screen is visible but
+the first tap or swipe is lost. This happens with every launcher that is not Samsung's.
+
+The animation follows Android's animation speed. Make it shorter:
+
+- On the phone: Settings › Developer options › **Animator duration scale** › 0.5x (about 0.45 s
+  without touch).
+- Shorter still, from a computer with adb: `adb shell settings put global animator_duration_scale 0.1`
+  (about 0.16 s; `1` puts it back). All animations on the phone get faster with it.
+
 ## No phone is found
 
 - **Find phones (or `homalawn pair`) finds nothing.** Finding phones by themselves needs the phone
