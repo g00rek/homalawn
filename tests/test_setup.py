@@ -709,23 +709,6 @@ def test_local_network_grant_that_fails_stops_setup_before_pairing(tmp_path, apk
                             "then run setup again.")
 
 
-def test_a_handshake_that_times_out_names_local_network(tmp_path, apk):
-    from homalawn.link import pairing
-
-    def pair(host, port, **kw):
-        try:
-            raise TimeoutError("_ssl.c:1011: The handshake operation timed out")
-        except TimeoutError as t:
-            raise pairing.PairError(f"Cannot reach the phone at {host}:{port}: {t}") from t
-
-    with pytest.raises(setup.SetupError) as e:
-        _go(FakeAdb(), apk, tmp_path, pair=pair)
-    assert str(e.value) == ("The phone's Homa Lawn link at 192.168.1.50:47100 takes the connection but never "
-                            "answers it; on Android 17 the likely cause is Local network: allow Local network for "
-                            "Homa Lawn on the phone (Homa Lawn's settings › Permissions › Local network), then run "
-                            "setup again.")
-
-
 def test_pairing_that_cannot_connect_otherwise_keeps_its_own_sentence(tmp_path, apk):
     from homalawn.link import pairing
 

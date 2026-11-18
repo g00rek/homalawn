@@ -370,10 +370,6 @@ LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
 LOCAL_NETWORK_WAY = "Homa Lawn's settings › Permissions › Local network"
 LOCAL_NETWORK_OFF = ("Could not allow Local network for Homa Lawn ({e}), and without it this computer cannot reach "
                      f"the phone: on the phone, open {LOCAL_NETWORK_WAY}, allow it, then run setup again.")
-# Android 17 lets the computer's connection in but never answers it while Local network is not allowed
-HANDSHAKE_TIMEOUT = ("The phone's Homa Lawn link at {addr} takes the connection but never answers it; on Android 17 "
-                     f"the likely cause is Local network: allow Local network for Homa Lawn on the phone "
-                     f"({LOCAL_NETWORK_WAY}), then run setup again.")
 
 
 def local_network(say, t: AdbTransport) -> None:
@@ -543,8 +539,6 @@ def link_pair(say, t: AdbTransport, hosts: list[str], port: int, *, pair, connec
         msg = str(e)
         if msg == pairing._PHONE_SAYS["notifications_off"]:
             raise SetupError(NOTIFY_OFF)
-        if isinstance(e.__cause__, TimeoutError):
-            raise SetupError(HANDSHAKE_TIMEOUT.format(addr=addr))
         raise SetupError(msg)
     except identity.IdentityError as e:
         raise SetupError(str(e))

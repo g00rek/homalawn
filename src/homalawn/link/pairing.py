@@ -74,6 +74,12 @@ def _nonce(r) -> bytes:
     raise PairError("Stopped: the phone sent a malformed pairing answer (nonce). Nothing was paired.")
 
 
+# Android 17 takes the computer's connection but never answers it while Homa Lawn's Local network is not
+# allowed (patch 0037); a phone that is simply away refuses or is unreachable instead
+NO_ANSWER = ("Cannot reach the phone at {addr}: it does not answer. On Android 17 the likely cause is Local "
+             "network: on the phone, allow it in Homa Lawn's settings › Permissions › Local network, then try again.")
+
+
 def pair(host: str, port: int, *, confirm: Callable[[list[str]], bool], say: Callable[[str], None],
          name: str | None = None, timeout: float = 10.0, show_words: Callable[[list[str]], None] | None = None,
          retry_s: float = CLOSED_RETRY_S, wait_closed_s: float = CLOSED_WAIT_S,
@@ -116,6 +122,8 @@ def pair(host: str, port: int, *, confirm: Callable[[list[str]], bool], say: Cal
             if waiting():  # e.g. the phone limits a stranger's reconnects: keep trying quietly
                 nap(retry_s)
                 continue
+            if isinstance(e, TimeoutError):
+                raise PairError(NO_ANSWER.format(addr=addr)) from e
             raise PairError(f"Cannot reach the phone at {addr}: {e}") from e
         if on_conn is not None:
             on_conn(conn)

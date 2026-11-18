@@ -58,10 +58,10 @@ and its signing certificate). Nothing has to be built.
 
 **4. Tap through on the phone.** Open the download and allow the install (if Android asks, allow
 installs from your browser; if Google Play Protect warns, choose **Install anyway**), open
-**Homa Lawn**, choose it as the **home app**, and **Allow** notifications (on Android 17 also
-devices on your local network). Then, in Homa Lawn's
-settings › **Permissions**, allow **Run in background**: without it Android cuts Homa Lawn's network
-while the phone sleeps. Every tap is listed in [Setting up a phone](docs/guide/setup-phone.md).
+**Homa Lawn**, choose it as the **home app**, and **Allow** notifications. On Android 17 it also
+asks to find and connect to nearby devices: **Allow**, or no computer can reach the phone over
+Wi-Fi. Then, in Homa Lawn's settings › **Permissions**, allow **Run in background**: without it
+Android cuts Homa Lawn's network while the phone sleeps. Every tap is listed in [Setting up a phone](docs/guide/setup-phone.md).
 
 **5. Pair.** Back in the window, press **Find phones** (or type the phone's address) and **Pair**.
 Both screens show four words. If they match, tap **Accept** on the phone. Done: the phone appears in
@@ -115,7 +115,7 @@ payments, installs and permission buttons to you. See [Agents](docs/guide/agents
   Optional: Avahi (`avahi-browse`) to find phones on the network by themselves (otherwise type the
   address), and `adb` only for `homalawn setup` and the adb route.
 - **Phone**: Android 8.0 or newer. Tested on an Android 15 emulator and on Samsung phones on
-  Android 16.
+  Android 17.
 
 ## Updating
 
@@ -169,6 +169,9 @@ Homa Lawn is **alpha**. It is used every day, but expect rough edges and changes
 - **Recents stay the phone's.** Android gives the recent-apps screen and its gestures to the
   phone's own launcher, so on a Samsung phone they stay One UI's. Homa Lawn runs the home screen and
   the app drawer.
+- **On Samsung, the first tap right after the swipe home is lost.** One UI's own launcher draws
+  that gesture and keeps touches for the 0.8 s its animation lasts. See
+  [Troubleshooting](docs/guide/troubleshooting.md#the-first-tap-after-going-home-does-nothing-samsung).
 - **Some wallpapers cannot be backed up** on Android 13 and newer: if the wallpaper was set on the
   phone itself, Android does not let Homa Lawn read it, so it cannot be saved before it is replaced.
   Homa Lawn asks **Replace current wallpaper?** first. See

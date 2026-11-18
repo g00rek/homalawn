@@ -6,8 +6,7 @@ updates, and what each error message means.
 ## The computer cannot reach the phone at all (Android 17)
 
 On Android 17, Homa Lawn needs **Local network** before any computer can reach the phone: without
-it pairing and setup stop with "takes the connection but never answers it" or "handshake operation
-timed out", and the phone never shows as online. On the phone: Homa Lawn's settings ›
+it pairing and setup stop with "it does not answer", and the phone never shows as online. On the phone: Homa Lawn's settings ›
 **Permissions** › **Local network** › **Allow** (in Android: Permissions › Nearby devices).
 `homalawn setup` allows it by itself when the phone is connected over adb. Android 16 and older
 need nothing.

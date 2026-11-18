@@ -263,15 +263,17 @@ def test_unreachable_phone_is_reported(cfg):
         pairing.pair("127.0.0.1", port, name="d", say=print, confirm=lambda w: True)
 
 
-def test_a_phone_that_takes_the_connection_but_never_answers_times_out_as_the_cause(cfg):
-    """Android 17 without Local network: the port accepts, the TLS handshake never completes. The
-    PairError carries the timeout as its cause, so setup can name Local network."""
+def test_a_phone_that_takes_the_connection_but_never_answers_names_local_network(cfg):
+    """Android 17 without Local network: the port accepts, the TLS handshake never completes. Every
+    way of pairing (setup, `homalawn pair`, the window) says what to allow."""
     s = socket.create_server(("127.0.0.1", 0))   # accepts (backlog), never speaks TLS
     port = s.getsockname()[1]
     try:
-        with pytest.raises(pairing.PairError, match="Cannot reach the phone") as e:
+        with pytest.raises(pairing.PairError) as e:
             pairing.pair("127.0.0.1", port, name="d", say=print, confirm=lambda w: True, timeout=0.5)
-        assert isinstance(e.value.__cause__, TimeoutError)
+        assert str(e.value) == (f"Cannot reach the phone at 127.0.0.1:{port}: it does not answer. On Android 17 the "
+                                "likely cause is Local network: on the phone, allow it in Homa Lawn's settings › "
+                                "Permissions › Local network, then try again.")
     finally:
         s.close()
 
