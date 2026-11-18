@@ -24,6 +24,10 @@ State (`phones` and the `state` event), per phone, besides the connection and lo
   for the release app the newest GitHub release); null when nothing is offered (a test build
   without a build here, the old app, no release yet, no network). Worked out in a thread when the
   phone's app or version changes, and at most hourly otherwise (GitHub is asked at most hourly).
+- `error` / `error_code`: the phone's problem as a sentence, and for the cases the window treats
+  specially its code: `wallpaper_unsaved`, `not_paired`, `old_app` (the phone runs an app from
+  before the rename, appid.OLD: nothing is applied to it; the sentence says to remove it and add
+  the phone again).
 And for the whole service, `serving`: null, or {"url", "urls", "expires_at", "version", "source",
 "message"} while the app is offered to a new phone (`app.serve`): for a GitHub release (`source`
 "release") `url` is the release file's HTTPS address on GitHub, `expires_at` null (no time limit)
@@ -53,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import env, gradients, icons, look as look_mod, lookconf, phonekeys, phonewall, snapshots as snapshots_mod
+from . import appid, env, gradients, icons, look as look_mod, lookconf, phonekeys, phonewall, snapshots as snapshots_mod
 from .link import addresses
 from .link.client import LinkDown
 
@@ -707,6 +711,9 @@ class Service:
         null); then app_latest is brought up to date when due."""
         if data.get("package"):
             ph.app_package = data["package"]
+        if appid.is_old(ph.app_package) and ph.error_code != OLD_APP:
+            ph.error, ph.error_code, ph.pending, ph.waiting = OLD_APP_SAYS.format(phone=ph.name), OLD_APP, False, None
+            self._changed()
         if data.get("address"):
             ph.address = _plain_address(str(data["address"]))
         perms = data.get("permissions")
@@ -856,6 +863,10 @@ class Service:
         tried again after retry_interval (each try may save one more snapshot). A wallpaper that
         cannot be saved first fails with `wallpaper_unsaved` (also recorded as the phone's
         error_code) unless `overwrite_wallpaper`: the user's consent, never assumed here."""
+        if appid.is_old(ph.app_package):   # nothing can be applied to the old app; the phone's state says why
+            ph.error, ph.error_code, ph.pending, ph.waiting = OLD_APP_SAYS.format(phone=ph.name), OLD_APP, False, None
+            self._changed()
+            raise Fail(OLD_APP, ph.error)
         settings = self.look_of(ph.fp)
         omarchy = self._read_current() if settings.source == "follow" else None
         # a choice from the phone changes only the screens it names
@@ -1915,6 +1926,9 @@ DRAFTS = {
 }
 
 INFO_WAIT = 5   # phone.info waits this long for the phone's link before answering without it
+OLD_APP = "old_app"   # error_code: the phone runs an app from before the rename (appid.OLD)
+OLD_APP_SAYS = ("{phone} runs the old Homa Lawn app, which is no longer supported: remove that app from the phone, "
+                "then add the phone again (Add phone). Its home screen and settings are not carried over.")
 LATEST_TTL = 60     # s: app_latest is worked out again this often, so a build made here shows within a minute; GitHub is still asked at most once an hour (release.TTL_S keeps its answer)
 INTERNAL = "Something went wrong in the Homa Lawn service; its log has the details (journalctl --user -u homalawnd)."
 

@@ -361,7 +361,7 @@ Item {
             }
             Fact {
               visible: !!(page.phoneState && page.phoneState.error)
-              label: "Last error"
+              label: page.phoneState && page.phoneState.error_code === "old_app" ? "Old app" : "Last error"
               value: page.phoneState && page.phoneState.error ? String(page.phoneState.error) : ""
               valueColor: Theme.red
             }

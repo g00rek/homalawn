@@ -14,6 +14,12 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
   no more hang after a crash in some languages, faster first start on installs outside Play, and
   an optional "Tilt to swipe pages" setting while rearranging the home screen.
 
+### Desktop window
+
+- A phone still on the app from before the rename now says so ("Old app": remove it from the
+  phone, then add the phone again) instead of an error pointing at `homalawn update`, which
+  refuses that app.
+
 ## 0.1.0 — first public release
 
 The first public release of Homa Lawn: an Android home screen built on Lawnchair 16, run from an

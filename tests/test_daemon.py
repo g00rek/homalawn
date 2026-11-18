@@ -2521,12 +2521,13 @@ class StatusOps(FakeOps):
         super().__init__(cur)
         self.perms = {}       # name -> permissions dict (absent: an older build)
         self.version = "16.0-dev.abc+homalawn.325"
+        self.package = "app.homalawn"
 
     def status(self, s):
         self.calls.append(("status", s.name))
         if not self.online.get(s.name, True):
             raise OpError("link failed: phone not reachable", transport=True)
-        data = {"via": "link", "phone": s.name, "version": self.version, "package": "app.homalawn",
+        data = {"via": "link", "phone": s.name, "version": self.version, "package": self.package,
                 "address": "192.168.1.20:47100"}
         if s.name in self.perms:
             data["permissions"] = self.perms[s.name]
@@ -2556,6 +2557,31 @@ def test_permissions_are_passed_through_when_the_phone_reports_them(tmp_path):
             ops.perms["A"] = PERMS | {"home": False}                    # the person changed the home app
             st = await c.event(lambda st: phone(st, "A")["permissions"]["home"] is False)
             assert phone(st, "A")["permissions"]["background"] is False
+        finally:
+            await svc.stop()
+    run(go())
+
+
+def test_a_phone_on_the_old_app_says_so_and_gets_no_look(tmp_path):
+    svc, ops, _ = make_status(tmp_path, phones=("A",))
+    ops.package = "app.lawnchair.debug"
+    ops.version = "15.Dev.(505dbc4)"
+
+    async def go():
+        await svc.start()
+        try:
+            await until(lambda: phone(svc.state(), "A")["error_code"] == "old_app")
+            st = phone(svc.state(), "A")
+            assert st["error"] == ("A runs the old Homa Lawn app, which is no longer supported: remove that app "
+                                   "from the phone, then add the phone again (Add phone). Its home screen and "
+                                   "settings are not carried over.")
+            assert st["app_latest"] is None and st["pending"] is False
+            before = ops.calls.count(("look_apply", "A"))
+            c = await connect(svc)
+            r = await c.call("look.apply", phone="A")
+            assert r["error"]["code"] == "old_app" and "old Homa Lawn app" in r["error"]["message"]
+            assert ops.calls.count(("look_apply", "A")) == before          # nothing was sent to the phone
+            assert phone(svc.state(), "A")["error_code"] == "old_app"
         finally:
             await svc.stop()
     run(go())
