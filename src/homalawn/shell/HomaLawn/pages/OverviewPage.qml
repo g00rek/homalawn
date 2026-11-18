@@ -8,7 +8,7 @@ import "../Status.js" as Status
 // applied), what it has allowed Homa Lawn to do, its addresses, and how to unpair it. The facts
 // come from the service's phone.info, which the view keeps for the selected phone, and from the
 // phone's state: `app_latest` ({version, newer, source}: Update app is offered only when `newer`)
-// and `permissions` (home, background, notifications, screen_control, install_updates; null from
+// and `permissions` (local_network, home, background, notifications, screen_control, install_updates; null from
 // an older phone app, which then reports only phone.info's home app and screen control).
 //
 // The addresses are a draft like every other page's settings: adding or removing one changes only
@@ -30,7 +30,8 @@ Item {
   readonly property var app: info ? info.app : null
   // phone.info's permissions (older phone apps report only these): {default_home, screen_control, …}
   readonly property var perms: info ? info.permissions : null
-  // The phone's own report (newer phone apps): {home, background, notifications, screen_control, install_updates}
+  // The phone's own report (newer phone apps): {local_network, home, background, notifications, screen_control,
+  // install_updates}; local_network only from phone apps with patch 0037 (null before: the row stays hidden)
   readonly property var permissions: phoneState && phoneState.permissions ? phoneState.permissions : null
   readonly property var latest: phoneState && phoneState.app_latest ? phoneState.app_latest : null
   readonly property bool updateOffered: online && !!latest && latest.newer === true
@@ -406,7 +407,14 @@ Item {
         title: "Permissions"
         subtitle: "What " + page.phoneName + " has allowed Homa Lawn."
         spacing: 2
-        // A newer phone app reports all five.
+        // A newer phone app reports all of them (Local network since patch 0037).
+        Permission {
+          visible: !!page.permissions && typeof page.permissions.local_network === "boolean"
+          label: "Local network"
+          granted: page.permissions ? page.permissions.local_network : null
+          why: "So your computer can reach the phone over Wi-Fi."
+          grant: "To allow it: on the phone, open Homa Lawn's settings › Permissions › Local network and choose Allow."
+        }
         Permission {
           visible: !!page.permissions
           label: "Home app"
@@ -446,7 +454,8 @@ Item {
         }
         Txt {
           // with one not allowed, its own row says how; this line is for changing the others
-          visible: !!page.permissions && page.permissions.home !== false && page.permissions.background !== false
+          visible: !!page.permissions && page.permissions.local_network !== false
+            && page.permissions.home !== false && page.permissions.background !== false
             && page.permissions.notifications !== false && page.permissions.screen_control !== false
             && page.permissions.install_updates !== false
           width: parent.width

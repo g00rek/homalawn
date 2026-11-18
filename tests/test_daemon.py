@@ -2587,9 +2587,11 @@ def test_a_phone_on_the_old_app_says_so_and_gets_no_look(tmp_path):
     run(go())
 
 
-def test_ops_permissions_of_keeps_only_the_five_true_false_answers():
-    assert real_ops.permissions_of({"permissions": PERMS | {"extra": True}}) == PERMS
-    assert real_ops.permissions_of({"permissions": {"home": "yes"}}) == {k: None for k in PERMS} | {"home": None}
+def test_ops_permissions_of_keeps_only_the_known_true_false_answers():
+    old = PERMS | {"local_network": None}               # a build from before patch 0037 leaves it out
+    assert real_ops.permissions_of({"permissions": PERMS | {"extra": True}}) == old
+    assert real_ops.permissions_of({"permissions": PERMS | {"local_network": False}}) == PERMS | {"local_network": False}
+    assert real_ops.permissions_of({"permissions": {"home": "yes"}}) == {k: None for k in old}
     assert real_ops.permissions_of({"default_home": True}) is None
 
 

@@ -71,7 +71,9 @@ differently.
    You can turn it back on afterwards.
 8. "App installed": **Open**.
 9. Homa Lawn asks to be the home app: choose **Homa Lawn**, then **Set as default**.
-10. "Allow Homa Lawn to send you notifications?": **Allow**.
+10. "Allow Homa Lawn to send you notifications?": **Allow**. On Android 17 Android also asks
+    about devices on your local network: **Allow** (without it your computer cannot reach the
+    phone).
 11. Open Homa Lawn's settings (the **Homa Lawn** icon in the app drawer) › **Permissions** and tap
     **Run in background**. Android asks "Let app always run in background?": **Allow**. On a
     Samsung phone, also add Homa Lawn to **Never auto sleeping apps** (in Samsung's battery settings, under Background usage limits). [Why this matters](#run-in-background).
@@ -141,6 +143,7 @@ Open them from the **Homa Lawn** icon in the app drawer. They have three groups:
 
 | Row | Needed? | What it is for |
 |---|---|---|
+| **Local network** | Needed | So your computer can reach the phone over Wi-Fi. Android 17 and later only (always allowed before). In Android: Permissions › Nearby devices. |
 | **Home app** | Needed | Your computer reaches the phone through the home screen. |
 | **Run in background** | Needed | Lets your computer reach the phone while it sleeps. In Android: App battery usage › Allow background usage. |
 | **Notifications** | Needed | For pairing requests and updates that need a tap. |
@@ -177,7 +180,7 @@ homalawn setup            # a phone already on adb, or one already set up (safe 
 
 It connects adb over Wireless debugging by QR code, installs Homa Lawn (from `--apk FILE`, else a
 build in this checkout, else the newest release), makes it the home app, lets it run in the
-background, allows its notifications, switches screen control on (running setup is your consent;
+background, allows its notifications and (on Android 17) the local network, switches screen control on (running setup is your consent;
 `--no-screen-control` leaves it off), pairs the link and checks that it all works. It ends with
 **Ready: <phone> is set up and paired.** Wireless debugging can be turned off afterwards: the link
 does not need it.

@@ -3,10 +3,11 @@
 // What the bar mark says about the paired phones, shared by the bar widget and the test harness.
 //
 // A phone needs attention when the service reports an error for it, or when it is connected and
-// one of the permissions Homa Lawn needs (home app, run in background, notifications) is not
-// allowed. Screen control and installing updates are optional and never count.
+// one of the permissions Homa Lawn needs (local network, home app, run in background,
+// notifications) is not allowed. Screen control and installing updates are optional and never count.
 
 var REQUIRED = [
+  { key: "local_network", words: "local network" },
   { key: "home", words: "home app" },
   { key: "background", words: "run in background" },
   { key: "notifications", words: "notifications" }

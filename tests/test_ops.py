@@ -140,6 +140,17 @@ def test_phone_info_reads_the_phone_without_asking_for_photo_access():
     assert d["app"] == {"versionName": "14"} and d["permissions"]["screen_control"] is None
 
 
+def test_permissions_of_reports_local_network_and_leaves_an_unreported_key_unknown():
+    """local_network (patch 0037) is one of the phone's permissions; a build from before it does not
+    report the key, which is None (unknown), never False (not allowed)."""
+    new = {"local_network": False, "home": True, "background": True, "notifications": True,
+           "screen_control": False, "install_updates": True}
+    assert ops.permissions_of({"permissions": new}) == new
+    old = {k: v for k, v in new.items() if k != "local_network"}
+    assert ops.permissions_of({"permissions": old}) == old | {"local_network": None}
+    assert ops.permissions_of({"version": "15"}) is None
+
+
 def test_build_key_from_the_install_time_else_the_apk_sha256():
     """Our builds share one versionName and versionCode: the connection check tells them apart by
     launcher.ping's installed_at (no extra call), or the APK sha256 of a build without it."""

@@ -116,7 +116,7 @@ def pair(host: str, port: int, *, confirm: Callable[[list[str]], bool], say: Cal
             if waiting():  # e.g. the phone limits a stranger's reconnects: keep trying quietly
                 nap(retry_s)
                 continue
-            raise PairError(f"Cannot reach the phone at {addr}: {e}")
+            raise PairError(f"Cannot reach the phone at {addr}: {e}") from e
         if on_conn is not None:
             on_conn(conn)
         with conn:

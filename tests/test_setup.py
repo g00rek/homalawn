@@ -27,7 +27,7 @@ class FakeAdb:
 
     def __init__(self, devices=None, installed: bytes | None = b"old build", default_home=False,
                  services="null", a11y="0", wlan="192.168.1.50", install_out="Performing Streamed Install\nSuccess\n",
-                 mdns=True, ids=None, forwards=(), sdk="34", grant_ok=True, pkg=PKG, keep_ok=True):
+                 mdns=True, ids=None, forwards=(), sdk="34", grant_ok=True, pkg=PKG, keep_ok=True, refuse=()):
         self.ids = {IPS: "R5CT00EXAMPLE", **(ids or {})}  # serial -> ro.serialno (default: from the mDNS name, else the serial)
         self.forwards = set(forwards)  # (serial, "tcp:P") forwards present
         self.devices = dict(devices if devices is not None else {S23: "device"})
@@ -42,6 +42,7 @@ class FakeAdb:
         self.provider: list[tuple[str, str | None]] = []
         self.sdk = sdk
         self.grant_ok = grant_ok
+        self.refuse = set(refuse)  # permissions whose `pm grant` fails (all of them when not grant_ok)
         self.granted: list[tuple[str, str]] = []
         self.pkg = pkg  # the Homa Lawn app on the phone (when `installed`)
         self.keep_ok = keep_ok
@@ -91,7 +92,7 @@ class FakeAdb:
         if words == ["getprop", "ro.build.version.sdk"]:
             return ok(self.sdk + "\n")
         if words[:2] == ["pm", "grant"]:
-            if not self.grant_ok:
+            if not self.grant_ok or words[3] in self.refuse:
                 return (255, b"", b"Exception occurred while executing 'grant': Unknown permission\n")
             self.granted.append((words[2], words[3]))
             return ok()
@@ -676,6 +677,69 @@ def test_notifications_are_granted_on_a_rerun_too(tmp_path, apk, proof):
     assert fake.granted == [(PKG, "android.permission.POST_NOTIFICATIONS")]
 
 
+LOCAL = "android.permission.ACCESS_LOCAL_NETWORK"
+
+
+def test_local_network_is_granted_on_android_17_before_the_link(tmp_path, apk, proof):
+    """Android 17 blocks an SDK-37 app's local-network traffic without ACCESS_LOCAL_NETWORK: the
+    link's handshake would never complete, so setup grants it before pairing."""
+    fake = FakeAdb(sdk="37")
+    out, paired, _ = _go(fake, apk, tmp_path)
+    assert fake.granted == [(PKG, "android.permission.POST_NOTIFICATIONS"), (PKG, LOCAL)]
+    assert "Local network allowed for Homa Lawn (this computer reaches the phone over Wi-Fi)." in out
+    grant = next(i for i, a in enumerate(fake.log) if LOCAL in " ".join(a))
+    home = next(i for i, a in enumerate(fake.log) if "KEYCODE_HOME" in " ".join(a))
+    assert grant < home and paired                                   # granted before the link step
+
+
+def test_local_network_is_left_alone_before_android_17(tmp_path, apk, proof):
+    fake = FakeAdb(sdk="36")
+    out, _, _ = _go(fake, apk, tmp_path)
+    assert (PKG, LOCAL) not in fake.granted
+    assert not any("Local network" in line for line in out)
+
+
+def test_local_network_grant_that_fails_stops_setup_before_pairing(tmp_path, apk):
+    fake = FakeAdb(sdk="37", refuse={LOCAL})
+    with pytest.raises(setup.SetupError) as e:
+        _go(fake, apk, tmp_path, pair=lambda *a, **k: pytest.fail("paired without Local network"))
+    assert str(e.value) == ("Could not allow Local network for Homa Lawn (Exception occurred while executing "
+                            "'grant': Unknown permission), and without it this computer cannot reach the phone: "
+                            "on the phone, open Homa Lawn's settings › Permissions › Local network, allow it, "
+                            "then run setup again.")
+
+
+def test_a_handshake_that_times_out_names_local_network(tmp_path, apk):
+    from homalawn.link import pairing
+
+    def pair(host, port, **kw):
+        try:
+            raise TimeoutError("_ssl.c:1011: The handshake operation timed out")
+        except TimeoutError as t:
+            raise pairing.PairError(f"Cannot reach the phone at {host}:{port}: {t}") from t
+
+    with pytest.raises(setup.SetupError) as e:
+        _go(FakeAdb(), apk, tmp_path, pair=pair)
+    assert str(e.value) == ("The phone's Homa Lawn link at 192.168.1.50:47100 takes the connection but never "
+                            "answers it; on Android 17 the likely cause is Local network: allow Local network for "
+                            "Homa Lawn on the phone (Homa Lawn's settings › Permissions › Local network), then run "
+                            "setup again.")
+
+
+def test_pairing_that_cannot_connect_otherwise_keeps_its_own_sentence(tmp_path, apk):
+    from homalawn.link import pairing
+
+    def pair(host, port, **kw):
+        try:
+            raise ConnectionRefusedError("Connection refused")
+        except OSError as t:
+            raise pairing.PairError(f"Cannot reach the phone at {host}:{port}: {t}") from t
+
+    with pytest.raises(setup.SetupError) as e:
+        _go(FakeAdb(), apk, tmp_path, pair=pair)
+    assert str(e.value) == "Cannot reach the phone at 192.168.1.50:47100: Connection refused"
+
+
 def test_keep_connected_takes_the_app_off_battery_optimisation(tmp_path, apk, proof):
     """The link has no foreground service: off battery optimisation is what keeps it reachable
     behind other apps and in Doze (Android 15+), so setup does what "Keep connected" does."""
@@ -969,6 +1033,7 @@ def test_via_link_with_a_phone_that_does_not_answer_stops(tmp_path, apk):
     with pytest.raises(setup.SetupError) as e:
         _link_only(tmp_path, apk, None, via="link")
     assert "does not answer over the Homa Lawn link" in str(e.value)
+    assert "on Android 17 also allow Local network: Homa Lawn's settings › Permissions › Local network" in str(e.value)
 
 
 def test_via_link_with_two_paired_phones_needs_a_name(tmp_path, apk, proof):

@@ -1,0 +1,518 @@
+From f02d92d11d426b53b69a63c425de85390ba8ea71 Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:11:19 +0100
+Subject: [PATCH] Homa Lawn: Local network, the permission Android 17 needs for
+ the link (patch 0037)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Homa Lawn targets SDK 37, so on Android 17 every local-network packet of the app is blocked
+without the runtime permission ACCESS_LOCAL_NETWORK (group Nearby devices): the computer's TLS
+handshake on port 47100 never completes and NsdManager.registerService throws
+"Missing local network permission". The manifest now declares it, and it is a needed permission:
+Settings › Permissions › Local network (allowed before Android 17; the tap shows Android's prompt
+through LocalNetworkActivity, or App info when Android no longer shows it), launcher.ping's
+permissions.local_network, the Setup reminders notification (Allow local network). It is asked
+for once per install with the home screen's first prompt (in the same request as notifications),
+and Pair a computer asks for it and says so on the waiting screen while it is missing. Once it is
+granted while the process runs, the mDNS advert refused at the link's start is registered
+(Nsd.retry, from the prompt's result, every Setup reminders check and the Permissions screen's
+resume). The constants are spelled out: Launcher3's framework-16.jar comes first on the compile
+classpath and lacks ACCESS_LOCAL_NETWORK and CINNAMON_BUN.
+---
+ lawnchair/AndroidManifest.xml                 |  11 ++
+ .../omalawn/HomaLawnNotifications.kt          |   4 +-
+ .../lawnchair/omalawn/HomaLawnPermissions.kt  |  26 ++++-
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |   2 +-
+ .../app/lawnchair/omalawn/link/LinkAsks.kt    |  42 +++++--
+ .../lawnchair/omalawn/link/LocalNetwork.kt    | 103 ++++++++++++++++++
+ .../omalawn/link/NotifyPermission.kt          |  25 ++++-
+ .../src/app/lawnchair/omalawn/link/Nsd.kt     |  13 +++
+ .../omalawn/link/PairConfirmActivity.kt       |  11 ++
+ 9 files changed, 214 insertions(+), 23 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/LocalNetwork.kt
+
+diff --git a/lawnchair/AndroidManifest.xml b/lawnchair/AndroidManifest.xml
+index ef2d801572..dbc7820916 100644
+--- a/lawnchair/AndroidManifest.xml
++++ b/lawnchair/AndroidManifest.xml
+@@ -25,6 +25,8 @@
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+     <!-- Homa Lawn link: mDNS advert -->
+     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
++    <!-- Homa Lawn link: Android 17+ blocks all local-network traffic of an app targeting 37 without it -->
++    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+     <!-- the pairing confirmation screen hides other apps' overlays while it shows (12+) -->
+     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+@@ -229,6 +231,15 @@
+             android:taskAffinity=""
+             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+ 
++        <!-- Homa Lawn: Android's Local network prompt (Permissions, Setup reminders, Pair a computer) -->
++        <activity
++            android:name="app.lawnchair.omalawn.link.LocalNetworkActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:noHistory="true"
++            android:taskAffinity=""
++            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
++
+         <!-- system broadcasts reach a non-exported receiver; nothing else can trigger it -->
+         <receiver
+             android:name="app.lawnchair.omalawn.link.BootReceiver"
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
+index cc6b99cbb6..ab1782178a 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnNotifications.kt
+@@ -13,7 +13,7 @@ import com.android.launcher3.R
+  * notification page for the app (patch 0033), apart from Lawnchair's own:
+  * - "Pairing requests" ([PAIRING]): asks before a computer is paired;
+  * - "Setup reminders" ([REMINDERS]): what Homa Lawn still needs from Android (home app, run in
+- *   background, photo access); a tap opens Settings › Permissions;
++ *   background, the local network, photo access); a tap opens Settings › Permissions;
+  * - "App updates" ([UPDATES]): a new Homa Lawn sent from a paired computer.
+  * The ids are the ones phones already have, so a person's choices per channel stay. All three are
+  * created together whenever one is needed, so the page always shows the whole group. Every Homa
+@@ -42,7 +42,7 @@ object HomaLawnNotifications {
+                     group = GROUP
+                 },
+                 NotificationChannel(REMINDERS, "Setup reminders", NotificationManager.IMPORTANCE_DEFAULT).apply {
+-                    description = "What Homa Lawn still needs from Android: the home app, running in the background, access to photos"
++                    description = "What Homa Lawn still needs from Android: the local network, the home app, running in the background, access to photos"
+                     group = GROUP
+                 },
+                 NotificationChannel(UPDATES, "App updates", NotificationManager.IMPORTANCE_HIGH).apply {
+diff --git a/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt b/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
+index bf3946d415..bbe88fbe73 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/HomaLawnPermissions.kt
+@@ -25,6 +25,7 @@ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
+ import androidx.navigation.navDeepLink
+ import app.lawnchair.LawnchairAccessibilityService
++import app.lawnchair.omalawn.link.LocalNetwork
+ import app.lawnchair.omalawn.screen.ScreenCommands
+ import app.lawnchair.ui.preferences.LocalIsExpandedScreen
+ import app.lawnchair.ui.preferences.PreferenceActivity
+@@ -37,14 +38,16 @@ import org.json.JSONObject
+ 
+ /**
+  * Settings › Permissions (patch 0033): the one place that shows everything Homa Lawn needs from
+- * Android, each with its state, one line why, and a tap that opens the exact Android page. Three
+- * are needed for a computer to reach the phone (home app, run in background, notifications), two
++ * Android, each with its state, one line why, and a tap that opens the exact Android page. Four
++ * are needed for a computer to reach the phone (local network, home app, run in background,
++ * notifications; local network since patch 0037, Android 17+ only, always allowed before), two
+  * are optional (screen control, install updates). The dashboard row counts only the needed ones;
+  * the "Setup reminders" notification opens this screen; `launcher.ping` reports the same states
+  * as `permissions`, so the computer shows what the phone shows.
+  */
+ object HomaLawnPermissions {
+     enum class Perm(val key: String, val required: Boolean) {
++        LOCAL_NETWORK("local_network", true),
+         HOME("home", true),
+         BACKGROUND("background", true),
+         NOTIFICATIONS("notifications", true),
+@@ -65,6 +68,7 @@ object HomaLawnPermissions {
+     )?.activityInfo?.packageName == ctx.packageName
+ 
+     fun allowed(ctx: Context, p: Perm): Boolean = when (p) {
++        Perm.LOCAL_NETWORK -> LocalNetwork.allowed(ctx)
+         Perm.HOME -> isHome(ctx)
+         Perm.BACKGROUND -> ctx.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(ctx.packageName) == true
+         Perm.NOTIFICATIONS -> NotificationManagerCompat.from(ctx).areNotificationsEnabled()
+@@ -75,7 +79,7 @@ object HomaLawnPermissions {
+     /** How many of the needed ones are not allowed. */
+     fun needAttention(ctx: Context): Int = Perm.entries.count { it.required && !allowed(ctx, it) }
+ 
+-    /** `launcher.ping`'s `permissions`: {home, background, notifications, screen_control, install_updates}. */
++    /** `launcher.ping`'s `permissions`: {local_network, home, background, notifications, screen_control, install_updates}. */
+     fun toJson(ctx: Context): JSONObject = JSONObject().apply { Perm.entries.forEach { put(it.key, allowed(ctx, it)) } }
+ 
+     /** Opens this screen over a fresh settings task (the "Setup reminders" notification's tap). */
+@@ -83,11 +87,17 @@ object HomaLawnPermissions {
+         .setClass(ctx, PreferenceActivity::class.java)
+         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+ 
+-    /** The exact Android page for [p] (a dialog where Android asks the question itself). */
++    /** The exact Android page for [p] (a dialog where Android asks the question itself, or its prompt). */
+     @SuppressLint("BatteryLife") // sideloaded build; the link must survive Doze
+     fun androidPage(ctx: Context, p: Perm): Intent {
+         val pkg = Uri.fromParts("package", ctx.packageName, null)
+         return when (p) {
++            // not allowed: Android's prompt (App info when it no longer shows it); allowed: App info
++            Perm.LOCAL_NETWORK -> if (allowed(ctx, p)) {
++                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
++            } else {
++                LocalNetwork.askIntent(ctx)
++            }
+             Perm.HOME -> Intent(Settings.ACTION_HOME_SETTINGS)
+             // not allowed: Android's own question; allowed: App info, where App battery usage lives
+             Perm.BACKGROUND -> if (allowed(ctx, p)) {
+@@ -122,6 +132,7 @@ fun PermissionsScreen() {
+     var tick by remember { mutableIntStateOf(0) }
+     LifecycleResumeEffect(Unit) {
+         tick++
++        LocalNetwork.advertise(ctx) // allowed in App info meanwhile: the link's advert goes out now
+         onPauseOrDispose { }
+     }
+     val states = remember(tick) { HomaLawnPermissions.Perm.entries.associateWith { HomaLawnPermissions.allowed(ctx, it) } }
+@@ -132,6 +143,13 @@ fun PermissionsScreen() {
+ 
+     PreferenceLayout(label = "Permissions", backArrowVisible = !LocalIsExpandedScreen.current) {
+         PreferenceGroup(heading = "Needed") {
++            PermissionRow(
++                HomaLawnPermissions.Perm.LOCAL_NETWORK,
++                "Local network",
++                states,
++                "So your computer can reach the phone over Wi-Fi.",
++                hint = "In Android: Permissions › Nearby devices › Allow.",
++            )
+             PermissionRow(HomaLawnPermissions.Perm.HOME, "Home app", states, "Your computer reaches the phone through the home screen.")
+             PermissionRow(
+                 HomaLawnPermissions.Perm.BACKGROUND,
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index ed5f9628e5..f42e9e025a 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -256,7 +256,7 @@ object OmalawnCommands {
+         // the launcher is starting, loading, or has never been started in this process
+         .put("model_loaded", LauncherAppState.getInstance(ctx).model.isModelLoaded())
+         .put("default_home", HomaLawnPermissions.isHome(ctx))
+-        // patch 0033: what Settings › Permissions shows, {home, background, notifications, screen_control, install_updates}
++        // patch 0033: what Settings › Permissions shows, {local_network (0037), home, background, notifications, screen_control, install_updates}
+         .put("permissions", HomaLawnPermissions.toJson(ctx))
+ 
+     private fun typed(v: Any?): JSONObject = JSONObject()
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+index 7bf07344e9..a5446a9817 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkAsks.kt
+@@ -16,6 +16,8 @@ import app.lawnchair.omalawn.HomeRole
+  * notification that only exists while something is missing (there is no status notification).
+  * Its tap opens Settings › Permissions ([app.lawnchair.omalawn.HomaLawnPermissions], patch 0033);
+  * its actions go straight to Android's control:
++ * - **Allow local network** (Android 17+, patch 0037): without it Android blocks the link's
++ *   traffic, so no computer reaches the phone at all ([LocalNetwork]);
+  * - **Set as home app**: Homa Lawn is not the default home app, so Android does not keep its
+  *   process (and the link in it) at home-app priority;
+  * - **Run in background**: Homa Lawn is under battery optimisation, so the link has no network
+@@ -23,7 +25,8 @@ import app.lawnchair.omalawn.HomeRole
+  *
+  * Each need is asked once: dismissed, it stays away until that need goes and comes back (or a
+  * new one appears). When nothing is missing any more the notification is removed. Checked when
+- * the link starts in a process and every time the home screen comes to the front.
++ * the link starts in a process and every time the home screen comes to the front; each check also
++ * registers the link's mDNS advert if Local network was allowed since it was refused.
+  */
+ object LinkAsks {
+     private const val TAG = "OmalawnLink"
+@@ -31,17 +34,20 @@ object LinkAsks {
+     private const val NOTIFICATION_ID = 47103
+     private const val PREFS = "omalawn_link"
+     private const val KEY_ASKED = "asks_posted"
++    const val LOCAL = "local_network"
+     const val HOME = "home"
+     const val KEEP = "keep_connected"
+ 
+     /** The needs right now, in the order they are shown. */
+     fun needs(ctx: Context): List<String> = buildList {
++        if (LocalNetwork.missing(ctx)) add(LOCAL)
+         if (HomeRole.missing(ctx)) add(HOME)
+         val pm = ctx.getSystemService(PowerManager::class.java)
+         if (pm != null && !pm.isIgnoringBatteryOptimizations(ctx.packageName)) add(KEEP)
+     }
+ 
+     fun refresh(ctx: Context) {
++        LocalNetwork.advertise(ctx)
+         // the channel group is there from the first start, so Android's notification page shows it
+         val nm = app.lawnchair.omalawn.HomaLawnNotifications.ensure(ctx) ?: return
+         val needs = needs(ctx)
+@@ -63,25 +69,30 @@ object LinkAsks {
+     }
+ 
+     private fun build(ctx: Context, needs: List<String>): android.app.Notification {
+-        // one need: its name as the title and why as the text; two: one line each
++        // one need: its name as the title and why as the text; more: one line each
+         val lines = if (needs.size > 1) {
+             needs.map {
+                 when (it) {
++                    LOCAL -> "Let Homa Lawn use the local network, so your computer can reach the phone over Wi-Fi."
+                     HOME -> "Set Homa Lawn as the home app: your computer reaches the phone through the home screen."
+                     else -> "Let Homa Lawn run in the background, so your computer can reach the phone while it sleeps."
+                 }
+             }
+-        } else if (needs[0] == HOME) {
+-            listOf("Your computer reaches the phone through the home screen.")
+         } else {
+-            listOf("So your computer can reach the phone while it sleeps.")
++            when (needs[0]) {
++                LOCAL -> listOf("So your computer can reach the phone over Wi-Fi.")
++                HOME -> listOf("Your computer reaches the phone through the home screen.")
++                else -> listOf("So your computer can reach the phone while it sleeps.")
++            }
+         }
+         val title = if (needs.size > 1) {
+-            "Homa Lawn needs two settings"
+-        } else if (needs[0] == HOME) {
+-            "Set Homa Lawn as the home app"
++            "Homa Lawn needs ${if (needs.size == 2) "two" else "three"} settings"
+         } else {
+-            "Let Homa Lawn run in the background"
++            when (needs[0]) {
++                LOCAL -> "Let Homa Lawn use the local network"
++                HOME -> "Set Homa Lawn as the home app"
++                else -> "Let Homa Lawn run in the background"
++            }
+         }
+         val intents = needs.map { intentFor(ctx, it) }
+         val b = NotificationCompat.Builder(ctx, CHANNEL)
+@@ -100,12 +111,23 @@ object LinkAsks {
+             .setAutoCancel(true)
+             .setOnlyAlertOnce(true)
+         needs.forEachIndexed { i, need ->
+-            b.addAction(0, if (need == HOME) "Set as home app" else "Run in background", intents[i])
++            val label = when (need) {
++                LOCAL -> "Allow local network"
++                HOME -> "Set as home app"
++                else -> "Run in background"
++            }
++            b.addAction(0, label, intents[i])
+         }
+         return b.build()
+     }
+ 
+     private fun intentFor(ctx: Context, need: String): PendingIntent = when (need) {
++        LOCAL -> PendingIntent.getActivity(
++            ctx,
++            6,
++            LocalNetwork.askIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
+         HOME -> PendingIntent.getActivity(
+             ctx,
+             4,
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LocalNetwork.kt b/lawnchair/src/app/lawnchair/omalawn/link/LocalNetwork.kt
+new file mode 100644
+index 0000000000..4ca7e6769e
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LocalNetwork.kt
+@@ -0,0 +1,103 @@
++package app.lawnchair.omalawn.link
++
++import android.app.Activity
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.os.Bundle
++import android.os.SystemClock
++import android.provider.Settings
++import android.util.Log
++
++/**
++ * Local network (patch 0037). Android 17 (API 37) blocks every local-network packet of an app that
++ * targets 37 (Homa Lawn does) unless it holds the runtime permission ACCESS_LOCAL_NETWORK (group
++ * Nearby devices): the computer's TLS handshake on the link's port never completes and the mDNS
++ * advert is refused with a SecurityException. Without it no computer can reach the phone at all.
++ * Before Android 17 nothing is enforced and the permission is never asked for.
++ *
++ * Asked for once per install with the home screen's first prompt ([firstAsk]), then by
++ * [LocalNetworkActivity], opened from Settings › Permissions › Local network, the "Setup
++ * reminders" notification ([LinkAsks]) and "Pair a computer" ([PairConfirmActivity]);
++ * `homalawn setup` grants it over adb. Once it is granted while the process runs, the mDNS advert
++ * that was refused at the link's start is registered ([advertise]); a revoke kills the process,
++ * whose next start registers it again.
++ */
++object LocalNetwork {
++    private const val TAG = "OmalawnLink"
++    // Manifest.permission.ACCESS_LOCAL_NETWORK and Build.VERSION_CODES.CINNAMON_BUN (37): spelled out,
++    // since Launcher3's prebuilt framework-16.jar comes first on the compile classpath and lacks them
++    const val PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
++    private const val ANDROID_17 = 37
++    const val REQUEST_CODE = 47104
++    private const val PREFS = "omalawn_link"
++    private const val KEY_ASKED = "local_network_asked"
++
++    /** Android enforces it: Android 17 and later. */
++    fun applies(): Boolean = Build.VERSION.SDK_INT >= ANDROID_17
++
++    /** The phone lets Homa Lawn use the local network (always before Android 17). */
++    fun allowed(ctx: Context): Boolean =
++        !applies() || ctx.checkSelfPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED
++
++    fun missing(ctx: Context): Boolean = !allowed(ctx)
++
++    /**
++     * True once per install, when Local network is missing on Android 17+: the home screen's first
++     * prompt asks for it ([NotifyPermission.maybeAsk]); recorded before asking, so the resume after
++     * the prompt does not ask again. Later it is asked for by Pair a computer, the Setup reminders
++     * notification and Settings › Permissions.
++     */
++    fun firstAsk(ctx: Context): Boolean {
++        if (allowed(ctx)) return false
++        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        if (p.getBoolean(KEY_ASKED, false)) return false
++        p.edit().putBoolean(KEY_ASKED, true).commit()
++        return true
++    }
++
++    /** Opens the system prompt (or App info, where Android no longer shows it). */
++    fun askIntent(ctx: Context): Intent = Intent(ctx, LocalNetworkActivity::class.java)
++
++    /** The link's mDNS advert, now that it may go out; nothing when already registered or not allowed. */
++    fun advertise(ctx: Context) {
++        if (allowed(ctx)) Nsd.retry(ctx.applicationContext)
++    }
++
++    internal fun log(msg: String) = Log.i(TAG, msg)
++}
++
++/**
++ * Invisible, not exported: shows Android's Local network prompt. When Android answers at once
++ * without showing it (denied for good), opens App info, where the person allows it under
++ * Permissions › Nearby devices. Granted: the link's mDNS advert goes out.
++ */
++class LocalNetworkActivity : Activity() {
++    private var askedAt = 0L
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        if (LocalNetwork.allowed(this)) {
++            LocalNetwork.advertise(this)
++            finish()
++            return
++        }
++        askedAt = SystemClock.elapsedRealtime()
++        requestPermissions(arrayOf(LocalNetwork.PERMISSION), LocalNetwork.REQUEST_CODE)
++    }
++
++    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
++        if (LocalNetwork.allowed(this)) {
++            LocalNetwork.log("local network allowed")
++            LocalNetwork.advertise(this)
++            LinkAsks.refresh(this)
++        } else if (SystemClock.elapsedRealtime() - askedAt < 400) {
++            // answered at once: Android did not show the prompt, so only App info can grant it now
++            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
++        }
++        finish()
++    }
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+index ecb234c348..e6bef0adec 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/NotifyPermission.kt
+@@ -12,6 +12,10 @@ import android.os.Build
+  * longer again after every update), and again when a notification the person needs (a pair
+  * request, a photo-access request, an app update) came while it was missing. Settings ›
+  * Permissions › Notifications shows the state and opens Android's page at any time.
++ *
++ * The same request carries Local network the first time it is due ([LocalNetwork.firstAsk],
++ * Android 17+, patch 0037): Android shows one request at a time, and without it no computer can
++ * reach the phone, not even to pair.
+  */
+ object NotifyPermission {
+     private const val PREFS = "omalawn_link"
+@@ -30,12 +34,21 @@ object NotifyPermission {
+ 
+     /** Called from the launcher when it comes to the front. */
+     fun maybeAsk(activity: Activity) {
+-        if (!missing(activity)) return
+-        val p = prefs(activity)
+-        if (p.contains(KEY_ASKED) && !p.getBoolean(KEY_NEEDED, false)) return
+-        // recorded before asking: the dialog pauses and resumes the launcher, which must not ask again
+-        p.edit().putString(KEY_ASKED, version(activity)).putBoolean(KEY_NEEDED, false).commit()
+-        activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
++        val perms = buildList {
++            if (due(activity)) {
++                // recorded before asking: the dialog pauses and resumes the launcher, which must not ask again
++                prefs(activity).edit().putString(KEY_ASKED, version(activity)).putBoolean(KEY_NEEDED, false).commit()
++                add(Manifest.permission.POST_NOTIFICATIONS)
++            }
++            if (LocalNetwork.firstAsk(activity)) add(LocalNetwork.PERMISSION)
++        }
++        if (perms.isNotEmpty()) activity.requestPermissions(perms.toTypedArray(), REQUEST_CODE)
++    }
++
++    private fun due(ctx: Context): Boolean {
++        if (!missing(ctx)) return false
++        val p = prefs(ctx)
++        return !p.contains(KEY_ASKED) || p.getBoolean(KEY_NEEDED, false)
+     }
+ 
+     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt b/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
+index 6a85743125..dc0fa2a4d5 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/Nsd.kt
+@@ -16,9 +16,21 @@ object Nsd {
+     const val TYPE = "_omalawn._tcp"
+     private const val TAG = "OmalawnLink"
+     private var listener: NsdManager.RegistrationListener? = null
++    /** The port the link asked to advertise, 0 until the link started. */
++    private var wanted = 0
++
++    /**
++     * Registers again what the link asked for, if it is not registered now: Android 17 refuses the
++     * registration until Local network is allowed ([LocalNetwork]), and that may come later.
++     */
++    @Synchronized
++    fun retry(ctx: Context) {
++        if (wanted != 0 && listener == null) register(ctx, wanted)
++    }
+ 
+     @Synchronized
+     fun register(ctx: Context, port: Int) {
++        wanted = port
+         if (listener != null) return
+         val nsd = ctx.getSystemService(NsdManager::class.java) ?: return
+         val info = NsdServiceInfo().apply {
+@@ -53,6 +65,7 @@ object Nsd {
+ 
+     @Synchronized
+     fun unregister(ctx: Context) {
++        wanted = 0
+         val l = listener ?: return
+         listener = null
+         runCatching { ctx.getSystemService(NsdManager::class.java)?.unregisterService(l) }
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+index c76f7d2adf..f0eba2dfd8 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/PairConfirmActivity.kt
+@@ -144,6 +144,8 @@ class PairConfirmActivity : ComponentActivity() {
+                 holding = true
+                 PairingGate.openWindow(PairingGate.SCREEN_WINDOW_MS)
+                 Log.i(TAG, "pairing opened on the pairing screen (at most ${PairingGate.SCREEN_WINDOW_MS / 1000} s)")
++                // Android 17: no computer reaches the phone until Local network is allowed (patch 0037)
++                if (LocalNetwork.missing(this)) startActivity(LocalNetwork.askIntent(this))
+             }
+             Pairing.screenWaiting = true
+             if (token == null) showWaiting(null)
+@@ -339,6 +341,14 @@ class PairConfirmActivity : ComponentActivity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        // back from the Local network prompt: say so while computers still cannot reach the phone
++        if (holding && token == null) {
++            if (LocalNetwork.missing(this)) {
++                showWaiting(NO_LOCAL_NETWORK)
++            } else if (shown.note == NO_LOCAL_NETWORK) {
++                showWaiting(null)
++            }
++        }
+         main.post(watch)
+     }
+ 
+@@ -382,6 +392,7 @@ class PairConfirmActivity : ComponentActivity() {
+         /** Accept ignores a finger that went down sooner than this after the words appeared. */
+         private const val ARM_MS = 1000L
+         private const val WAITING = "Waiting for a computer…"
++        private const val NO_LOCAL_NETWORK = "Your computer cannot reach this phone until Local network is allowed: Homa Lawn's settings › Permissions › Local network."
+         /** "Pair a computer": open pairing and wait on this screen. */
+         const val ACTION_WAIT = "app.lawnchair.omalawn.link.PAIR_WAIT"
+     }

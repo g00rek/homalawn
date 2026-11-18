@@ -14,8 +14,21 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
   no more hang after a crash in some languages, faster first start on installs outside Play, and
   an optional "Tilt to swipe pages" setting while rearranging the home screen.
 
+- **Android 17: Local network.** Android 17 blocks the link of an app like Homa Lawn until it may
+  use the local network, so no computer could reach the phone, not even to pair. Homa Lawn now
+  asks for it with its first prompt and again from **Pair a computer**, shows it as a needed
+  permission (settings › **Permissions** › **Local network**) and in the **Setup reminders**
+  notification, and reports it to the computer. Android 16 and older are unchanged.
+
+### Command line and agents
+
+- `homalawn setup` allows **Local network** on an Android 17 phone before pairing, and a pairing
+  that times out names it as the likely cause.
+
 ### Desktop window
 
+- The Overview's **Permissions** and the bar's warning include **Local network** (from phone apps
+  that report it).
 - A phone still on the app from before the rename now says so ("Old app": remove it from the
   phone, then add the phone again) instead of an error pointing at `homalawn update`, which
   refuses that app.

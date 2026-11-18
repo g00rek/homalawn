@@ -58,7 +58,8 @@ and its signing certificate). Nothing has to be built.
 
 **4. Tap through on the phone.** Open the download and allow the install (if Android asks, allow
 installs from your browser; if Google Play Protect warns, choose **Install anyway**), open
-**Homa Lawn**, choose it as the **home app**, and **Allow** notifications. Then, in Homa Lawn's
+**Homa Lawn**, choose it as the **home app**, and **Allow** notifications (on Android 17 also
+devices on your local network). Then, in Homa Lawn's
 settings › **Permissions**, allow **Run in background**: without it Android cuts Homa Lawn's network
 while the phone sleeps. Every tap is listed in [Setting up a phone](docs/guide/setup-phone.md).
 

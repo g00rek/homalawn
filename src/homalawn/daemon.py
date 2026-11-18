@@ -16,9 +16,10 @@ person can read (no errno text, no exception class names), e.g. "Pixel did not a
 
 State (`phones` and the `state` event), per phone, besides the connection and look fields:
 - `permissions`: what the phone has allowed Homa Lawn, as its build reports it in launcher.ping:
-  {"home", "background", "notifications", "screen_control", "install_updates"}, each true/false
-  (null when the phone did not say); null from a build that does not report them (then
-  `phone.info`'s permissions {default_home, screen_control, wallpaper_backup} are all there is).
+  {"local_network", "home", "background", "notifications", "screen_control", "install_updates"},
+  each true/false (null when the phone did not say, e.g. local_network from builds before patch
+  0037); null from a build that does not report them (then `phone.info`'s permissions
+  {default_home, screen_control, wallpaper_backup} are all there is).
 - `app_latest`: the Homa Lawn app on offer for this phone, {"version", "newer": bool, "source":
   "release" | "checkout"} (update.offer: this checkout's build for the app the phone runs, else
   for the release app the newest GitHub release); null when nothing is offered (a test build

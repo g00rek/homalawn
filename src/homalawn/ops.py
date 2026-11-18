@@ -475,13 +475,14 @@ def status(s: Session) -> Result:
                               "default_home": info["default_home"], "permissions": permissions_of(info)})
 
 
-PERMISSIONS = ("home", "background", "notifications", "screen_control", "install_updates")
+PERMISSIONS = ("local_network", "home", "background", "notifications", "screen_control", "install_updates")
 
 
 def permissions_of(ping: dict) -> dict | None:
     """What the phone has allowed Homa Lawn, as launcher.ping reports it on builds that do
-    ({home, background, notifications, screen_control, install_updates}: true/false); None from a
-    build that does not. A key the phone leaves out (or does not report as true/false) is None."""
+    ({local_network, home, background, notifications, screen_control, install_updates}: true/false;
+    local_network since patch 0037); None from a build that does not. A key the phone leaves out (or
+    does not report as true/false) is None, so a build from before a key never shows it as missing."""
     p = ping.get("permissions") if isinstance(ping, dict) else None
     if not isinstance(p, dict):
         return None
@@ -536,7 +537,7 @@ def phone_info(s: Session) -> Result:
     perms = {"default_home": ping.get("default_home"),
              "screen_control": screen if isinstance(screen, bool) else None, "wallpaper_backup": None}
     reported = permissions_of(ping)
-    if reported is not None:       # a build that reports them: its five answers join the ones above
+    if reported is not None:       # a build that reports them: its answers join the ones above
         perms |= reported
     address = getattr(t, "address", None) or t.label
     return Result(_lines([f"{t.label} at {address}: Homa Lawn {app.get('versionName') or 'unknown'}"]),

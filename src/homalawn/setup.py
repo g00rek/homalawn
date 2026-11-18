@@ -6,8 +6,8 @@ pairing by QR, with the code fallback only when adb's mDNS is off; `--new` goes 
 pairing whatever is connected) → install the newest build (`adb install -r`, no taps; only when the
 phone has dropped off adb, over the Homa Lawn link — the person taps the update notification, then
 Update; never an uninstall)
-→ notifications allowed for Lawnchair (Android 13+) → default home → kept off battery optimisation
-("Keep connected") → screen control (Lawnchair's accessibility
+→ notifications allowed for Lawnchair (Android 13+) → Local network allowed (Android 17+) → default
+home → kept off battery optimisation ("Keep connected") → screen control (Lawnchair's accessibility
 service added to the ones already on) → link pairing (home screen brought up first, the phone
 takes the request there) → a proof run over the link (status, layout, screen control, a
 screenshot) → a reminder that Wireless debugging is no longer needed.
@@ -365,6 +365,31 @@ def notifications(say, t: AdbTransport) -> None:
     say("Notifications allowed for Homa Lawn (its pairing request needs them).")
 
 
+# -- 2c. local network -----------------------------------------------------------------------------
+LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
+LOCAL_NETWORK_WAY = "Homa Lawn's settings › Permissions › Local network"
+LOCAL_NETWORK_OFF = ("Could not allow Local network for Homa Lawn ({e}), and without it this computer cannot reach "
+                     f"the phone: on the phone, open {LOCAL_NETWORK_WAY}, allow it, then run setup again.")
+# Android 17 lets the computer's connection in but never answers it while Local network is not allowed
+HANDSHAKE_TIMEOUT = ("The phone's Homa Lawn link at {addr} takes the connection but never answers it; on Android 17 "
+                     f"the likely cause is Local network: allow Local network for Homa Lawn on the phone "
+                     f"({LOCAL_NETWORK_WAY}), then run setup again.")
+
+
+def local_network(say, t: AdbTransport) -> None:
+    """Allow Homa Lawn the local network (ACCESS_LOCAL_NETWORK, a runtime permission): Android 17
+    blocks every local-network packet of an app that targets it (Homa Lawn targets 37) without it,
+    so the link's handshake never completes. Part of the same consent as N4. Before Android 17
+    nothing is enforced and the permission must not be granted: nothing done, nothing said."""
+    if _sdk(t) < 37:
+        return
+    try:
+        t.shell("pm", "grant", t.device.package, LOCAL_NETWORK_PERMISSION)
+    except AdbError as e:
+        raise SetupError(LOCAL_NETWORK_OFF.format(e=str(e).strip().rstrip(".")))
+    say("Local network allowed for Homa Lawn (this computer reaches the phone over Wi-Fi).")
+
+
 # -- 3. default home -------------------------------------------------------------------------------
 def _default_home(t: AdbTransport) -> bool:
     try:
@@ -518,6 +543,8 @@ def link_pair(say, t: AdbTransport, hosts: list[str], port: int, *, pair, connec
         msg = str(e)
         if msg == pairing._PHONE_SAYS["notifications_off"]:
             raise SetupError(NOTIFY_OFF)
+        if isinstance(e.__cause__, TimeoutError):
+            raise SetupError(HANDSHAKE_TIMEOUT.format(addr=addr))
         raise SetupError(msg)
     except identity.IdentityError as e:
         raise SetupError(str(e))
@@ -687,7 +714,8 @@ def run(say: Callable[[str], None], *, serial: str | None = None, apk: Path | No
             link = link_to_peer(peer)
             if link is None:
                 raise SetupError(f"{peer.name} does not answer over the Homa Lawn link: keep it on the same network as "
-                                 "this computer with Homa Lawn running (or connect it over adb), then run setup again.")
+                                 "this computer with Homa Lawn running (on Android 17 also allow Local network: "
+                                 f"{LOCAL_NETWORK_WAY}) or connect it over adb, then run setup again.")
             _link_sequence(say, peer, link, apk, apk_dir, link_to_peer, pictures, sleep, forced=True,
                            switch_screen=screen_control)
             return
@@ -731,6 +759,7 @@ def _sequence(say, serial, apk, apk_dir, ask, debug_forward, run, runner, pair, 
 
     install(say, t, choose_app(t, apk, apk_dir, phone, say=say), run=run, link_for=link_for, sleep=sleep)
     notifications(say, t)
+    local_network(say, t)
     default_home(say, t)
     keep_connected(say, t)
     screen_on = screen_control(say, t, switch=switch_screen)

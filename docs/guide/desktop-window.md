@@ -79,8 +79,8 @@ the phone connected. When the service is not running, every page shows one **Sta
   with its version and **Up to date**, or **Update available: <version>** with **Update app**
   ("Update Homa Lawn on <phone>? Its home screen restarts."), the last **Wallpaper & style** applied,
   and the last error if there was one.
-- **Permissions**: what the phone has allowed Homa Lawn: **Home app**, **Run in background**,
-  **Notifications**, and the optional **Screen control** and **Install updates**, each **Allowed**
+- **Permissions**: what the phone has allowed Homa Lawn: **Local network** (Android 17), **Home
+  app**, **Run in background**, **Notifications**, and the optional **Screen control** and **Install updates**, each **Allowed**
   or **Not allowed** with one line on what it is for. To change one, open Homa Lawn's settings ›
   **Permissions** on the phone ([details](setup-phone.md#permissions)).
 - **Addresses**: where Homa Lawn looks for the phone, in the order it tries them. Type a name or

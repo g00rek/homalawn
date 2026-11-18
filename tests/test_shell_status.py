@@ -11,7 +11,7 @@ JS = Path(__file__).parent.parent / "src" / "homalawn" / "shell" / "HomaLawn" / 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(not NODE, reason="needs node")
 
-ALL = {"home": True, "background": True, "notifications": True, "screen_control": True, "install_updates": True}
+ALL = {"local_network": True, "home": True, "background": True, "notifications": True, "screen_control": True, "install_updates": True}
 
 
 def phone(name, connected=True, error=None, permissions=ALL, app_latest=None):
@@ -41,6 +41,14 @@ def test_a_required_permission_not_allowed_needs_attention():
     assert s["tooltip"] == "Pixel · needs attention: run in background is not allowed"
     s = summary([phone("Pixel", permissions=dict(ALL, home=False, notifications=False))])
     assert s["tooltip"] == "Pixel · needs attention: home app and notifications are not allowed"
+
+
+def test_local_network_not_allowed_needs_attention_and_unreported_does_not():
+    s = summary([phone("Pixel", permissions=dict(ALL, local_network=False))])
+    assert s["problem"] is True
+    assert s["tooltip"] == "Pixel · needs attention: local network is not allowed"
+    old = {k: v for k, v in ALL.items() if k != "local_network"}      # a phone app from before patch 0037
+    assert summary([phone("Pixel", permissions=old)])["problem"] is False
 
 
 def test_optional_unknown_and_offline_permissions_do_not_count():

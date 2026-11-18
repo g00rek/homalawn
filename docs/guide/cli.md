@@ -53,7 +53,7 @@ holds it is reserved; `homalawn layout get` lists every page, empty ones too.
 
 | Command | What it does |
 |---|---|
-| `setup [--new] [--serial SERIAL] [--apk FILE] [--via link] [--phone NAME] [--no-screen-control]` | Set up a phone over adb in one go: install Homa Lawn, make it the home app, let it run in the background, switch on screen control, pair it and check it works. See [setup-phone.md](setup-phone.md#with-wireless-debugging-homalawn-setup). |
+| `setup [--new] [--serial SERIAL] [--apk FILE] [--via link] [--phone NAME] [--no-screen-control]` | Set up a phone over adb in one go: install Homa Lawn, allow it the local network (Android 17), make it the home app, let it run in the background, switch on screen control, pair it and check it works. See [setup-phone.md](setup-phone.md#with-wireless-debugging-homalawn-setup). |
 | `update [--apk FILE] [--phone NAME]` | Send a new Homa Lawn to the paired phone over the link. With **Install updates** allowed the phone installs it by itself; otherwise tap the update notification, then Update. |
 | `update --download [--port N]` | Give the phone the app to download instead (QR code and address): the first install, or a phone whose Homa Lawn cannot update itself yet. A release: the release file's HTTPS address on GitHub, nothing served here. A build from this checkout or `--apk FILE`: served over plain HTTP on your own network for 10 minutes, port 47101 by default. |
 

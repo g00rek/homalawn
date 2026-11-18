@@ -72,8 +72,9 @@ Homa Lawn has a phone side and a desktop side.
 - **Methods**: `link.*` (hello, pairing, unpair), `launcher.*` (ping, layout export/import, apps,
   widgets, prefs, wallpaper, app info and updates, device profile, Nova conversion), `screen.*`
   (tree, tap, swipe, type, key, launch, shot). An unpaired computer can call only `link.hello` and
-  the pairing methods. `launcher.ping` reports `permissions`: `{home, background, notifications,
-  screen_control, install_updates}`, each true or false (missing from older phone builds).
+  the pairing methods. `launcher.ping` reports `permissions`: `{local_network, home, background,
+  notifications, screen_control, install_updates}`, each true or false (missing from older phone
+  builds; `local_network` since patch 0037, true before Android 17).
 - **Pairing**: the computer sends a commitment to a random value, the phone answers with its own,
   then the computer reveals. Both derive four words from SHA-256 over both certificates and both
   values (44 bits as four words of the BIP-39 English list); the phone shows them on its
