@@ -1,0 +1,104 @@
+From c65b5d6833254872af107233abd29848122882da Mon Sep 17 00:00:00 2001
+From: g00rek <76205606+g00rek@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 12:07:00 +0100
+Subject: [PATCH] Homa Lawn: a stable device id, so a reinstalled phone is the
+ same phone (patch 0038)
+
+Reinstalling Homa Lawn or clearing its data makes a new link key, so the computer saw a new
+phone and kept the old pairing as an offline duplicate. The phone now reports device_id:
+lowercase hex SHA-256 of "homalawn-device:" + Settings.Secure.ANDROID_ID, which on Android 8+
+is per signing key, user and device and survives a reinstall with the same key (a build signed
+with another key is another device, which it is: it cannot update the other build). Only a
+paired computer is told it: link.hello (paired), link.pair_wait (accepted) and launcher.ping.
+Nothing is reported when Android gives no ANDROID_ID. The key is device_id because "device"
+already carries Build.MODEL in hello and pair_wait.
+---
+ .../app/lawnchair/omalawn/OmalawnCommands.kt  |  4 ++-
+ .../app/lawnchair/omalawn/link/DeviceId.kt    | 35 +++++++++++++++++++
+ .../app/lawnchair/omalawn/link/LinkServer.kt  |  2 +-
+ 3 files changed, 39 insertions(+), 2 deletions(-)
+ create mode 100644 lawnchair/src/app/lawnchair/omalawn/link/DeviceId.kt
+
+diff --git a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+index f42e9e025a..1883f13165 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/OmalawnCommands.kt
+@@ -15,6 +15,7 @@ import androidx.datastore.preferences.core.edit
+ import androidx.datastore.preferences.core.floatPreferencesKey
+ import androidx.datastore.preferences.core.intPreferencesKey
+ import androidx.datastore.preferences.core.stringPreferencesKey
++import app.lawnchair.omalawn.link.DeviceId
+ import app.lawnchair.omalawn.link.Identity
+ import app.lawnchair.omalawn.screen.ScreenCommands
+ import app.lawnchair.preferences2.PreferenceManager2
+@@ -90,7 +91,7 @@ object OmalawnCommands {
+             "link.ping" -> JSONObject().put("t", System.currentTimeMillis())
+             "link.hello" -> hello(ctx, paired, caller)
+             "launcher.apps_list" -> appsList(ctx)
+-            "launcher.ping" -> ping(ctx).put("installed_at", ThemeWallpapers.installedAt(ctx)) // patch 0017
++            "launcher.ping" -> DeviceId.into(ctx, ping(ctx).put("installed_at", ThemeWallpapers.installedAt(ctx))) // patch 0017, 0038
+             // starts the home screen load if nothing else will (no launcher activity), waits a
+             // little; touches nothing that blocks on the main thread (db is null until it exists)
+             "launcher.ensure_loaded" -> JSONObject()
+@@ -195,6 +196,7 @@ object OmalawnCommands {
+             .put("fp", Identity.fingerprint())
+             .put("version", ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName)
+             .put("addresses", addresses())
++            .let { DeviceId.into(ctx, it) } // patch 0038: the same phone after a reinstall
+     }
+ 
+     /** This phone's interface addresses for a paired computer: up, not loopback, not link-local. */
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/DeviceId.kt b/lawnchair/src/app/lawnchair/omalawn/link/DeviceId.kt
+new file mode 100644
+index 0000000000..abaa50d380
+--- /dev/null
++++ b/lawnchair/src/app/lawnchair/omalawn/link/DeviceId.kt
+@@ -0,0 +1,35 @@
++package app.lawnchair.omalawn.link
++
++import android.annotation.SuppressLint
++import android.content.Context
++import android.provider.Settings
++import java.security.MessageDigest
++
++/**
++ * The phone's `device_id` for a paired computer: lowercase hex SHA-256 of "homalawn-device:" +
++ * Settings.Secure.ANDROID_ID. The link certificate is new after Homa Lawn is reinstalled or its
++ * data cleared; this id is not, so the computer can tell the new pairing is the same phone and drop
++ * the old one instead of listing it twice.
++ *
++ * On Android 8+ ANDROID_ID is per app signing key, user and device: it survives reinstalling a
++ * build signed with the same key and changes with a factory reset. A build signed with another key
++ * is a different device to the computer, which is right: it cannot update the other build anyway.
++ * Hashed so the raw ANDROID_ID never leaves the phone. Only a paired computer is told it (`link.hello`
++ * paired, `link.pair_wait` accepted, `launcher.ping`).
++ */
++object DeviceId {
++    @Volatile private var cached: String? = null
++
++    /** Null when Android gives no ANDROID_ID: then the phone reports none, never a shared hash of nothing. */
++    @SuppressLint("HardwareIds")
++    fun get(ctx: Context): String? = cached ?: run {
++        val androidId = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
++        if (androidId.isNullOrBlank()) return null
++        MessageDigest.getInstance("SHA-256").digest("homalawn-device:$androidId".toByteArray(Charsets.UTF_8))
++            .joinToString("") { "%02x".format(it) }
++            .also { cached = it }
++    }
++
++    /** Puts `device_id` into [o] when there is one. */
++    fun into(ctx: Context, o: org.json.JSONObject): org.json.JSONObject = get(ctx)?.let { o.put("device_id", it) } ?: o
++}
+diff --git a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+index a79de1d725..3b6d25e330 100644
+--- a/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
++++ b/lawnchair/src/app/lawnchair/omalawn/link/LinkServer.kt
+@@ -573,7 +573,7 @@ object LinkServer {
+                     val accepted = outcome == Pairing.ACCEPTED
+                     val res = JSONObject().put("accepted", accepted).put("outcome", outcome)
+                     // the phone's name only once it trusts this computer (an unpaired hello says nothing)
+-                    if (accepted) res.put("name", phoneName(ctx)).put("device", Build.MODEL)
++                    if (accepted) DeviceId.into(ctx, res.put("name", phoneName(ctx)).put("device", Build.MODEL)) // patch 0038
+                     writer.result(id, res)
+                     conn.session = null
+                     return accepted // Reject/timeout: the phone hangs up after answering

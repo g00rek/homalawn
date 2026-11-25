@@ -8,8 +8,9 @@ opens Lawnchair's confirmation screen, where Accept is tapped). A fake
 phone has fixed its nonce before it sees ours, so it cannot search for one that gives matching
 words. Both sides derive the words themselves (sas.py); the desktop prints ITS OWN words, then
 `link.pair_wait {}` blocks until the tap or the 120 s deadline; an accepted answer carries the
-phone's name (an unpaired `link.hello` tells nothing about the phone). Only after Accept on the
-phone and "yes" here is the phone's fingerprint pinned in peers.json; a "no" here asks the phone
+phone's name and its `device_id` (an unpaired `link.hello` tells nothing about the phone). Only after
+Accept on the phone and "yes" here is the phone's fingerprint pinned in peers.json, replacing any
+earlier pairing with the same `device_id` (the same phone after Homa Lawn was reinstalled); a "no" here asks the phone
 to forget this computer again (`link.unpair`).
 
 The phone takes pairing requests while Lawnchair's home screen is in front and the phone is
@@ -205,9 +206,12 @@ def _finish(conn: Conn, ident, addr: str, host: str, port: int, r, nonce_phone: 
             gone = ("The phone may still trust this computer; forget it there: Homa Lawn's settings "
                     f"› Computers › {name} › Forget.")
         raise PairError(f"Not paired: the words did not match on this computer. {gone}")
+    did = outcome.get("device_id")
     peer = Peer(fp=conn.peer_fp, name=_clean(outcome.get("name") or outcome.get("device")) or "phone",
-                hosts=[addr], last_lan=identity.lan_address(host, port))
-    identity.record_pairing(peer)
+                hosts=[addr], last_lan=identity.lan_address(host, port),
+                device_id=did if identity.is_device_id(did) else None)
+    if identity.record_pairing(peer):
+        say(f"Replaced the earlier pairing of {peer.name} (Homa Lawn was reinstalled on it).")
     return peer
 
 

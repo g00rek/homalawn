@@ -118,6 +118,11 @@ details and **Forget** it. **Forget all computers** removes every one.
 **Several phones.** A computer can be paired with several phones; `homalawn phones` lists them and
 the window's phone picker (the button at the top of the rail) lists them.
 
+**Reinstalling Homa Lawn.** Removing Homa Lawn from the phone (or clearing its data) wipes its
+pairing key, so pair the phone again afterwards. The computer recognises it as the same phone and
+replaces its earlier pairing ("Replaced the earlier pairing of <phone> (Homa Lawn was reinstalled
+on it)."), so it is listed once. A build signed with a different key counts as a different phone.
+
 **Unpairing.** On the computer: **Unpair** on the window's Overview, or `homalawn unpair NAME`. Both
 sides forget each other (when the phone is reachable; otherwise the phone is told at its next
 contact). On the phone: **Forget** in Computers.

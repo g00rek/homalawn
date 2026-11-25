@@ -643,3 +643,22 @@ def test_wifi_search_is_off_for_one_host_and_inside_capped(phone):
     t = link(peer_of(phone, hosts=[dead]), sweep=lambda: pytest.fail("searched the Wi-Fi"))
     with t.capped(1.0), pytest.raises(LinkDown):
         t.connect()
+
+
+def test_a_phone_paired_before_device_id_learns_it_from_hello(phone):
+    """Patch 0038: the record learns the phone's stable id the first time it is reached, so the next
+    reinstall is caught; a malformed id is ignored."""
+    peer = peer_of(phone)
+    identity.save_peer(peer)
+    phone.handlers["link.hello"] = lambda p: ({"paired": True, "v": 1, "name": "P", "fp": phone.fp,
+                                               "device_id": "NOT-AN-ID"}, None)
+    t = link(peer)
+    t.call("link.ping")
+    t.close()
+    assert identity.load_peers()[0].device_id is None
+    phone.handlers["link.hello"] = lambda p: ({"paired": True, "v": 1, "name": "P", "fp": phone.fp,
+                                               "device_id": "d" * 64}, None)
+    t = link(identity.load_peers()[0])
+    t.call("link.ping")
+    t.close()
+    assert identity.load_peers()[0].device_id == "d" * 64

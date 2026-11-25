@@ -140,3 +140,46 @@ def test_migration_keeps_fields_written_meanwhile(cfg, monkeypatch):
     monkeypatch.setattr(identity, "load_peers", real)
     p = identity.load_peers()[0]
     assert (p.addresses, p.last_ok) == (["pixel-8"], "10.0.0.5")
+
+
+# -- the same phone after a reinstall (patch 0038) ---------------------------------------------
+DEV, OTHER_DEV = "d" * 64, "e" * 64
+
+
+def test_pairing_a_reinstalled_phone_replaces_its_earlier_pairing(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Testphone", device_id=DEV))
+    identity.save_peer(identity.Peer(fp="b" * 64, name="Pixel", device_id=OTHER_DEV))
+    gone = identity.record_pairing(identity.Peer(fp="c" * 64, name="Testphone", device_id=DEV))
+    assert [p.fp for p in gone] == ["a" * 64]
+    assert [(p.fp, p.device_id) for p in identity.load_peers()] == [("b" * 64, OTHER_DEV), ("c" * 64, DEV)]
+    raw = json.loads((cfg / "peers.json").read_text())["peers"]
+    assert [r["device_id"] for r in raw] == [OTHER_DEV, DEV]
+
+
+def test_same_name_without_the_same_device_id_is_kept(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Testphone", device_id=OTHER_DEV))
+    identity.save_peer(identity.Peer(fp="b" * 64, name="Testphone"))   # paired before 0038: no id
+    gone = identity.record_pairing(identity.Peer(fp="c" * 64, name="Testphone", device_id=DEV))
+    assert gone == []
+    assert [p.fp for p in identity.load_peers()] == ["a" * 64, "b" * 64, "c" * 64]
+
+
+def test_a_phone_without_device_id_replaces_nothing(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Testphone"))
+    assert identity.record_pairing(identity.Peer(fp="c" * 64, name="Testphone")) == []
+    assert len(identity.load_peers()) == 2
+
+
+def test_records_written_before_device_id_still_load(cfg):
+    (cfg).mkdir(parents=True)
+    (cfg / "peers.json").write_text(json.dumps({"peers": [{"fp": "a" * 64, "name": "Old", "hosts": [], "paired": 1.0}]}))
+    p = identity.load_peers()[0]
+    assert (p.name, p.device_id) == ("Old", None)
+    assert identity.update_peer("a" * 64, device_id=DEV)
+    assert identity.load_peers()[0].device_id == DEV
+
+
+def test_device_id_shape():
+    assert identity.is_device_id(DEV)
+    assert not identity.is_device_id("D" * 64) and not identity.is_device_id("d" * 63)
+    assert not identity.is_device_id(None) and not identity.is_device_id(123)

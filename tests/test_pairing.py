@@ -21,7 +21,7 @@ class FakePhone:
     """Answers link.hello / pair_request / pair_wait / unpair like the phone, per `script`."""
 
     def __init__(self, tmp, outcome="accepted", error=None, wrong_words=False, paired=False, nonce_phone=None,
-                 closed=0, hang_up_after_closed=None, sticky=False, unpair_error=False):
+                 closed=0, hang_up_after_closed=None, sticky=False, unpair_error=False, device_id=None):
         key, cert = tmp / "phone.key", tmp / "phone.pem"
         subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
                         "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "2", "-subj", "/CN=OmaLawn link"],
@@ -36,6 +36,7 @@ class FakePhone:
         self.hang_up_after_closed = hang_up_after_closed  # close a connection after this many of them
         self.sticky = sticky  # link.unpair answers but the phone keeps trusting this computer
         self.unpair_error = unpair_error  # link.unpair fails
+        self.device_id = device_id  # sent with an accepted pair_wait (patch 0038), when set
         self.conns = 0
         self.calls = []
         self.conn_of = []  # connection number of each call
@@ -102,6 +103,8 @@ class FakePhone:
                 res = {"accepted": self.outcome == "accepted", "outcome": self.outcome}
                 if self.outcome == "accepted":
                     res.update(name="Fake\u202e Pixel\x07", device="fake")  # cleaned before it is stored
+                    if self.device_id:
+                        res["device_id"] = self.device_id
             elif m == "link.unpair" and self.unpair_error:
                 res = None
                 err = {"code": "internal", "message": "cannot forget"}
@@ -483,3 +486,30 @@ def test_stop_ends_waiting_for_pairing_to_open(cfg):
                      retry_s=0.05, stop=stop)
     timer.join()
     assert "Stopped" in str(e.value)
+
+
+# -- the same phone after a reinstall (patch 0038) ---------------------------------------------
+def test_pairing_a_reinstalled_phone_replaces_the_earlier_pairing_and_says_so(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Fake Pixel", device_id="d" * 64))   # the old key
+    identity.save_peer(identity.Peer(fp="b" * 64, name="Fake Pixel"))   # same name, no id: never touched
+    phone = FakePhone(cfg, device_id="d" * 64)
+    peer, said, _ = run(phone)
+    assert peer.device_id == "d" * 64
+    assert [p.fp for p in identity.load_peers()] == ["b" * 64, phone.fp]
+    assert said[-1] == "Replaced the earlier pairing of Fake Pixel (Homa Lawn was reinstalled on it)."
+    assert sum("Replaced" in m for m in said) == 1
+
+
+def test_pairing_a_new_phone_replaces_nothing(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Fake Pixel", device_id="e" * 64))
+    phone = FakePhone(cfg, device_id="d" * 64)
+    peer, said, _ = run(phone)
+    assert [p.fp for p in identity.load_peers()] == ["a" * 64, phone.fp]
+    assert not any("Replaced" in m for m in said)
+
+
+def test_a_malformed_device_id_is_not_stored_and_replaces_nothing(cfg):
+    identity.save_peer(identity.Peer(fp="a" * 64, name="Fake Pixel", device_id="d" * 64))
+    phone = FakePhone(cfg, device_id="D" * 64)
+    peer, said, _ = run(phone)
+    assert peer.device_id is None and len(identity.load_peers()) == 2

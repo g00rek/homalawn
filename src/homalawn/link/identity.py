@@ -43,6 +43,7 @@ class Peer:
     addresses: list[str] = field(default_factory=list)   # added by the user, at most 5 (spec section 8)
     learned: list[str] = field(default_factory=list)     # Tailscale addresses the phone reported, at most 4
     last_ok: str | None = None                           # the address that answered last
+    device_id: str | None = None                         # the phone's stable id (patch 0038); None before it was learned
 
 
 def link_dir() -> Path:
@@ -160,11 +161,20 @@ def save_peer(peer: Peer) -> None:
         _write_peers(peers)
 
 
-def record_pairing(peer: Peer) -> None:
+def is_device_id(v) -> bool:
+    """A phone's `device_id` as the phone sends it: lowercase hex SHA-256."""
+    return isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)
+
+
+def record_pairing(peer: Peer) -> list[Peer]:
     """Store a phone just paired. Pairing the same phone again keeps the addresses and learned
-    addresses it already had; everything else is the new pairing's."""
+    addresses it already had; everything else is the new pairing's. Other stored phones with the
+    same `device_id` are the same phone under an older key (Homa Lawn was reinstalled or its data
+    cleared): they are removed in the same write and returned. Never by name."""
     with _locked():
         peers = load_peers()
+        gone = [p for p in peers if peer.device_id and p.device_id == peer.device_id and p.fp != peer.fp]
+        peers = [p for p in peers if p.fp not in {g.fp for g in gone}]
         i = next((i for i, p in enumerate(peers) if p.fp == peer.fp), None)
         if i is None:
             peer.paired = peer.paired or time.time()
@@ -175,6 +185,7 @@ def record_pairing(peer: Peer) -> None:
             peer.paired = time.time()
             peers[i] = peer
         _write_peers(peers)
+    return gone
 
 
 def update_peer(fp: str, **fields) -> bool:

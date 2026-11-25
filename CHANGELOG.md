@@ -20,10 +20,19 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
   permission (settings › **Permissions** › **Local network**) and in the **Setup reminders**
   notification, and reports it to the computer. Android 16 and older are unchanged.
 
+- **The same phone after a reinstall.** The phone tells a paired computer a stable id of the
+  device (derived from Android's id for the app, never the id itself), which survives reinstalling
+  Homa Lawn or clearing its data.
+
 ### Command line and agents
 
 - `homalawn setup` allows **Local network** on an Android 17 phone before pairing, and a pairing
   that times out names it as the likely cause.
+- Pairing a phone again after Homa Lawn was reinstalled on it replaces its earlier pairing
+  instead of adding a second, forever offline entry with the same name (`homalawn phones`, the
+  window's phone picker); the pairing says "Replaced the earlier pairing of <phone> (Homa Lawn was
+  reinstalled on it)." A phone paired before this learns its id the next time it is reached, so
+  its next reinstall is caught too. Duplicates made before this change stay until unpaired.
 
 ### Desktop window
 

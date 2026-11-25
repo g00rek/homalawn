@@ -192,7 +192,7 @@ def make(tmp_path, phones=("A", "B"), looks=None, applied="current", **kw):
         applied_path.write_text(json.dumps(applied))
     svc = daemon.Service(
         socket_path=tmp_path / "run" / "homalawn" / "homalawnd.sock",
-        peers=lambda: {fp_of(n): {"name": n, "device": f"link:{n.lower()}"} for n in phones},
+        peers=kw.pop("peers", None) or (lambda: {fp_of(n): {"name": n, "device": f"link:{n.lower()}"} for n in phones}),
         applied_path=applied_path,
         session_factory=FakeSession,
         ops=ops,
@@ -832,6 +832,31 @@ def test_peers_reread_new_phone_appears_removed_one_goes(tmp_path):
             n = len([x for x in ops.calls if x == ("status", "A")])
             await asyncio.sleep(0.2)
             assert len([x for x in ops.calls if x == ("status", "A")]) == n   # its watcher stopped
+        finally:
+            await svc.stop()
+    run(go())
+
+
+def test_a_reinstalled_phone_paired_again_is_listed_once_without_a_restart(tmp_path):
+    """Patch 0038: pairing the same phone (same device_id) under a new key removes its earlier record
+    from peers.json; the service, reading the real file, drops the old one from `phones`."""
+    from homalawn.link import identity
+    old, new = "a" * 64, "c" * 64
+    identity.save_peer(identity.Peer(fp=old, name="Testphone", device_id="d" * 64))
+    identity.save_peer(identity.Peer(fp="b" * 64, name="Pixel"))
+    svc, _, _ = make(tmp_path, peers=daemon._default_peers)
+
+    async def go():
+        await svc.start()
+        try:
+            c = await connect(svc)
+            await c.call("subscribe")
+            st = await c.event()
+            assert sorted(p["name"] for p in st["phones"]) == ["Pixel", "Testphone"]
+            identity.record_pairing(identity.Peer(fp=new, name="Testphone", device_id="d" * 64))
+            st = await c.event(lambda s: sorted(p["id"] for p in s["phones"]) == ["b" * 64, new])
+            assert [p["name"] for p in st["phones"]].count("Testphone") == 1
+            assert old not in svc.phones
         finally:
             await svc.stop()
     run(go())

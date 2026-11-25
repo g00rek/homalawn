@@ -157,6 +157,7 @@ class LinkTransport:
             if not (isinstance(hello, dict) and hello.get("paired")):
                 raise self._not_paired(bool(isinstance(hello, dict) and hello.get("forgotten")))
             self._learn(hello.get("addresses"))
+            self._learn_device_id(hello.get("device_id"))
             c.sock.settimeout(self._call_s)
             self.address = _addr_text(host, port)
             return c
@@ -184,6 +185,17 @@ class LinkTransport:
         self.peer.learned = found
         try:
             identity.update_peer(self.peer.fp, **{"learned": found})
+        except OSError:
+            pass
+
+    def _learn_device_id(self, reported) -> None:
+        """A phone paired before patch 0038 learns its `device_id` the first time it is reached, so
+        pairing it again after a reinstall replaces this record. Written only when it changed."""
+        if not identity.is_device_id(reported) or reported == self.peer.device_id:
+            return
+        self.peer.device_id = reported
+        try:
+            identity.update_peer(self.peer.fp, device_id=reported)
         except OSError:
             pass
 
