@@ -37,6 +37,8 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALL_TIMEOUT_S = 180
 CMD_TIMEOUT_S = 30
 CONNECT_WAIT_S = 20
+PAIRING_OPEN = "pairing_open"   # the phone's code while a pairing request is on its screen (patch 0035)
+PAIRING_CLOSE_S = 10            # how long after Accept the check waits for the pairing screen to close
 SCREEN_WAIT_S = 6  # the service binds within ~1 s of the setting (tests/device/NOTES.md)
 
 QR_HOW = "On the phone: Settings › Developer options › Wireless debugging › Pair device with QR code, then scan this."
@@ -582,7 +584,15 @@ def proof(say, link, pictures: Path, *, sleep, screen_on: bool = True) -> None:
             raise SetupError("Screen control did not come on: on the phone, Homa Lawn's settings › Permissions › Screen "
                              "control, then run setup again. If Android says Restricted setting: Settings › Apps › "
                              "Homa Lawn › ⋮ › Allow restricted settings.")
-        shot = ops.screenshot(s).data
+        while True:
+            try:
+                shot = ops.screenshot(s).data
+                break
+            except ops.OpError as e:
+                # the pairing screen just accepted is still closing; the phone pauses screen control until it is gone
+                if e.code != PAIRING_OPEN or time.monotonic() >= deadline + PAIRING_CLOSE_S:
+                    raise
+                sleep(0.5)
     except ops.OpError as e:
         raise SetupError(f"The check over the link failed: {e}")
     items = sum(len(sc.get("items", [])) for sc in lay.get("screens", [])) + len(lay.get("hotseat", []))

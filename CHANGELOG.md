@@ -42,6 +42,11 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
   phone, then add the phone again) instead of an error pointing at `homalawn update`, which
   refuses that app.
 
+### Setup
+
+- The check right after pairing waits for the phone's pairing screen to close instead of failing
+  with "pairing_open" (seen on an Android 17 phone).
+
 ## 0.1.0 — first public release
 
 The first public release of Homa Lawn: an Android home screen built on Lawnchair 16, run from an

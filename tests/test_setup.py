@@ -1078,3 +1078,31 @@ def test_cli_passes_no_screen_control(monkeypatch):
     r = CliRunner().invoke(cli.app, ["setup", "--no-screen-control"])
     assert r.exit_code == 0, r.output
     assert seen["screen_control"] is False
+
+
+def test_the_check_waits_while_the_accepted_pairing_screen_is_still_closing(tmp_path):
+    """Seen on a real phone (2026-11-25): right after Accept, screen.shot answered pairing_open."""
+    from homalawn import ops
+    calls = {"shot": 0}
+
+    class S:
+        pass
+
+    def screenshot(s):
+        calls["shot"] += 1
+        if calls["shot"] < 3:
+            raise ops.OpError("link failed: pairing_open: Screen control is paused", code="pairing_open")
+        return ops.Result("", data=b"\x89PNG ok")
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    try:
+        mp.setattr(ops, "status", lambda s: ops.Result("", data={"version": "v", "grid": [4, 6]}))
+        mp.setattr(ops, "layout_get", lambda s: ops.Result("", data={"screens": [], "hotseat": []}))
+        mp.setattr(ops, "_screen", lambda s, m, p=None: {"enabled": True})
+        mp.setattr(ops, "screenshot", screenshot)
+        said = []
+        setup.proof(said.append, S(), tmp_path / "pics", sleep=lambda s: None)
+    finally:
+        mp.undo()
+    assert calls["shot"] == 3
+    assert any(l.startswith("Checked over the link") for l in said)
