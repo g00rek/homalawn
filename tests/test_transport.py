@@ -184,7 +184,7 @@ def test_launcher_without_shell_refuses_home_with_a_phone_fix(linked):
 
 
 def test_wallpaper_backup_without_shell_names_the_fix(linked):
-    from homalawn.session import Launcher
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED, Launcher
     t, _, phone = linked
 
     def denied():  # what the phone answers when Lawnchair may not read the wallpaper
@@ -192,8 +192,11 @@ def test_wallpaper_backup_without_shell_names_the_fix(linked):
                             "READ_MEDIA_IMAGES", code="failed")
     phone.wallpaper = denied
     with pytest.raises(NotSupported) as e:
-        Launcher(t).backup_wallpaper()
+        Launcher(t)._backup_files(("home",))
     assert "Allow Homa Lawn to read photos once on the phone" in str(e.value) and "\n" not in str(e.value)
+    notes = []
+    assert Launcher(t).backup_wallpaper(notes.append) is None   # never stops a change: one note instead
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
 
 
 def test_wallpaper_over_the_link_is_backed_up_staged_and_set(linked, tmp_path):
@@ -224,13 +227,20 @@ def _img(tmp_path, name, data):
     return str(f)
 
 
+def _seed(la, path, target="home"):
+    """Put a first picture on the phone without trying to save what it replaces (set_wallpaper
+    always tries; a test that counts the phone's backup calls starts from here)."""
+    with open(path, "rb") as fh:
+        la._put_wallpaper(fh.read(), target)
+
+
 def test_second_set_over_the_link_backs_up_the_first_picture_without_a_phone_read(linked, tmp_path):
     from homalawn import snapshots
     from homalawn.session import WALLPAPER_RECORD, Launcher
     t, dev, phone = linked
     _phone_cannot_read_wallpaper(phone)
     la = Launcher(t)
-    assert la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False) is None
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     rec = json.loads((snapshots.root().parent / WALLPAPER_RECORD).read_text())
     assert rec["system_id"] == dev.wallpaper_id == 8 and rec["device"] == f"link:{phone.fp}"
     snap = la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))
@@ -244,17 +254,17 @@ def test_second_set_over_the_link_backs_up_the_first_picture_without_a_phone_rea
 
 
 def test_wallpaper_changed_outside_homalawn_asks_the_phone_again(linked, tmp_path):
-    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, Launcher
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED, Launcher
     t, dev, phone = linked
     _phone_cannot_read_wallpaper(phone)
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     dev.wallpaper_id += 1  # someone picked another wallpaper on the phone
-    before = dev.wallpaper_now
-    with pytest.raises(NotSupported) as e:
-        Launcher(t).set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))
-    assert str(e.value) == MSG_MEDIA_NOT_GRANTABLE
-    assert "launcher.wallpaper_backup" in phone.methods() and dev.wallpaper_now == before
+    notes = []
+    assert Launcher(t).set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"), notify=notes.append) is None
+    assert "launcher.wallpaper_backup" in phone.methods()  # the phone was asked again, could not say
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
+    assert dev.wallpaper_now == b"\x89PNG second"  # replaced anyway
 
 
 def test_record_without_its_picture_falls_back_to_the_phone(linked, tmp_path):
@@ -262,7 +272,7 @@ def test_record_without_its_picture_falls_back_to_the_phone(linked, tmp_path):
     from homalawn.session import HELD_WALLPAPER, Launcher
     t, dev, phone = linked
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     snapshots.delete(HELD_WALLPAPER)
     snap = la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))
     assert snapshots.load(snap)["wallpaper.png"] == b"\x89PNG wallpaper"  # what the phone read
@@ -277,7 +287,7 @@ def test_no_wallpaper_id_means_no_record(linked, tmp_path):
         raise ProviderError("unknown_method: launcher.wallpaper_info", code="unknown_method")
     t, dev, phone = linked
     phone.handlers["launcher.wallpaper_info"] = info
-    Launcher(t).set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(Launcher(t), _img(tmp_path, "a.png", b"\x89PNG first"))
     assert dev.wallpaper_now == b"\x89PNG first"
     assert not (snapshots.root().parent / WALLPAPER_RECORD).exists()
     Launcher(t).set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))
@@ -289,7 +299,7 @@ def test_held_picture_is_not_an_undo_step(linked, tmp_path):
     from homalawn import snapshots
     from homalawn.session import HELD_WALLPAPER, Launcher
     t, _, _ = linked
-    Launcher(t).set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(Launcher(t), _img(tmp_path, "a.png", b"\x89PNG first"))
     assert HELD_WALLPAPER in snapshots.list_() and snapshots.list_undoable(f"link:{t.peer.fp}") == []
 
 
@@ -349,7 +359,7 @@ def test_over_adb_the_held_picture_also_spares_the_temporary_grant(tmp_path, mon
     monkeypatch.setenv("HOMALAWN_DATA", str(tmp_path / "data"))
     dev = FakeDevice(tmp_path)
     la = Launcher(AdbTransport(device=dev))
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     snap = la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))
     assert snapshots.load(snap)["wallpaper.png"] == b"\x89PNG first"
     assert "wallpaper_backup" not in dev.events  # so no temporary media grant either
@@ -362,7 +372,7 @@ def test_record_of_another_device_with_the_same_id_is_not_used(linked, tmp_path)
     from homalawn.session import WALLPAPER_RECORD, Launcher
     t, dev, phone = linked
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     path = snapshots.root().parent / WALLPAPER_RECORD
     rec = json.loads(path.read_text())
     assert rec["system_id"] == dev.wallpaper_id
@@ -377,34 +387,31 @@ def test_adb_record_names_the_serial(tmp_path, monkeypatch):
     from homalawn.session import WALLPAPER_RECORD, Launcher
     monkeypatch.setenv("HOMALAWN_DATA", str(tmp_path / "data"))
     dev = FakeDevice(tmp_path)
-    Launcher(AdbTransport(device=dev)).set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(Launcher(AdbTransport(device=dev)), _img(tmp_path, "a.png", b"\x89PNG first"))
     assert json.loads((snapshots.root().parent / WALLPAPER_RECORD).read_text())["device"] == "adb:emu"
 
 
 # -- undo/restore never overwrite a wallpaper they could not save (final review I2) -------------
-def test_undo_over_the_link_refuses_when_the_current_wallpaper_cannot_be_saved(linked, tmp_path):
+def test_undo_over_the_link_goes_ahead_when_the_current_wallpaper_cannot_be_saved(linked, tmp_path):
     from homalawn import snapshots
-    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, Launcher
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED, Launcher
     t, dev, phone = linked
     _phone_cannot_read_wallpaper(phone)
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"), backup=False)
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG first"))
     la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG second"))  # backed up from the held picture
     dev.wallpaper_id += 1  # then the user picked another wallpaper on the phone
     dev.wallpaper_now = b"\x89PNG chosen on the phone"
     undoable = snapshots.list_undoable(la.device_key())
-    with pytest.raises(NotSupported) as e:
-        la.undo()
-    assert str(e.value) == MSG_MEDIA_NOT_GRANTABLE  # names `--via adb` once, or --no-backup
-    assert dev.wallpaper_now == b"\x89PNG chosen on the phone"  # not overwritten
-    assert snapshots.list_undoable(la.device_key()) == undoable  # the undo step is still there
-    name, _ = la.undo(no_backup=True)  # the user said so: overwrite without a backup
+    name, notes = la.undo()   # the one it cannot save is replaced anyway, with one note
     assert name == undoable[0] and dev.wallpaper_now == b"\x89PNG first"
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
+    assert snapshots.list_undoable(la.device_key()) == undoable[1:]
 
 
-def test_restore_by_name_with_a_failing_backup_changes_nothing(linked, tmp_path):
+def test_restore_by_name_with_a_failing_backup_goes_ahead(linked, tmp_path):
     from homalawn import snapshots
-    from homalawn.session import Launcher
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED, Launcher
     t, dev, phone = linked
     la = Launcher(t)
     snap = la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG first"))
@@ -413,11 +420,7 @@ def test_restore_by_name_with_a_failing_backup_changes_nothing(linked, tmp_path)
     def broken():
         raise ProviderError("failed: IOException: disk", code="failed")
     phone.wallpaper = broken
-    with pytest.raises(ValueError) as e:
-        la.restore(snap)
-    assert "--no-backup" in str(e.value)
-    assert dev.wallpaper_now == b"\x89PNG first"
-    la.restore(snap, no_backup=True)
+    assert la.restore(snap) == [NOTE_WALLPAPER_UNSAVED]
     assert dev.wallpaper_now == b"\x89PNG wallpaper"
 
 

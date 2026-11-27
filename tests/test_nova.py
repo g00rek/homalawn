@@ -236,7 +236,7 @@ class FakeLa:
             raise RuntimeError("phone said no")
         return []
 
-    def restore(self, name, force=False, no_backup=False):
+    def restore(self, name, force=False):
         self.did.append(f"restore {name}")
         if self.fail_restore:
             raise RuntimeError("restore broke too")

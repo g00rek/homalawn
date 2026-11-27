@@ -84,16 +84,16 @@ signed with your own key never gets the release offered: Android would refuse it
 |---|---|
 | `look show` | This phone's Wallpaper & style settings as JSON (they are changed in the window). |
 | `look apply` | `homalawn --phone "Pixel 8" look apply` (see [theme-sync.md](theme-sync.md)) |
-| `wallpaper FILE [--lock \| --both] [--crop center] [--no-backup]` | `homalawn wallpaper ~/Pictures/wall.png --both --crop center` |
+| `wallpaper FILE [--lock \| --both] [--crop center]` | `homalawn wallpaper ~/Pictures/wall.png --both --crop center` |
 
 ### History and undo
 
 | Command | What it does |
 |---|---|
-| `undo [--no-backup]` | Undo the last change Homa Lawn made on this phone; repeat to go further back. |
+| `undo` | Undo the last change Homa Lawn made on this phone; repeat to go further back. |
 | `snapshot save [NAME]` | Save the current home screen under a name (default `manual-<date>-<time>`). |
 | `snapshot list` | Every snapshot, newest first, with the phone it was taken on. |
-| `snapshot restore NAME [--force] [--no-backup]` | Restore one (layout, settings and grid, or wallpaper: whatever it holds). |
+| `snapshot restore NAME [--force]` | Restore one (layout, settings and grid, or wallpaper: whatever it holds). |
 
 ### Screen control (any app)
 
@@ -133,8 +133,8 @@ Points are in screen pixels.
   serial over adb). `undo` walks only this phone's snapshots, and `snapshot restore` refuses another
   phone's unless you add `--force`. The same phone over adb counts as another phone: undo a change
   the way it was made.
-- Restoring a wallpaper first saves the one shown now. When that is not possible it stops before
-  changing anything; see [Wallpaper backups](theme-sync.md#wallpaper-backups).
+- Restoring a wallpaper first saves the one shown now. When that is not possible it restores anyway
+  and says so in one line; see [Wallpaper backups](theme-sync.md#wallpaper-backups).
 
 ## Things worth knowing
 

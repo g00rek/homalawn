@@ -10,7 +10,7 @@
 #                                                  | pickerFacts
 #                                                  | history rows|"restore NAME" | size WxH
 #                                                  | lookFacts | lookEdit JSON | undo | retry
-#                                                  | overwrite yes|no | homeFacts | homeEdit JSON
+#                                                  | homeFacts | homeEdit JSON
 #                                                  | searchFacts | searchEdit JSON
 #                                                  | agentsFacts | agentsEdit JSON
 #                                                  | settingsFacts | settingsEdit JSON | ask WHAT

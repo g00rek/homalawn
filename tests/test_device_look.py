@@ -48,9 +48,9 @@ def phone(link_transport, avd_hygiene, tmp_path):
     la = Launcher(link_transport)
     la.refresh()
     la.wait_loaded()
-    la.set_wallpaper(str(two_colour(tmp_path / "seed.png")), backup=False, target="both")
+    la.set_wallpaper(str(two_colour(tmp_path / "seed.png")), target="both")
     yield s, la, over_adb.transport.device
-    over_adb.restore(saved, force=True, no_backup=True)
+    over_adb.restore(saved, force=True)
     snapshots.delete(saved)
 
 

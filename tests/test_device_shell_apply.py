@@ -7,8 +7,8 @@ through the harness.
   leaving the page and coming back keeps the draft; Discard puts the saved settings back; Apply sends
   the draft as exactly one look snapshot and the AVD wallpaper changes.
 - With a wallpaper homalawn did not set (Android 15 does not let Lawnchair read it over the link), Apply
-  asks "Replace current wallpaper?" (Cancel / Replace) instead of failing; Cancel leaves the phone alone;
-  Replace replaces it, the look snapshot holds the settings only, and Undo puts the colours back.
+  goes ahead: no question, no error; the look snapshot holds the settings only, and Undo puts the
+  colours back.
 Pictures go to HOMALAWN_APPLY_SHOTS (default /tmp/claude-1000/homalawn-apply-shots)."""
 import json
 import os
@@ -132,17 +132,17 @@ def phone(avd_hygiene, link_transport, tmp_path):
     la.wait_loaded()
     seed = tmp_path / "seed.png"
     Image.new("RGB", (400, 200), (30, 60, 200)).save(seed)
-    la.set_wallpaper(str(seed), backup=False, target="both")
+    la.set_wallpaper(str(seed), target="both")
     pre_looks = looks(la)
     try:
         yield d, la
     finally:
         for _ in range(len(set(looks(la)) - set(pre_looks))):   # the colours and mode go back too
             try:
-                la.undo(no_backup=True)
+                la.undo()
             except Exception:
                 break
-        avd_hygiene.restore(saved, force=True, no_backup=True)
+        avd_hygiene.restore(saved, force=True)
         snapshots.delete(saved)
 
 
@@ -209,7 +209,7 @@ def accent(t):
     return (cur["datastore"].get("accent_color") or cur["shared"].get("accent_color") or {}).get("value")
 
 
-def test_window_asks_before_overwriting_a_wallpaper_it_cannot_save(phone, link_transport, tmp_path):
+def test_window_replaces_a_wallpaper_it_cannot_save_without_asking(phone, link_transport, tmp_path):
     d, la = phone
     forget_wallpaper()   # as if the wallpaper had been picked on the phone: over the link it cannot be read
     w = Window(tmp_path, link_transport.label)
@@ -221,36 +221,19 @@ def test_window_asks_before_overwriting_a_wallpaper_it_cannot_save(phone, link_t
         base_accent = accent(link_transport)
         w.open_look()
 
-        # Apply a chosen theme: the service cannot save the wallpaper first, so the page asks.
+        # Apply a chosen theme: the wallpaper cannot be saved first, and the look goes ahead.
         assert w.call("lookEdit", '{"theme":"Catppuccin"}') == "ok"
         assert w.call("lookEdit", '{"apply":true}') == "started"
-        f = w.wait_for(lambda: (lambda f: f if f["askOverwrite"] else None)(w.facts()),
-                       "the Replace question never showed", tries=480)
-        assert f["errorCode"] == "wallpaper_unsaved" and f["canRetry"] is False
-        assert looks(la) == base_looks and d.call("wallpaper_info")["system_id"] == base_wall
-        w.shot("look", "overwrite-question.png")
-
-        # Cancel: the question goes, the phone is left alone.
-        assert w.call("overwrite", "no") == "started"
-        assert w.facts()["askOverwrite"] is False
-        w.shot("look", "overwrite-cancelled.png")
-        assert looks(la) == base_looks and d.call("wallpaper_info")["system_id"] == base_wall
-
-        # Another change and Apply asks again; Replace replaces the wallpaper without a backup.
-        w.call("lookEdit", '{"layer":{"home":30}}')
-        assert w.call("lookEdit", '{"apply":true}') == "started"
-        w.wait_for(lambda: w.facts()["askOverwrite"], "the question did not come back", tries=480)
-        assert w.call("overwrite", "yes") == "started"
-        w.wait_for(lambda: not w.facts()["overwriting"], "Replace never finished", tries=480)
+        w.wait_for(lambda: not w.facts()["applying"], "Apply never finished", tries=480)
         f = w.facts()
-        assert f["askOverwrite"] is False and f["errorCode"] is None, f
+        assert f["errorCode"] is None and f["error"] is None and f["canRetry"] is False, f
         new = [n for n in looks(la) if n not in base_looks]
         assert len(new) == 1
         held = set(snapshots.load(new[0]))
         assert PREFS_FILE in held and WALLPAPER_FILE not in held   # the settings, not the unsaved picture
         assert d.call("wallpaper_info")["system_id"] != base_wall
         assert accent(link_transport) != base_accent
-        w.shot("look", "after-overwrite.png")
+        w.shot("look", "after-apply-unsaved.png")
 
         # Undo from the window: the colours go back (the wallpaper had nothing to go back to).
         assert w.call("undo") == "started"

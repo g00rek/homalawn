@@ -10,9 +10,9 @@ list carries what each screen shows now (`screens`: keep, or a wallpaper or grad
 Choices are a draft on the phone; its Apply leaves one pending choice `{at, screens}` (one choice
 per screen), which the service reads (`launcher.theme_wallpaper_choice`, which also says
 `needs_list` when the phone wants the whole list again) and answers
-(`launcher.theme_wallpaper_ack`: received, then applied, waiting or failed; failed with code
-wallpaper_unsaved makes the phone ask whether to replace the wallpaper without a backup, and its
-Replace sends the same choice again with `overwrite`). A build from before
+(`launcher.theme_wallpaper_ack`: received, then applied, waiting or failed). A wallpaper that
+cannot be saved first never fails a choice: it is replaced anyway (an older phone build may still
+send `overwrite: true` with a choice; it is ignored). A build from before
 per-screen choices gets the older list (`target`, `current_id`, no gradients) and answers with
 `{at, id?, target?}`; one older still gets no `target`.
 
@@ -21,7 +21,7 @@ colour layer per screen): the list adds `format: 3` and `wallpaper: {same, paral
 wallpaper a `wide` thumbnail (the home picture as it is sent with parallax on, twice the width;
 gradients have none: they never scroll, and `parallax` says true only while the home screen shows a
 theme wallpaper) and, when that picture's lock-screen crop differs from its home one, a `lock` thumbnail. A phone that knows it
-answers `{at, format: 3, screens, layer: {home, lock}, wallpaper: {same, parallax}, overwrite?}`.
+answers `{at, format: 3, screens, layer: {home, lock}, wallpaper: {same, parallax}}`.
 `same` is left from the phone's "Same on both", dropped from the model on 2026-10-17: the list
 always says false (the phone shows its two panels); a choice may still say true (the phone's own
 switch, until its screen drops it, or nothing), and the service stores that as two equal screens.
@@ -269,11 +269,6 @@ def _refused_names(e: Exception) -> set[str]:
     return {n.strip() for n in text.rsplit(": ", 1)[-1].split(",") if n.strip()}
 
 
-def _refused(e: Exception, names) -> bool:
-    """A build from before a field refuses it (its params are strict): bad_params naming it."""
-    return bool(_refused_names(e) & set(names))
-
-
 # the list's fields by the level that brought them (see _base)
 _LEVEL_FIELDS = {FORMAT: MODEL_FIELDS, 2: NEW_FIELDS, 1: ("target",)}
 
@@ -354,8 +349,6 @@ def _choice(r) -> dict | None:
         if any(v is None for v in screens.values()):
             return None
         out = {"at": c["at"], "screens": screens, "id": None, "target": None}
-        if c.get("overwrite") is True:      # Replace in the phone's overwrite question
-            out["overwrite"] = True
         fmt = c.get("format")
         if isinstance(fmt, int) and not isinstance(fmt, bool) and fmt >= FORMAT:
             model = _model_choice(c)
@@ -389,11 +382,8 @@ def _model_choice(c: dict) -> dict | None:
     return {"format": FORMAT, "wallpaper": {"same": w.get("same", False), "parallax": w["parallax"]}, "layer": lay}
 
 
-def ack(t, at, state: str, current_id: str | None = None, message: str | None = None,
-        code: str | None = None) -> None:
-    """`code` (with failed): why, for the phone to act on (wallpaper_unsaved: it asks whether to
-    replace the wallpaper without a backup). A build without codes refuses the field; it gets the
-    message alone."""
+def ack(t, at, state: str, current_id: str | None = None, message: str | None = None) -> None:
+    """Tell the phone what became of its choice `at`."""
     if state not in ACK_STATES:
         raise ValueError(f"unknown ack state {state!r}")
     params = {"at": at, "state": state}
@@ -401,10 +391,4 @@ def ack(t, at, state: str, current_id: str | None = None, message: str | None = 
         params["current_id"] = current_id
     if message is not None:
         params["message"] = message
-    if code is not None:
-        try:
-            return t.call(ACK, params | {"code": code})
-        except Exception as e:
-            if not _refused(e, ("code",)):
-                raise
     t.call(ACK, params)

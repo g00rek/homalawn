@@ -64,18 +64,12 @@ class LayoutInvalid(ValueError):
         self.problems = found
 
 
-class WallpaperUnsaved(ValueError):
-    """A look would replace a wallpaper that cannot be saved first. Applying it again with
-    `overwrite_wallpaper` replaces it without that backup (after the user said so)."""
-    code = "wallpaper_unsaved"
-
-
 WALLPAPER_STAGED = "wp"  # files/omalawn/wp: the picture handed to launcher.wallpaper_set
 MSG_MEDIA_READ = ("Homa Lawn may not read the current wallpaper, so it cannot be saved first. "
-                  "Allow Homa Lawn to read photos once on the phone, or pass --no-backup")
+                  "Allow Homa Lawn to read photos once on the phone")
 MSG_MEDIA_NOT_GRANTABLE = ("Android does not let Homa Lawn read the current wallpaper on this phone, so it cannot be "
                            "saved first over the link; run this once with `--via adb` (which allows it for that one "
-                           "call), or pass --no-backup")
+                           "call)")
 # The picture homalawn set last, and the phone's wallpaper id right after it (getWallpaperId of the
 # home screen). While the phone still reports that id, that picture IS the current wallpaper, so the
 # backup before the next change is taken from here and the phone is not asked to read anything
@@ -88,12 +82,11 @@ MSG_LOCK_NEEDS_UPDATE = ("the Homa Lawn build on this phone sets the home screen
                          "(`homalawn update`) to set the lock screen too")
 MSG_SIZE_UNKNOWN = ("this phone does not say its screen size, so the picture cannot be cropped to it; update "
                     "Homa Lawn on the phone (`homalawn update`), or leave out --crop")
-MSG_LOOK_NO_BACKUP = ("The current wallpaper cannot be saved first, so wallpaper & style was not applied. Allow "
-                      "Homa Lawn photo access once on the phone, then try again; or switch Wallpaper off in "
-                      "Wallpaper & style.")
-WALLPAPER_UNSAVED = "wallpaper_unsaved"  # error code: a look needs consent to replace an unsaved wallpaper
 MSG_MEDIA_ASKED = ("Homa Lawn needs access to photos to save the current wallpaper first: tap the Homa Lawn "
-                   "notification on the phone and allow it, then run this again (or pass --no-backup)")
+                   "notification on the phone and allow it; the next change can then save it")
+# A wallpaper that cannot be saved never stops a change: it is replaced, and this one line says so.
+NOTE_WALLPAPER_UNSAVED = "The previous wallpaper could not be saved, so undo will not bring it back."
+NOTE_WALLPAPERS_UNSAVED = "The previous wallpapers could not be saved, so undo will not bring them back."
 
 
 def set_home_hint(serial: str | None = None, package: str | None = None) -> str:
@@ -589,15 +582,14 @@ class Launcher:
         self._send_prefs(writes)
         return snap
 
-    def apply_look(self, images: dict[str, bytes], prefs: list[tuple[str, str]], notify=None,
-                   overwrite_wallpaper: bool = False) -> str:
+    def apply_look(self, images: dict[str, bytes], prefs: list[tuple[str, str]], notify=None) -> str:
         """Apply a look in one undo step. `images`: ready-to-set pictures under "home", "lock" or
         "both"; `prefs`: (key, value) launcher settings. Everything that will change is saved in ONE
         snapshot first (`look-...`), then the settings go out in one commit, then the pictures
         (home before lock). Returns the snapshot name, or "" when there was nothing to change.
-        A wallpaper that cannot be saved first raises WallpaperUnsaved, unless `overwrite_wallpaper`:
-        then it is replaced anyway and the snapshot keeps the settings (and any picture that could
-        be saved), so undo still puts the colours and mode back."""
+        A wallpaper that cannot be saved first is replaced anyway (one note to `notify`): the
+        snapshot keeps the settings and any picture that could be saved, so undo still puts the
+        colours and mode back."""
         self._check_pictures(images)
         if not images and not prefs:
             return ""
@@ -606,7 +598,7 @@ class Launcher:
         self.wait_loaded()
         cur = prefs_mod.current(self.transport) if prefs else None
         writes = [prefs_mod.resolve(self.transport, k, v, cur=cur) for k, v in prefs]  # validates; sends nothing
-        name = self._look_snapshot(cur, images, notify, overwrite_wallpaper)
+        name = self._look_snapshot(cur, images, notify)
         try:
             if writes:
                 self._send_prefs(writes)
@@ -628,40 +620,22 @@ class Launcher:
     def _parts(images: dict[str, bytes]) -> tuple[str, ...]:
         return ("home", "lock") if "both" in images else tuple(p for p in ("home", "lock") if p in images)
 
-    def _look_snapshot(self, cur: dict | None, images: dict[str, bytes], notify=None,
-                       overwrite_wallpaper: bool = False) -> str:
+    def _look_snapshot(self, cur: dict | None, images: dict[str, bytes], notify=None) -> str:
         """The one `look-` snapshot of everything a look replaces: the settings `cur` (None: the look
         writes none) and the wallpapers of the screens in `images`. A wallpaper that cannot be saved
-        raises WallpaperUnsaved unless `overwrite_wallpaper` (then whatever part can be saved is kept)."""
+        is not kept (the look goes ahead, with one note); whatever part can be saved is."""
         parts = self._parts(images)
         files: dict[str, bytes] = {}
         if cur is not None:
             files[PREFS_FILE] = json.dumps(cur, indent=1, sort_keys=True).encode()
         if parts:
-            try:
-                files.update(self._backup_files(parts, notify))
-            except (NotSupported, TransportError) as e:
-                unsaved = (isinstance(e, NotSupported) and "--no-backup" in str(e)) or (
-                    isinstance(e, TransportError) and "live wallpaper" in str(e))
-                if not unsaved:
-                    if isinstance(e, NotSupported):
-                        raise  # already says what to do
-                    raise ValueError(f"The current wallpaper cannot be saved first ({e}), so wallpaper & style was "
-                                     "not applied.")
-                if not overwrite_wallpaper:
-                    # a look's one undo step needs the old pictures: replacing them is the user's call
-                    raise WallpaperUnsaved(MSG_LOOK_NO_BACKUP) from e
-                for part in parts:  # keep whatever part can be saved (say, a lock screen homalawn set)
-                    try:
-                        files.update(self._backup_files((part,), notify))
-                    except (NotSupported, TransportError):
-                        pass
+            files.update(self._backup_what_can_be_saved(parts, notify))
         name = self._unique(lambda: "look-" + time.strftime("%Y%m%d-%H%M%S"))
         snapshots.save(name, files, device=self.device_key())
         return name
 
     def put_look(self, images: dict[str, bytes], prefs: list[tuple[str, str]], key: str, changed_at: int,
-                 theme: str, notify=None, overwrite_wallpaper: bool = False) -> LookPut:
+                 theme: str, notify=None) -> LookPut:
         """A look over the link (spec 6.2): stored in the phone's look book with look_put, which never
         touches the screen. Only when the phone answers that it shows it (this computer is the source
         and the look is not on the screen yet) is the snapshot taken, as apply_look takes it, and
@@ -686,7 +660,7 @@ class Launcher:
         if not r.get("show"):
             return LookPut("", False, src.get("name") or None, scope,
                            mine=bool(src.get("fp")) and src.get("fp") == self.transport.fingerprint)
-        name = self._look_snapshot(cur, images, notify, overwrite_wallpaper)
+        name = self._look_snapshot(cur, images, notify)
         try:
             before = self._home_moves_to_lock() if "home" in images else None
             try:
@@ -998,19 +972,44 @@ class Launcher:
             files[LOCK_WALLPAPER_FILE if part == "lock" else WALLPAPER_FILE] = data
         return files
 
-    def backup_wallpaper(self, notify=None, prefix: str = "wallpaper-", target: str = "home") -> str:
+    def _backup_what_can_be_saved(self, parts, notify=None) -> dict[str, bytes]:
+        """_backup_files that never stops the change: a wallpaper that cannot be saved (a live
+        wallpaper, photo access refused, an empty answer, an error from the phone) is left out and
+        `notify` gets one line saying undo will not bring it back. Of several screens, each that
+        can be saved is kept."""
+        parts = tuple(parts)
+        try:
+            return self._backup_files(parts, notify)
+        except TransportError:
+            pass
+        files: dict[str, bytes] = {}
+        if len(parts) > 1:
+            for part in parts:
+                try:
+                    files.update(self._backup_files((part,), notify))
+                except TransportError:
+                    pass
+        if notify:
+            notify(NOTE_WALLPAPERS_UNSAVED if len(parts) > 1 and not files else NOTE_WALLPAPER_UNSAVED)
+        return files
+
+    def backup_wallpaper(self, notify=None, prefix: str = "wallpaper-", target: str = "home") -> str | None:
         """Save the current home (`target` "home"), lock screen ("lock") or both wallpapers into one
-        local snapshot first; returns the snapshot name."""
-        files = self._backup_files(WALLPAPER_PARTS[target], notify)
+        local snapshot first; returns the snapshot name, or None when nothing could be saved (the
+        note says so)."""
+        files = self._backup_what_can_be_saved(WALLPAPER_PARTS[target], notify)
+        if not files:
+            return None
         name = self._unique(lambda: prefix + time.strftime("%Y%m%d-%H%M%S"))
         snapshots.save(name, files, device=self.device_key())
         return name
 
-    def set_wallpaper(self, local: str, backup: bool = True, notify=None, target: str = "home",
+    def set_wallpaper(self, local: str, notify=None, target: str = "home",
                       size: tuple[int, int] | None = None) -> str | None:
         """Set the home (`target` "home"), lock screen ("lock") or both wallpapers from an image
         file; `size` (width, height): scale it to cover that and keep the centre first. The
-        wallpapers it replaces are saved in one snapshot first, unless not `backup`."""
+        wallpapers it replaces are saved in one snapshot first; one that cannot be saved is replaced
+        anyway (one note to `notify`)."""
         if target not in WALLPAPER_PARTS:
             raise ValueError(f"target must be home, lock or both, not {target!r}")
         with open(local, "rb") as f:
@@ -1020,18 +1019,7 @@ class Launcher:
             data = crop_center(data, *size)
         if "lock" in WALLPAPER_PARTS[target]:
             self._require_lock(self._wallpaper_info())  # before anything is saved or changed
-        snap = None
-        if backup:
-            try:
-                snap = self.backup_wallpaper(notify, target=target)
-            except NotSupported:
-                raise  # already says what to do
-            except TransportError as e:
-                if "live wallpaper" in str(e):
-                    raise ValueError("the current wallpaper is a live wallpaper and cannot be saved; "
-                                     "pass --no-backup to replace it anyway")
-                raise ValueError(f"cannot save the current wallpaper first ({e}); "
-                                 "pass --no-backup to overwrite it anyway")
+        snap = self.backup_wallpaper(notify, target=target)
         self._put_wallpaper(data, target)
         return snap
 
@@ -1073,22 +1061,13 @@ class Launcher:
                                   and self._wallpaper_record().get("system_id") == old) else None
         self._remember_wallpaper({"lock": None}, info, moved=moved)
 
-    def _backup_before_restore(self, target: str = "home") -> str:
+    def _backup_before_restore(self, target: str, notes: list[str]) -> None:
         """The current wallpaper(s), saved before a restore replaces them (kept out of the undo
-        list, so a repeated undo does not swap two wallpapers forever). Raises when they cannot be
-        saved: the restore then changes nothing unless --no-backup."""
-        try:
-            return self.backup_wallpaper(
-                prefix=snapshots.pre_restore_name().replace("pre-restore-", "pre-restore-wallpaper-"),
-                target=target)
-        except NotSupported:
-            raise  # one line naming `--via adb` once or --no-backup
-        except TransportError as e:
-            if "live wallpaper" in str(e):
-                raise ValueError("the current wallpaper is a live wallpaper; restoring would replace it with a "
-                                 "picture; pass --no-backup to restore anyway")
-            raise ValueError(f"cannot save the current wallpaper before restoring ({e}); "
-                             "pass --no-backup to restore anyway")
+        list, so a repeated undo does not swap two wallpapers forever). One that cannot be saved
+        is replaced anyway; the note goes to `notes`."""
+        self.backup_wallpaper(
+            notes.append, prefix=snapshots.pre_restore_name().replace("pre-restore-", "pre-restore-wallpaper-"),
+            target=target)
 
     def _check_device(self, name: str) -> None:
         have = snapshots.device_of(name)
@@ -1101,11 +1080,12 @@ class Launcher:
                              "restore it with --force only if they are the same phone")
 
     # -- restore / undo -----------------------------------------------------
-    def restore(self, name: str, force: bool = False, no_backup: bool = False) -> list[str]:
+    def restore(self, name: str, force: bool = False) -> list[str]:
         """Put a snapshot back: preferences first (they may change the grid, i.e. the DB name),
         then the wallpaper, then the layout DB through the safe write path. A snapshot of another
-        (or an unknown) phone is refused unless `force`; a wallpaper that cannot be saved first
-        stops the restore before anything changed, unless `no_backup`."""
+        (or an unknown) phone is refused unless `force`. A wallpaper that cannot be saved first is
+        replaced anyway; the returned notes say so."""
+        notes: list[str] = []
         if not force:
             self._check_device(name)
         files = snapshots.load(name)
@@ -1133,8 +1113,8 @@ class Launcher:
                              "it needs the grid it was taken with")
         if wp_target and "lock" in WALLPAPER_PARTS[wp_target]:
             self._require_lock(self._wallpaper_info())  # an older build would put it on the home screen
-        if wp_target and not no_backup:
-            self._backup_before_restore(wp_target)  # before anything changes: a refusal leaves the phone as it was
+        if wp_target:
+            self._backup_before_restore(wp_target, notes)  # before anything changes
         if writes or removals or target_db:
             # one pre-restore snapshot of everything this restore changes
             self._snapshot("pre-restore-", cur if (writes or removals) else None,
@@ -1149,18 +1129,18 @@ class Launcher:
         elif lock_follows:
             self._reset_lock_wallpaper()
         if not target_db:
-            return []
+            return notes
         current = self._read_all()
-        return self._write_db(self._single_file(files, target_db), current)
+        return notes + self._write_db(self._single_file(files, target_db), current)
 
-    def undo(self, no_backup: bool = False) -> tuple[str, list[str]]:
+    def undo(self) -> tuple[str, list[str]]:
         """Restore the newest snapshot homalawn took of this phone before one of its changes, and
         drop it."""
         names = snapshots.list_undoable(self.device_key())
         if not names:
             raise LookupError(f"nothing to undo on this phone ({self.device_key() or 'unknown device'})")
         name = names[0]
-        notes = self.restore(name, force=True, no_backup=no_backup)
+        notes = self.restore(name, force=True)
         snapshots.delete(name)
         return name, notes
 

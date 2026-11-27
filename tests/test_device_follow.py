@@ -72,7 +72,7 @@ def test_follower_changes_the_phone_when_the_omarchy_background_changes(avd_hygi
     la.wait_loaded()
     seed = tmp_path / "seed.png"
     Image.new("RGB", (400, 200), (30, 60, 200)).save(seed)
-    la.set_wallpaper(str(seed), backup=False, target="both")   # a first picture, so the link can write wallpapers
+    la.set_wallpaper(str(seed), target="both")   # a first picture, so the link can write wallpapers
 
     current = tmp_path / "current"
     current.mkdir()
@@ -139,7 +139,7 @@ def test_follower_changes_the_phone_when_the_omarchy_background_changes(avd_hygi
         except subprocess.TimeoutExpired:
             svc.kill()
         log.close()
-        avd_hygiene.restore(saved, force=True, no_backup=True)
+        avd_hygiene.restore(saved, force=True)
         snapshots.delete(saved)
         shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -211,7 +211,7 @@ def test_a_locked_phone_gets_the_look_and_the_home_screen_at_once(avd_hygiene, l
     la.wait_loaded()
     seed = tmp_path / "seed.png"
     Image.new("RGB", (400, 200), (30, 60, 200)).save(seed)
-    la.set_wallpaper(str(seed), backup=False, target="both")
+    la.set_wallpaper(str(seed), target="both")
 
     current = tmp_path / "current"
     current.mkdir()
@@ -321,6 +321,6 @@ def test_a_locked_phone_gets_the_look_and_the_home_screen_at_once(avd_hygiene, l
         except subprocess.TimeoutExpired:
             svc.kill()
         log.close()
-        avd_hygiene.restore(saved, force=True, no_backup=True)
+        avd_hygiene.restore(saved, force=True)
         snapshots.delete(saved)
         shutil.rmtree(run_dir, ignore_errors=True)

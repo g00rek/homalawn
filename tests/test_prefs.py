@@ -406,17 +406,17 @@ def test_wallpaper_backs_up_before_overwriting(data, tmp_path):
     assert d.pushed == b"OLDWALLPAPER" and len(d.wp_set) == 2
 
 
-def test_wallpaper_refuses_without_backup(data, tmp_path):
+def test_wallpaper_goes_ahead_when_it_cannot_be_saved(data, tmp_path):
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED
     d = StatefulDev()
     d.wp_fail = True
     f = tmp_path / "n.png"
     f.write_bytes(b"NEW")
     la = Launcher(AdbTransport(device=d))
-    with pytest.raises(ValueError, match="--no-backup"):
-        la.set_wallpaper(str(f))
-    assert d.wp_set == []
-    assert la.set_wallpaper(str(f), backup=False) is None
-    assert d.wp_set
+    notes = []
+    assert la.set_wallpaper(str(f), notify=notes.append) is None
+    assert d.wp_set and d.pushed == b"NEW"
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
 
 
 def test_wallpaper_backup_grants_media_read_then_retries(data, tmp_path):
@@ -450,21 +450,19 @@ def test_wallpaper_state_reverted_even_when_retry_fails(data, tmp_path):
     d.wp_fail_after_grant = True
     f = tmp_path / "n.png"
     f.write_bytes(b"NEW")
-    with pytest.raises(ValueError):
-        Launcher(AdbTransport(device=d)).set_wallpaper(str(f))
-    assert not d.granted and d.wp_set == []
+    assert Launcher(AdbTransport(device=d)).set_wallpaper(str(f)) is None   # goes ahead, nothing to undo
+    assert not d.granted and len(d.wp_set) == 1
 
 
-def test_wallpaper_live_refuses(data, tmp_path):
+def test_wallpaper_live_goes_ahead_with_a_note(data, tmp_path):
     d = StatefulDev()
     d.live = True
     f = tmp_path / "n.png"
     f.write_bytes(b"NEW")
     la = Launcher(AdbTransport(device=d))
-    with pytest.raises(ValueError, match="live wallpaper.*--no-backup"):
-        la.set_wallpaper(str(f))
-    assert d.wp_set == []
-    assert la.set_wallpaper(str(f), backup=False) is None
+    notes = []
+    assert la.set_wallpaper(str(f), notify=notes.append) is None
+    assert d.wp_set and notes == ["The previous wallpaper could not be saved, so undo will not bring it back."]
 
 
 def _positions(d):

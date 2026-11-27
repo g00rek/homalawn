@@ -41,7 +41,7 @@ Homa Lawn controls the user's Android phone: its home screen (the Homa Lawn app)
 - These taps are the user's, on any phone they use; never make them yourself, ask them, then verify: Accept, Allow, Install, Buy, pairing or permission buttons, password or payment entry, and Create (or its "Always allow" box) on Android's "create widget and allow access" dialog.
 - Screens are numbered by position as the phone shows them (0 = the first page); each also carries its `id`. The top row of the page with id 0 holds the search/date bar, wherever that page is. A widget that needs setup (clock-type ones) shows it in phone_layout's state; finish its setup screen yourself with screen_* (follow the recipe).
 - For jobs inside other apps, call recipe_list and follow the matching recipe, including its Verify section.
-- no_backup and force only after the user agrees."""
+- force only after the user agrees."""
 
 RO = ToolAnnotations(read_only_hint=True)
 W = ToolAnnotations(read_only_hint=False, destructive_hint=True)
@@ -59,7 +59,6 @@ _SERVER_SHOT = re.compile(r"(?:homalawn|omalawn)-\d{8}-\d{6}-\d{3}(-\d+)?\.png")
 Screen = Annotated[int, Field(description="home screen position as the phone shows it, 0 is the first page")]
 X = Annotated[int, Field(description="column (cell x), 0 is the left")]
 Y = Annotated[int, Field(description="row (cell y), 0 is the top")]
-NoBackup = Annotated[bool, Field(description="replace the wallpaper without saving the current one. " + AGREE)]
 Node = Annotated[str | None, Field(description="node id from the latest screen_tree, like n12")]
 Px = Annotated[int | None, Field(description="screen x in pixels (give with y, instead of node)")]
 Py = Annotated[int | None, Field(description="screen y in pixels (give with x, instead of node)")]
@@ -159,7 +158,7 @@ def _grid_hint(r: ops.Result) -> str:
 
 
 def _wallpaper_hint(r: ops.Result) -> str:
-    return UNDO if r.data else "No backup was kept, so phone_undo cannot bring the previous wallpaper back."
+    return UNDO if r.data else ""   # nothing saved: the result's own note already says undo cannot bring it back
 
 
 _PRE_RESTORE = ("The state before it is in phone_snapshots as pre-restore-...; phone_snapshot_restore puts it back.")
@@ -213,8 +212,8 @@ def build_server(session: ops.Session) -> MCPServer:
                 session.notify = quiet
             if image is None:
                 out = lines + r.notes + ([r.text] if r.text else [])
-                if undo is not None:
-                    out.append(undo(r))
+                if undo is not None and (hint := undo(r)):
+                    out.append(hint)
                 return _for_agent("\n".join(out))
             try:  # saving or scaling the picture is local: no reason to drop the phone connection
                 return lines + r.notes + image(r.data)
@@ -341,11 +340,9 @@ def build_server(session: ops.Session) -> MCPServer:
                                           Field(description="which wallpaper: home screen, lock screen or both")] = "home",
                         crop: Annotated[Literal["none", "center"],
                                         Field(description="center: scale the picture to cover the phone's screen and "
-                                                          "keep the middle (none: send it as it is)")] = "none",
-                        no_backup: Annotated[bool, Field(description="overwrite without saving the current wallpaper. "
-                                                                     + AGREE)] = False) -> str:
-        """Set the home, lock screen or both wallpapers from an image file (the current ones are saved first). no_backup: Set only after the user agrees."""  # noqa: E501
-        return run(lambda _: ops.wallpaper(session, path, no_backup=no_backup, target=target, crop=crop),
+                                                          "keep the middle (none: send it as it is)")] = "none") -> str:
+        """Set the home, lock screen or both wallpapers from an image file (the current ones are saved first when Android allows it; the change goes ahead either way)."""  # noqa: E501
+        return run(lambda _: ops.wallpaper(session, path, target=target, crop=crop),
                    undo=_wallpaper_hint)
 
     @tool(SAVE)
@@ -357,15 +354,14 @@ def build_server(session: ops.Session) -> MCPServer:
     @tool(W)
     def phone_snapshot_restore(name: Annotated[str, Field(description="a snapshot name from phone_snapshots")],
                                force: Annotated[bool, Field(description="restore a snapshot of another or an unknown "
-                                                                        "phone. " + AGREE)] = False,
-                               no_backup: NoBackup = False) -> str:
-        """Restore a snapshot (layout, preferences and grid, or wallpaper; whatever it holds). force, no_backup: Set only after the user agrees."""  # noqa: E501
-        return run(lambda _: ops.snapshot_restore(session, name, force=force, no_backup=no_backup), undo=_restore_hint)
+                                                                        "phone. " + AGREE)] = False) -> str:
+        """Restore a snapshot (layout, preferences and grid, or wallpaper; whatever it holds). force: Set only after the user agrees."""  # noqa: E501
+        return run(lambda _: ops.snapshot_restore(session, name, force=force), undo=_restore_hint)
 
     @tool(W)
-    def phone_undo(no_backup: NoBackup = False) -> str:
-        """Undo the last change Homa Lawn made on this phone (home screen, setting, grid, wallpaper or wallpaper & style); repeat to go further back. no_backup: Set only after the user agrees."""  # noqa: E501
-        return run(lambda _: ops.undo(session, no_backup=no_backup), undo=_undo_hint)
+    def phone_undo() -> str:
+        """Undo the last change Homa Lawn made on this phone (home screen, setting, grid, wallpaper or wallpaper & style); repeat to go further back."""  # noqa: E501
+        return run(lambda _: ops.undo(session), undo=_undo_hint)
 
     # -- screen control (not undoable: no phone_undo hint) ---------------------------------------
     @tool(RO)

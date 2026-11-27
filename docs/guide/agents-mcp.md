@@ -89,7 +89,7 @@ The server hands the agent its rules when it connects, and the command's rules a
   off), a wrong certificate, closed pairing, `pairing_open` (the phone is showing a pairing
   request, which only a person answers) and anything asking for a password, payment, install or
   permission.
-- `no_backup` and `force` are used only after you agree.
+- `force` is used only after you agree.
 - Pairing is not a tool. A named adb device never reaches the link.
 
 Screen control is off until you switch it on on the phone, and it cannot see views apps mark as

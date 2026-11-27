@@ -288,11 +288,9 @@ def snapshot_list():
 
 @snapshot_app.command("restore")
 def snapshot_restore(name: str = typer.Argument(..., metavar="NAME", help="A snapshot from `snapshot list`"),
-                     force: bool = typer.Option(False, "--force", help="Restore a snapshot of another or an unknown phone"),
-                     no_backup: bool = typer.Option(False, "--no-backup",
-                                                    help="Replace the wallpaper without saving the current one")):
+                     force: bool = typer.Option(False, "--force", help="Restore a snapshot of another or an unknown phone")):
     """Restore a snapshot (layout, preferences and grid, or wallpaper; whatever it holds)."""
-    _show(_do(ops.snapshot_restore, name, force=force, no_backup=no_backup))
+    _show(_do(ops.snapshot_restore, name, force=force))
 
 
 @prefs_app.command("list")
@@ -376,14 +374,13 @@ def wallpaper(file: Path = typer.Argument(..., exists=True, readable=True, dir_o
               lock: bool = typer.Option(False, "--lock", help="set the lock screen wallpaper instead of the home one"),
               both: bool = typer.Option(False, "--both", help="set the home and the lock screen wallpaper"),
               crop: str = typer.Option("none", "--crop", metavar="center",
-                                       help="center: scale to cover the phone's screen and keep the middle"),
-              no_backup: bool = typer.Option(False, "--no-backup", help="overwrite without saving the current wallpaper")):
+                                       help="center: scale to cover the phone's screen and keep the middle")):
     """Set the wallpaper from an image file (the current one is saved first)."""
     if lock and both:
         raise _fail("--lock and --both cannot be used together.")
     if crop not in ("none", "center"):
         raise _fail("--crop takes center (or none).")
-    _show(_do(ops.wallpaper, str(file), no_backup=no_backup, target="both" if both else "lock" if lock else "home",
+    _show(_do(ops.wallpaper, str(file), target="both" if both else "lock" if lock else "home",
               crop=crop))
 
 
@@ -732,12 +729,11 @@ def screen_launch(package: str = typer.Argument(..., metavar="PACKAGE",
 
 
 @app.command()
-def undo(no_backup: bool = typer.Option(False, "--no-backup",
-                                        help="Replace the wallpaper without saving the current one")):
+def undo():
     """Undo the last change Homa Lawn made on this phone; repeat to go further back.
 
     A change is one to the home screen, a setting, the grid, the wallpaper or wallpaper & style."""
-    _show(_do(ops.undo, no_backup=no_backup))
+    _show(_do(ops.undo))
 
 
 @app.command("mcp")

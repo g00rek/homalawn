@@ -94,12 +94,11 @@ Every wallpaper change first saves the picture it replaces, so it can be undone.
   nothing from the phone.
 - When the wallpaper was set on the phone itself (in the Gallery, or another app), Homa Lawn has to
   read it from the phone. **Android 13 and newer do not let a launcher read the current wallpaper.**
-  The window and the phone then ask **Replace current wallpaper?** ("The wallpaper set on this phone
-  can't be backed up, so Undo can't bring it back."): **Replace** goes ahead, **Cancel** keeps your
-  draft. In a terminal the command stops with one line: run that one change with `--via adb` (over
-  adb Homa Lawn can allow the read for that one call) or add `--no-backup`. After that, Homa Lawn
-  set the wallpaper, so later backups work again.
-- A live wallpaper cannot be saved; it is replaced only with `--no-backup` (or **Replace**).
+  The change goes ahead anyway, keeps whatever could be saved (the settings, a lock screen picture
+  Homa Lawn set) and adds one line: "The previous wallpaper could not be saved, so undo will not
+  bring it back." Nothing asks and nothing stops. After that, Homa Lawn set the wallpaper, so later
+  backups work again (over adb Homa Lawn can also allow the read for that one call).
+- A live wallpaper cannot be saved either; it is replaced the same way.
 
 Setting only the home wallpaper while the lock screen shows the same picture leaves the old picture
 on the lock screen (Android does that); set both.

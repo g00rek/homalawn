@@ -295,11 +295,11 @@ def test_wallpaper_backup_over_link_asks_once_with_a_notification(linked):
     phone.handlers["launcher.request_media_permission"] = lambda p: ({"granted": False, "asked": True}, None)
     la = Launcher(t)
     with pytest.raises(NotSupported) as e:
-        la.backup_wallpaper()
+        la._backup_files(("home",))
     assert str(e.value) == MSG_MEDIA_ASKED and "tap the Homa Lawn notification" in str(e.value)
     assert "\n" not in str(e.value)
     with pytest.raises(NotSupported):  # again in the same run: no second notification
-        la.backup_wallpaper()
+        la._backup_files(("home",))
     assert phone.methods().count("launcher.request_media_permission") == 1
 
 
@@ -326,7 +326,7 @@ def test_wallpaper_backup_over_link_with_notifications_off(linked):
     phone.handlers["launcher.request_media_permission"] = lambda p: (
         {"granted": False, "asked": False, "why": "notifications_off"}, None)
     with pytest.raises(NotSupported) as e:
-        Launcher(t).backup_wallpaper()
+        Launcher(t)._backup_files(("home",))
     assert str(e.value) == MSG_MEDIA_READ
 
 
@@ -337,20 +337,21 @@ def test_wallpaper_backup_over_link_where_no_prompt_can_help(linked):
     phone.handlers["launcher.request_media_permission"] = lambda p: (
         {"granted": False, "asked": False, "why": "not_grantable"}, None)
     with pytest.raises(NotSupported) as e:
-        Launcher(t).backup_wallpaper()
+        Launcher(t)._backup_files(("home",))
     assert str(e.value) == MSG_MEDIA_NOT_GRANTABLE and "--via adb" in str(e.value) and "\n" not in str(e.value)
 
 
-def test_set_wallpaper_over_link_stops_before_writing(linked, tmp_path):
-    from homalawn.session import Launcher
+def test_set_wallpaper_over_link_goes_ahead_when_the_backup_cannot_be_asked_for(linked, tmp_path):
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED, Launcher
     t, dev, phone = linked
     phone.handlers["launcher.wallpaper_backup"] = _denied
     phone.handlers["launcher.request_media_permission"] = lambda p: ({"granted": False, "asked": True}, None)
     img = tmp_path / "w.png"
     img.write_bytes(b"\x89PNG new")
-    with pytest.raises(NotSupported):
-        Launcher(t).set_wallpaper(str(img))
-    assert "launcher.wallpaper_set" not in phone.methods() and "files/omalawn/wp" not in dev.files
+    notes = []
+    assert Launcher(t).set_wallpaper(str(img), notify=notes.append) is None
+    assert "launcher.wallpaper_set" in phone.methods() and dev.files["files/omalawn/wp"] == b"\x89PNG new"
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
 
 
 # -- ping no longer opens the home screen database ------------------------------------------

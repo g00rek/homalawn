@@ -42,8 +42,7 @@ class FakeOps:
         self.gate = {}              # name -> threading.Event look_apply waits on
         self.no_wallpaper = set()   # names whose apply sends no wallpaper
         self.locked_ = {}           # name -> what locked() answers (True/False/None; default None)
-        self.unsaved = set()        # names whose current wallpaper cannot be saved first
-        self.overwrites = []        # names applied with overwrite_wallpaper=True
+        self.unsaved = set()        # names whose current wallpaper cannot be saved first (the look still goes ahead)
         self.book = False           # answer like the link does: key, changed_at, shown, mine
         self.stamps = []            # what stamp(key) answered in look_apply
         self.next_key = "k1"        # the key look_apply puts in its data
@@ -72,18 +71,13 @@ class FakeOps:
             raise OpError("unknown_method: unknown method launcher.look_state", code="unknown_method")
         return st
 
-    def look_apply(self, s, settings, theme=None, background=None, overwrite_wallpaper=False, parts=None, stamp=None):
+    def look_apply(self, s, settings, theme=None, background=None, parts=None, stamp=None):
         self.calls.append(("look_apply", s.name))
         g = self.gate.get(s.name)
         if g is not None:
             assert g.wait(5)
         if s.name in self.fail:
             raise self.fail[s.name]
-        if overwrite_wallpaper:
-            self.overwrites.append(s.name)
-        elif s.name in self.unsaved:
-            raise OpError("The current wallpaper cannot be saved first, so the look was not applied.",
-                          code="wallpaper_unsaved")
         if settings.source == "follow":
             theme, bg = self.cur()
             theme, bg = theme, str(bg)
@@ -95,10 +89,12 @@ class FakeOps:
         if self.book and stamp is not None:
             extra = {"key": self.next_key, "changed_at": stamp(self.next_key), "shown": self.shown, "mine": self.mine}
             self.stamps.append(extra["changed_at"])
-        return Result(f"Look applied on {s.name}.", ["a note"],
+        notes = ["a note"] + (["The previous wallpaper could not be saved, so undo will not bring it back."]
+                              if s.name in self.unsaved else [])
+        return Result(f"Look applied on {s.name}.", notes,
                       data={"snapshot": "snap-1", "theme": theme, "background": bg} | extra)
 
-    def undo(self, s, no_backup=False):
+    def undo(self, s):
         self.calls.append(("undo", s.name))
         return Result("Restored snap-1", [], data="snap-1")
 
@@ -107,7 +103,7 @@ class FakeOps:
                 {"name": "snap-3", "device": None}] + list(getattr(self, "extra_snaps", []))
         return Result("\n".join(r["name"] for r in rows), data=rows)
 
-    def snapshot_restore(self, s, name, force=False, no_backup=False):
+    def snapshot_restore(self, s, name, force=False):
         self.calls.append(("restore", s.name, name, force))
         return Result(f"Restored {name}", [], data=name)
 
@@ -1457,7 +1453,10 @@ def test_phone_info_waits_for_a_short_connection_check(tmp_path):
 
 
 # -- a wallpaper that cannot be saved first ----------------------------------------------------
-def test_look_set_with_an_unsaveable_wallpaper_says_so_with_its_own_code(tmp_path):
+UNSAVED_NOTE = "The previous wallpaper could not be saved, so undo will not bring it back."
+
+
+def test_look_set_with_an_unsaveable_wallpaper_goes_ahead_with_the_note(tmp_path):
     svc, ops, cur = make(tmp_path)
     ops.unsaved.add("A")
 
@@ -1467,38 +1466,18 @@ def test_look_set_with_an_unsaveable_wallpaper_says_so_with_its_own_code(tmp_pat
             await until(lambda: svc.phones[fp_of("A")].connected)
             c = await connect(svc)
             r = await c.call("look.set", phone="A", settings={"source": "chosen", "theme": "Alpha"})
-            assert r["error"]["code"] == "wallpaper_unsaved"
+            assert "error" not in r and UNSAVED_NOTE in r["result"]["notes"]
             st = phone(svc.state(), "A")
-            assert st["error_code"] == "wallpaper_unsaved" and st["look"]["source"] == "chosen"  # saved
-            assert ops.overwrites == []
-            r = await c.call("look.apply", phone="A", overwrite_wallpaper=True)   # the user said Overwrite
-            assert r["result"]["text"] == "Look applied on A."
-            assert ops.overwrites == ["A"]
-            st = phone(svc.state(), "A")
-            assert st["error"] is None and st["error_code"] is None
+            assert st["error"] is None and st["error_code"] is None and st["look"]["source"] == "chosen"
+            assert st["applied"]["theme"] == "Alpha"
+            r = await c.call("look.apply", phone="A")
+            assert r["result"]["text"] == "Look applied on A." and UNSAVED_NOTE in r["result"]["notes"]
         finally:
             await svc.stop()
     run(go())
 
 
-def test_look_set_can_carry_the_overwrite_consent(tmp_path):
-    svc, ops, cur = make(tmp_path)
-    ops.unsaved.add("A")
-
-    async def go():
-        await svc.start()
-        try:
-            await until(lambda: svc.phones[fp_of("A")].connected)
-            c = await connect(svc)
-            r = await c.call("look.set", phone="A", settings={"source": "chosen", "theme": "Alpha"},
-                             overwrite_wallpaper=True)
-            assert "result" in r and ops.overwrites == ["A"]
-        finally:
-            await svc.stop()
-    run(go())
-
-
-def test_a_follow_apply_never_overwrites_an_unsaveable_wallpaper_by_itself(tmp_path):
+def test_a_follow_apply_goes_ahead_when_the_wallpaper_cannot_be_saved(tmp_path):
     svc, ops, cur = make(tmp_path, looks={"A": FOLLOW})
     ops.unsaved.add("A")
 
@@ -1507,10 +1486,9 @@ def test_a_follow_apply_never_overwrites_an_unsaveable_wallpaper_by_itself(tmp_p
         try:
             await until(lambda: svc.phones[fp_of("A")].connected)
             cur.value = ("Beta", Path("/bg/beta-1.png"))             # Omarchy changes
-            await until(lambda: svc.phones[fp_of("A")].error_code is not None)
+            await until(lambda: phone(svc.state(), "A")["applied"]["theme"] == "Beta")
             st = phone(svc.state(), "A")
-            assert st["error_code"] == "wallpaper_unsaved" and st["applied"]["theme"] == "Alpha"
-            assert ops.overwrites == []
+            assert st["error"] is None and st["error_code"] is None
         finally:
             await svc.stop()
     run(go())
@@ -1943,9 +1921,9 @@ def test_not_paired_shows_as_error_code_and_clears_when_the_phone_trusts_again(t
         ops.status = real
         await svc._check(ph)
         assert svc.state()["phones"][0]["error_code"] is None
-        ph.error_code = "wallpaper_unsaved"
+        ph.error_code = "other_code"
         await svc._check(ph)
-        assert ph.error_code == "wallpaper_unsaved"
+        assert ph.error_code == "other_code"
         await svc.stop()
     run(go())
 

@@ -26,6 +26,11 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
 
 ### Command line and agents
 
+- A wallpaper that cannot be saved first no longer stops a change. A look, `wallpaper`, `undo` and
+  `snapshot restore` replace it anyway, keep whatever part could be saved, and add one line:
+  "The previous wallpaper could not be saved, so undo will not bring it back." Nothing asks and
+  nothing fails; `--no-backup` / `no_backup` is gone (the save is always tried and never blocks).
+
 - `homalawn setup` allows **Local network** on an Android 17 phone before pairing, and a pairing
   that times out names it as the likely cause.
 - Pairing a phone again after Homa Lawn was reinstalled on it replaces its earlier pairing
@@ -36,6 +41,8 @@ numbered by build (`build-<N>`); each desktop release names the phone build it w
 
 ### Desktop window
 
+- Wallpaper & style no longer asks **Replace current wallpaper?**: Apply goes ahead when the current
+  wallpaper cannot be saved, and the result carries the one line saying undo will not bring it back.
 - The Overview's **Permissions** and the bar's warning include **Local network** (from phone apps
   that report it).
 - A phone still on the app from before the rename now says so ("Old app": remove it from the

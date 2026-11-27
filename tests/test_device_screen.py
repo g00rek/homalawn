@@ -370,7 +370,8 @@ def _media_state(d):
 
 def test_wallpaper_over_link_explains_once_when_no_prompt_can_help(lt, d, tmp_path):
     """Android 13+ (API 35 here): the photo prompt cannot make the wallpaper readable for Lawnchair,
-    so the request posts nothing and the CLI says in one line what to do instead."""
+    so the request posts nothing and the CLI sets the wallpaper anyway, with one note that undo will
+    not bring the previous one back."""
     import subprocess
     from homalawn.session import forget_wallpaper
     from test_device_seam import _cli
@@ -385,11 +386,9 @@ def test_wallpaper_over_link_explains_once_when_no_prompt_can_help(lt, d, tmp_pa
     img.write_bytes(subprocess.run(["adb", "-s", SERIAL, "exec-out", "screencap", "-p"], capture_output=True).stdout)
     r = _cli("--via", "link", "wallpaper", str(img))
     print("SCREEN wallpaper over link:", r.stdout.strip(), "|", r.stderr.strip())
-    assert r.returncode == 1
-    target, err = r.stderr.strip().split("\n")  # which phone, then one line of what to do
-    assert target.startswith("via link (")
-    assert "--via adb" in err and "--no-backup" in err
-    assert d.call("wallpaper_info")["system_id"] == wp0  # nothing was changed
+    assert r.returncode == 0
+    assert "The previous wallpaper could not be saved, so undo will not bring it back." in r.stdout + r.stderr
+    assert d.call("wallpaper_info")["system_id"] != wp0  # the wallpaper was replaced
     assert not re.search(NOTIF_MEDIA, d.shell("dumpsys", "notification", "--noredact"))
 
 

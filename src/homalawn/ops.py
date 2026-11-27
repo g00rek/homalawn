@@ -19,7 +19,7 @@ from . import apps as apps_mod, config, env, icons as icons_mod, look as look_mo
     widgets as widgets_mod
 from .adb import AdbError, AdbTransport
 from .layout import _component
-from .session import DEFERRED_NOTE, HomeError, Launcher, LayoutInvalid, NotLoaded, WallpaperUnsaved, parse_spec
+from .session import DEFERRED_NOTE, HomeError, Launcher, LayoutInvalid, NotLoaded, parse_spec
 from .transport import NotSupported, ProviderError, Transport, TransportError
 
 
@@ -348,8 +348,6 @@ def _resolve(la: Launcher, spec: str) -> str:
 def _run(s: Session, fn, notes: list[str] | None = None):
     try:
         return fn()
-    except WallpaperUnsaved as e:
-        raise OpError(str(e), notes, code=WallpaperUnsaved.code)
     except LayoutInvalid as e:
         raise OpError(str(e), notes, code=INVALID, problems=e.problems)
     except (ValueError, LookupError, FileNotFoundError, HomeError) as e:
@@ -784,7 +782,7 @@ WALLPAPER_DONE = {"home": "Wallpaper set", "lock": "Lock screen wallpaper set",
                   "both": "Home and lock screen wallpaper set"}
 
 
-def wallpaper(s: Session, path: str, no_backup: bool = False, target: str = "home", crop: str = "none") -> Result:
+def wallpaper(s: Session, path: str, target: str = "home", crop: str = "none") -> Result:
     """`target`: home, lock or both. `crop` "center": scale the picture to cover the phone's
     screen and cut out the middle, so the phone shows exactly that."""
     if target not in WALLPAPER_DONE:
@@ -796,7 +794,7 @@ def wallpaper(s: Session, path: str, no_backup: bool = False, target: str = "hom
 
     def go():
         size = la.screen_size() if crop == "center" else None
-        return size, la.set_wallpaper(str(path), backup=not no_backup, notify=notes.append, target=target, size=size)
+        return size, la.set_wallpaper(str(path), notify=notes.append, target=target, size=size)
     size, snap = _write(s, la, go, notes)
     cut = f" (cropped to the screen, {size[0]}x{size[1]})" if size else ""
     prev = "Previous ones" if target == "both" else "Previous one"
@@ -816,8 +814,7 @@ def look_key(theme_name: str, prefs, images: dict[str, bytes]) -> str:
 
 
 def look_apply(s: Session, settings, theme=None, background: Path | None = None,
-               overwrite_wallpaper: bool = False, parts: tuple | None = None,
-               stamp: Callable[[str], int] | None = None) -> Result:
+               parts: tuple | None = None, stamp: Callable[[str], int] | None = None) -> Result:
     """Put an Omarchy look on the phone in one undo step: the wallpapers (cut to the screen and
     tinted), the launcher colours, light or dark mode, and themed icons, as the settings allow.
     Per screen: `settings.wallpaper` holds one Screen each for home and lock ({kind, style, layer});
@@ -833,8 +830,8 @@ def look_apply(s: Session, settings, theme=None, background: Path | None = None,
     always: the preference goes off with it). A kept home screen leaves the preference alone. The
     lock screen never scrolls. `parts`: only these screens get a new
     picture (a choice made on the phone changes only the screens it names). A wallpaper that
-    cannot be saved first fails with code `wallpaper_unsaved`, unless `overwrite_wallpaper` (the
-    user agreed to replace it without that backup).
+    cannot be saved first is replaced anyway; the result carries one note saying undo will not
+    bring it back.
     Over the link the look goes into the phone's look book (session.Launcher.put_look) under its
     key (look_key), with `changed_at` = `stamp(key)` (default: now, epoch ms); the phone puts it on
     the screen only when this computer is its look source. `data` then also holds `key`,
@@ -936,12 +933,9 @@ def look_apply(s: Session, settings, theme=None, background: Path | None = None,
         if link:
             k = look_key(theme.name, prefs, images)   # over what is sent, so after the pictures exist
             changed = stamp(k) if stamp is not None else int(time.time() * 1000)
-            lp = la.put_look(images, prefs, k, changed, theme.name, notify=notes.append,
-                             overwrite_wallpaper=overwrite_wallpaper)
+            lp = la.put_look(images, prefs, k, changed, theme.name, notify=notes.append)
             put.update(key=k, changed_at=changed, shown=lp.shown, source=lp.source, mine=lp.mine, scope=lp.scope)
             return lp.snapshot, list(images)
-        if overwrite_wallpaper:
-            return la.apply_look(images, prefs, notify=notes.append, overwrite_wallpaper=True), list(images)
         return la.apply_look(images, prefs, notify=notes.append), list(images)
     link = la.transport.name == "link"
     put: dict = {}
@@ -1004,10 +998,9 @@ def walls_poll(s: Session) -> tuple[dict | None, bool]:
     return phonewall.poll(s.transport())
 
 
-def walls_ack(s: Session, at, state: str, current_id: str | None = None, message: str | None = None,
-              code: str | None = None) -> None:
+def walls_ack(s: Session, at, state: str, current_id: str | None = None, message: str | None = None) -> None:
     from . import phonewall
-    phonewall.ack(s.transport(), at, state, current_id, message, code)
+    phonewall.ack(s.transport(), at, state, current_id, message)
 
 
 def app_update(s: Session, apk: Path | None = None) -> Result:
@@ -1028,18 +1021,18 @@ def app_update(s: Session, apk: Path | None = None) -> Result:
     return Result(said[-1] if said else "Done.", said[:-1], data={"outcome": outcome})
 
 
-def snapshot_restore(s: Session, name: str, force: bool = False, no_backup: bool = False) -> Result:
+def snapshot_restore(s: Session, name: str, force: bool = False) -> Result:
     la = _writer(s)
     notes: list[str] = []
-    notes += _write(s, la, lambda: la.restore(name, force=force, no_backup=no_backup), notes,
+    notes += _write(s, la, lambda: la.restore(name, force=force), notes,
                     require_home=False) or []
     return Result(f"Restored: {_snapshot_words(name)}", notes, data=name)
 
 
-def undo(s: Session, no_backup: bool = False) -> Result:
+def undo(s: Session) -> Result:
     la = _writer(s)
     notes: list[str] = []
-    name, dropped = _write(s, la, lambda: la.undo(no_backup=no_backup), notes, require_home=False)
+    name, dropped = _write(s, la, lambda: la.undo(), notes, require_home=False)
     notes += dropped or []
     return Result(f"Undid: {_snapshot_words(name)}", notes, data=name)
 

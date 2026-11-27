@@ -636,15 +636,16 @@ def test_cli_snapshot_restore_force_and_list_show_the_phone(tmp_path, monkeypatc
     monkeypatch.setattr(Launcher, "home_guard", lambda self, require=True, notify=None: contextlib.nullcontext())
     monkeypatch.setenv("HOMALAWN_SERIAL", "emu")
     seen = []
-    monkeypatch.setattr(Launcher, "restore", lambda self, name, force=False, no_backup=False:
-                        seen.append((name, force, no_backup)) or [])
+    monkeypatch.setattr(Launcher, "restore", lambda self, name, force=False:
+                        seen.append((name, force)) or [])
     snapshots.save("m1", {"f": b"x"}, device="adb:emu")
     snapshots.save("m2", {"f": b"x"})
     r = CliRunner().invoke(cli.app, ["snapshot", "list"])
     assert "m1  adb:emu" in r.stdout and "m2  (unknown phone)" in r.stdout
-    r = CliRunner().invoke(cli.app, ["snapshot", "restore", "m2", "--force", "--no-backup"])
+    r = CliRunner().invoke(cli.app, ["snapshot", "restore", "m2", "--force"])
     assert r.exit_code == 0, r.output
-    assert seen == [("m2", True, True)]
+    assert seen == [("m2", True)]
+    assert CliRunner().invoke(cli.app, ["snapshot", "restore", "m2", "--no-backup"]).exit_code != 0  # the flag is gone
 
 
 def test_top_row_reserved_follows_smartspace(monkeypatch):

@@ -252,10 +252,10 @@ class _Home:
     def __init__(self, name):
         self.name = name
 
-    def undo(self, no_backup=False):
+    def undo(self):
         return self.name, []
 
-    def restore(self, name, force=False, no_backup=False):
+    def restore(self, name, force=False):
         return []
 
     import contextlib

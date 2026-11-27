@@ -348,23 +348,6 @@ def test_ops_off_is_refused(look_phone):
         ops.look_apply(s, lookconf.LookSettings())
 
 
-def test_unsaveable_wallpaper_message_has_no_no_backup_option(look_phone):
-    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE
-    t, dev, phone, store, commits = look_phone
-    la = Launcher(t)
-    la._media_msg = MSG_MEDIA_NOT_GRANTABLE
-    la._backup_files = lambda parts, notify=None: (_ for _ in ()).throw(
-        __import__("homalawn.transport", fromlist=["NotSupported"]).NotSupported(MSG_MEDIA_NOT_GRANTABLE))
-    with pytest.raises(ValueError) as e:
-        la.apply_look({"home": png("red")}, [])
-    msg = str(e.value)
-    assert "--no-backup" not in msg and "photo access" in msg and "switch Wallpaper off in Wallpaper & style" in msg
-    # `--via adb look apply` reads the settings under the serial and records the picture under the
-    # adb key, so it cannot unblock the link: it is not advised
-    assert "--via adb" not in msg and "try again" in msg
-    assert snapshots.list_undoable(la.device_key()) == []
-
-
 def test_a_failed_write_after_the_snapshot_points_at_undo(look_phone, monkeypatch):
     t, dev, phone, store, commits = look_phone
     la = Launcher(t)
@@ -399,27 +382,18 @@ def _no_backup(la, msg=None):
     return tried
 
 
-def test_an_unsaveable_wallpaper_is_its_own_error_and_changes_nothing(look_phone):
-    from homalawn.session import WallpaperUnsaved
-    t, dev, phone, store, commits = look_phone
-    la = Launcher(t)
-    _no_backup(la)
-    with pytest.raises(WallpaperUnsaved) as e:
-        la.apply_look({"home": png("red")}, [("accent_color", "custom|#ff112233")])
-    assert e.value.code == "wallpaper_unsaved"
-    assert snapshots.list_undoable(la.device_key()) == [] and commits == []
-    assert sets_of(phone) == []
-
-
-def test_overwrite_wallpaper_replaces_it_unsaved_and_undo_still_puts_the_colours_back(look_phone):
+def test_an_unsaveable_wallpaper_never_stops_a_look_and_undo_still_puts_the_colours_back(look_phone):
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED
     t, dev, phone, store, commits = look_phone
     la = Launcher(t)
     tried = _no_backup(la)
+    notes = []
     snap = la.apply_look({"home": png("red")}, [("accent_color", "custom|#ff112233"),
-                                                ("pref_launcherTheme", "dark")], overwrite_wallpaper=True)
+                                                ("pref_launcherTheme", "dark")], notify=notes.append)
     assert snap.startswith("look-")
     assert set(snapshots.load(snap)) == {PREFS_FILE}            # no wallpaper backup in it
-    assert tried and all(len(p) == 1 for p in tried[1:])        # each part tried once on its own
+    assert tried                                                # it did try to save it first
+    assert notes == [NOTE_WALLPAPER_UNSAVED]                    # one line, no error
     assert dev.wallpaper_now == png("red") and val(store, "accent_color") == "custom|#ff112233"
     name, _ = la.undo()
     assert name == snap
@@ -427,7 +401,8 @@ def test_overwrite_wallpaper_replaces_it_unsaved_and_undo_still_puts_the_colours
     assert dev.wallpaper_now == png("red")                      # nothing to put back for it
 
 
-def test_overwrite_wallpaper_keeps_the_part_that_could_be_saved(look_phone):
+def test_a_look_keeps_the_part_that_could_be_saved(look_phone):
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED
     from homalawn.transport import NotSupported
     from homalawn.session import MSG_MEDIA_NOT_GRANTABLE
     t, dev, phone, store, commits = look_phone
@@ -438,28 +413,51 @@ def test_overwrite_wallpaper_keeps_the_part_that_could_be_saved(look_phone):
             return {LOCK_WALLPAPER_FILE: png("blue")}
         raise NotSupported(MSG_MEDIA_NOT_GRANTABLE)
     la._backup_files = partly
-    snap = la.apply_look({"home": png("red"), "lock": png("green")}, [], overwrite_wallpaper=True)
+    notes = []
+    snap = la.apply_look({"home": png("red"), "lock": png("green")}, [], notify=notes.append)
     assert set(snapshots.load(snap)) == {LOCK_WALLPAPER_FILE}
+    assert notes == [NOTE_WALLPAPER_UNSAVED]
+    assert sets_of(phone) == ["home", "lock"]
 
 
-def test_ops_unsaveable_wallpaper_has_the_code_and_overwrite_goes_through(look_phone, tmp_path, monkeypatch):
+def test_a_look_that_loses_both_wallpapers_says_so_in_the_plural(look_phone):
+    from homalawn.session import NOTE_WALLPAPERS_UNSAVED
+    t, dev, phone, store, commits = look_phone
+    la = Launcher(t)
+    _no_backup(la)
+    notes = []
+    la.apply_look({"home": png("red"), "lock": png("green")}, [], notify=notes.append)
+    assert notes == [NOTE_WALLPAPERS_UNSAVED]
+
+
+def test_an_error_from_the_phone_or_an_empty_backup_does_not_stop_a_look_either(look_phone):
+    from homalawn.session import NOTE_WALLPAPER_UNSAVED
+    from homalawn.transport import ProviderError, TransportError
+    t, dev, phone, store, commits = look_phone
+    for err in (ProviderError("failed: IOException: disk", code="failed"),
+                TransportError("wallpaper backup came back empty"),
+                TransportError("the current wallpaper is a live wallpaper")):
+        la = Launcher(t)
+        la._backup_files = lambda parts, notify=None, e=err: (_ for _ in ()).throw(e)
+        notes = []
+        la.apply_look({"home": png("red")}, [("accent_color", "custom|#ff112233")], notify=notes.append)
+        assert notes == [NOTE_WALLPAPER_UNSAVED]
+
+
+def test_ops_unsaveable_wallpaper_goes_through_with_one_note(look_phone, tmp_path, monkeypatch):
+    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, NOTE_WALLPAPERS_UNSAVED
+    from homalawn.transport import NotSupported
     t, dev, phone, store, commits = look_phone
     fake_size(monkeypatch)
     theme, bg = settings_theme(tmp_path)
     monkeypatch.setattr(look, "theme_named", lambda name, **k: theme)
-    from homalawn.transport import NotSupported
-    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE
     monkeypatch.setattr(Launcher, "_backup_files",
                         lambda self, parts, notify=None: (_ for _ in ()).throw(NotSupported(MSG_MEDIA_NOT_GRANTABLE)))
     s = ops.Session(); s._t = t
-    settings = wp()
-    with pytest.raises(ops.OpError) as e:
-        ops.look_apply(s, settings)
-    assert e.value.code == "wallpaper_unsaved"
-    assert sets_of(phone) == []
-    r = ops.look_apply(s, settings, overwrite_wallpaper=True)
+    r = ops.look_apply(s, wp())
     assert sets_of(phone) == ["both"]
     assert set(snapshots.load(r.data["snapshot"])) == {PREFS_FILE}
+    assert r.notes == [NOTE_WALLPAPERS_UNSAVED]      # both screens: one line, plural
 
 
 # -- per screen: wallpaper, gradient or keep (the phone's "Wallpaper from Omarchy" screen) --------
@@ -620,6 +618,43 @@ def test_link_look_is_put_then_shown(link_phone_session):
     assert put["changed_at"] == 1234 and len(put["key"]) == 16 and calls[1] == ("show", {"key": put["key"]})
     assert r.data["shown"] is True and r.data["snapshot"].startswith("look-")
     assert "launcher.wallpaper_set" not in phone.methods()          # one way: the book
+
+
+def test_link_look_goes_ahead_when_the_wallpaper_cannot_be_saved(link_phone_session):
+    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, NOTE_WALLPAPER_UNSAVED, NOTE_WALLPAPERS_UNSAVED
+    from homalawn.transport import NotSupported
+    phone, s = link_phone_session
+    calls = []
+    phone.handlers["launcher.look_put"] = lambda p: (calls.append(("put", p)) or
+        {"stored": True, "show": True, "source": {"fp": "x", "name": "me"}, "scope": "latest"}, None)
+    phone.handlers["launcher.look_show"] = lambda p: (calls.append(("show", p)) or {"shown": True}, None)
+    orig = Launcher._backup_files
+
+    def one_part(self, parts, notify=None):    # the lock screen can be saved, the home one cannot
+        if tuple(parts) == ("lock",):
+            return {LOCK_WALLPAPER_FILE: png("blue")}
+        raise NotSupported(MSG_MEDIA_NOT_GRANTABLE)
+    Launcher._backup_files = one_part
+    try:
+        r = ops.look_apply(s, settings_follow(), stamp=lambda key: 1234)
+    finally:
+        Launcher._backup_files = orig
+    assert [c[0] for c in calls] == ["put", "show"] and r.data["shown"] is True
+    assert LOCK_WALLPAPER_FILE in snapshots.load(r.data["snapshot"])      # the part that could be saved
+    assert r.notes.count(NOTE_WALLPAPER_UNSAVED) == 1 and NOTE_WALLPAPERS_UNSAVED not in r.notes
+
+
+def test_link_look_with_nothing_savable_has_the_plural_note(link_phone_session, monkeypatch):
+    from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, NOTE_WALLPAPERS_UNSAVED
+    from homalawn.transport import NotSupported
+    phone, s = link_phone_session
+    phone.handlers["launcher.look_put"] = lambda p: (
+        {"stored": True, "show": True, "source": {"fp": "x", "name": "me"}, "scope": "latest"}, None)
+    phone.handlers["launcher.look_show"] = lambda p: ({"shown": True}, None)
+    monkeypatch.setattr(Launcher, "_backup_files",
+                        lambda self, parts, notify=None: (_ for _ in ()).throw(NotSupported(MSG_MEDIA_NOT_GRANTABLE)))
+    r = ops.look_apply(s, settings_follow(), stamp=lambda key: 1234)
+    assert r.data["shown"] is True and r.notes == [NOTE_WALLPAPERS_UNSAVED]
 
 
 def test_link_look_kept_takes_no_snapshot(link_phone_session):

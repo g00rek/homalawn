@@ -15,9 +15,8 @@ back.
 A second test plays the computer itself on the real link: a restarted Homa Lawn asks for the whole
 list (needs_list) until one in the current format arrives, and says its install time in the ping; on
 a Polish phone every label stays English; a computer from before format 3 gets no layer or
-parallax controls and a per-screen choice; a failure because the wallpaper cannot be saved first
-shows only the "Replace current wallpaper?" question, Cancel keeps the draft and Replace sends the
-same choice with overwrite.
+parallax controls and a per-screen choice; a wallpaper that cannot be saved first
+goes ahead like any other (the computer replaces the wallpaper and says so in a note).
 Screenshots (light and dark) go to HOMALAWN_WALL_SHOTS (default tests/build/phone-wallpaper).
 Nothing real on this computer is touched: no ~/.local/state/omarchy, ~/.config/homalawn or ~/.cache."""
 import html
@@ -287,7 +286,7 @@ def test_lock_and_home_panels_are_a_draft_and_applied_per_screen(avd_hygiene, d,
     scrolling0 = prefs_mod.current(link_transport)["shared"].get(look_mod.PARALLAX_PREF, {}).get("value")
     seed = tmp_path / "seed.png"
     Image.new("RGB", (400, 200), (30, 60, 200)).save(seed)
-    la.set_wallpaper(str(seed), backup=False, target="both")   # a first picture, so the link can write wallpapers
+    la.set_wallpaper(str(seed), target="both")   # a first picture, so the link can write wallpapers
 
     current = tmp_path / "current"
     current.mkdir()
@@ -472,7 +471,7 @@ def test_lock_and_home_panels_are_a_draft_and_applied_per_screen(avd_hygiene, d,
             except subprocess.TimeoutExpired:
                 svc.kill()
             log.close()
-            avd_hygiene.restore(saved, force=True, no_backup=True)
+            avd_hygiene.restore(saved, force=True)
             snapshots.delete(saved)
             shutil.rmtree(run_dir, ignore_errors=True)
             if scrolling0 is not None:
@@ -508,7 +507,6 @@ def _view(dark: Path):
 
 
 ENGLISH = {"Lock screen", "Keep current", "Theme wallpapers", "Gradients"}
-REPLACE_BODY = "The wallpaper set on this phone can't be backed up, so Undo can't bring it back."
 DRAFT_BAR = {"Apply", "Discard"}  # shown only while there is a draft (patch 0034)
 
 
@@ -586,40 +584,17 @@ def test_restart_english_older_service_and_unsaved_asks_only_replace(avd_hygiene
         to_top()
         want = {"home": {"kind": "wallpaper", "id": items[1].id}, "lock": {"kind": "wallpaper", "id": items[1].id}}
 
-        def failed_unsaved() -> dict:
-            tap(by_text("Apply"))
-            c = wait(lambda: phonewall.poll(t)[0], 10, "the choice waiting for the computer")
-            assert c["screens"] == want and "overwrite" not in c, c
-            assert c["format"] == 3 and c["wallpaper"]["parallax"] is False, c
-            raw = json.loads(adb("shell", "run-as", PKG, "cat", f"{walls_dir()}/choice.json"))
-            assert raw["wallpaper"] == {"parallax": False}, raw          # the phone sends no `same` any more
-            assert c["layer"] == {"home": 0, "lock": 0}, c
-            phonewall.ack(t, c["at"], "received")
-            phonewall.ack(t, c["at"], "failed", message=daemon.MSG_PICK_UNSAVED, code=daemon.WALLPAPER_UNSAVED)
-            by_text("Replace current wallpaper?")
-            texts = {n.get("text") for n in nodes()}
-            # the question and its one-line reason (DESIGN.md 2.1, patch 0034), no message from the computer
-            assert daemon.MSG_PICK_UNSAVED not in texts, texts
-            assert {t for t in texts if t} == {"Replace current wallpaper?", REPLACE_BODY, "Cancel", "Replace"}, texts
-            return c
-
-        failed_unsaved()
-        shot("v3-replace-dialog")
-        tap(by_text("Cancel"))
-        wait(lambda: "Replace current wallpaper?" not in {n.get("text") for n in nodes()}, 5, "the question going")
-        assert enabled("Apply"), "Cancel dropped the draft"
-        # the panels sit below the Source card (patch 0034): scroll to the choice
-        reveal(lambda n: (n.get("content-desc") or "").startswith("Lock screen: 2-waves, selected"))
-        to_top()
-        assert phonewall.poll(t)[0] is None, "Cancel sent something"
-
-        failed_unsaved()
-        tap(by_text("Replace"))
-        c = wait(lambda: phonewall.poll(t)[0], 10, "the Replace reaching the computer")
-        assert c["screens"] == want and c.get("overwrite") is True, c
+        tap(by_text("Apply"))
+        c = wait(lambda: phonewall.poll(t)[0], 10, "the choice waiting for the computer")
+        assert c["screens"] == want and "overwrite" not in c, c
+        assert c["format"] == 3 and c["wallpaper"]["parallax"] is False, c
+        raw = json.loads(adb("shell", "run-as", PKG, "cat", f"{walls_dir()}/choice.json"))
+        assert raw["wallpaper"] == {"parallax": False}, raw          # the phone sends no `same` any more
+        assert c["layer"] == {"home": 0, "lock": 0}, c
+        phonewall.ack(t, c["at"], "received")
         phonewall.ack(t, c["at"], "applied", current_id=items[1].id)
         wait(lambda: not enabled("Apply"), 5, "the applied choice settling the draft")
-        shot("v3-replace-applied")
+        shot("v3-applied")
     finally:
         adb("shell", "cmd", "locale", "set-app-locales", PKG, check=False)
         adb("shell", "input", "keyevent", "KEYCODE_HOME", check=False)

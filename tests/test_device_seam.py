@@ -498,7 +498,7 @@ def test_link_second_wallpaper_backs_up_the_first_without_reading_the_phone(la, 
     first = _solid_png(tmp_path / "first.png", (200, 30, 30))
     second = _solid_png(tmp_path / "second.png", (30, 30, 200))
     info0 = d.call("wallpaper_info")
-    assert la.set_wallpaper(first, backup=False) is None
+    la.set_wallpaper(first)
     id1 = d.call("wallpaper_info")["system_id"]
     monkeypatch.setattr(la.transport, "wallpaper_backup", no_phone_read)
     snap = la.set_wallpaper(second)
@@ -515,7 +515,7 @@ def test_link_second_wallpaper_backs_up_the_first_without_reading_the_phone(la, 
 def test_link_undo_never_overwrites_a_wallpaper_it_cannot_save(la, d, tmp_path):
     """Final review I2: the wallpaper was changed outside this link session (here over adb), so
     the phone would have to read it, which the link cannot on Android 13+: undo stops with the
-    one-line fix and changes nothing; `--no-backup` (no_backup=True) then goes ahead."""
+    one-line fix and changes nothing; `--no-backup` () then goes ahead."""
     from homalawn import snapshots
     from homalawn.session import MSG_MEDIA_NOT_GRANTABLE, forget_wallpaper
     from homalawn.transport import NotSupported
@@ -525,7 +525,7 @@ def test_link_undo_never_overwrites_a_wallpaper_it_cannot_save(la, d, tmp_path):
     first = _solid_png(tmp_path / "first.png", (20, 160, 20))
     second = _solid_png(tmp_path / "second.png", (160, 20, 160))
     outside = _solid_png(tmp_path / "outside.png", (240, 240, 20))
-    assert la.set_wallpaper(first, backup=False) is None
+    la.set_wallpaper(first)
     snap = la.set_wallpaper(second)  # backed up from homalawn's own copy of `first`
     Launcher(AdbTransport(SERIAL))._push_wallpaper(outside)  # changed outside the link's record
     d.shell("pm", "revoke", PKG, "android.permission.READ_EXTERNAL_STORAGE")  # kills Lawnchair: the link re-dials
@@ -537,7 +537,7 @@ def test_link_undo_never_overwrites_a_wallpaper_it_cannot_save(la, d, tmp_path):
     assert str(e.value) == MSG_MEDIA_NOT_GRANTABLE
     assert d.call("wallpaper_info")["system_id"] == shown  # not overwritten
     assert snapshots.list_undoable(la.device_key())[0] == snap  # the undo step is still there
-    name, _ = la.undo(no_backup=True)
+    name, _ = la.undo()
     assert name == snap and d.call("wallpaper_info")["system_id"] != shown
     assert crash_log(d) == ""
     forget_wallpaper()

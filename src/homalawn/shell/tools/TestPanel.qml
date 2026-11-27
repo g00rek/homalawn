@@ -197,17 +197,6 @@ Panel {
     return ok ? "started" : "refused"
   }
 
-  // Answer the Look tab's "Replace current wallpaper?" question: "yes" presses Replace, "no"
-  // presses Cancel; the log says "homalawn test: overwrite yes|no started|refused".
-  function overwrite(arg) {
-    var p = view ? view.lookPage : null
-    if (!p) return "Look tab not shown"
-    var yes = String(arg || "yes") !== "no"
-    var ok = yes ? p.overwriteNow() : p.cancelOverwrite()
-    console.log("homalawn test: overwrite " + (yes ? "yes " : "no ") + (ok ? "started" : "refused"))
-    return ok ? "started" : "refused"
-  }
-
   // "900x640" — resize the window (the view follows); "" or "default" — back to 1180x760.
   function size(arg) {
     var m = String(arg || "").match(/^(\d+)x(\d+)$/)
@@ -240,8 +229,8 @@ Panel {
       crops: both(w => p.cropFor(w)), layers: both(w => p.layerFor(w)),
       gradients: { screen: p.gradientsFor(false).length, wide: p.gradientsFor(true).length },
       changed: p.changed, applying: p.applying,
-      canRetry: p.canRetry, retrying: p.retrying, askOverwrite: p.askOverwrite,
-      overwriting: p.overwriting, errorCode: p.phoneState ? p.phoneState.error_code || null : null,
+      canRetry: p.canRetry, retrying: p.retrying,
+      errorCode: p.phoneState ? p.phoneState.error_code || null : null,
       applyActive: view.lookPage === p && p.changed && !view.busyEntry,
       error: p.phoneState ? p.phoneState.error : null,
       themes: p.themes.length, size: [view.width, view.height], look: p.look, saved: p.saved,

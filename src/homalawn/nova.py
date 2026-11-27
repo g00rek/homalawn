@@ -413,7 +413,7 @@ def run(launcher: Launcher, backup: bytes, glance_row: bool | None = None, dry_r
     except BaseException:
         try:
             notify("The import failed; putting the previous home screen back.")
-            la.restore(snap, force=True, no_backup=True)
+            la.restore(snap, force=True)
             snapshots.delete(snap)
         except BaseException as e2:  # noqa: BLE001
             notify(f"Putting it back failed too ({e2}); recover with `homalawn snapshot restore {snap}`.")

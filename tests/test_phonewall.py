@@ -167,8 +167,7 @@ class WallOps(FakeOps):
         self.targets = []     # settings.target() of every look applied
         self.parts = []       # the parts of every look applied (None: every screen it shows)
         self.needs_list = set()   # names whose choice reads ask for the whole list again
-        self.codes = []           # the code of every ack, in order (None: none)
-        self.overwrote = []       # overwrite_wallpaper of every look applied
+        self.applied_with_note = []   # looks applied while the current wallpaper could not be saved
 
     def walls_push(self, s, v):
         if s.name in self.unsupported:
@@ -182,21 +181,17 @@ class WallOps(FakeOps):
     def walls_poll(self, s):
         return self.walls_choice(s), s.name in self.needs_list
 
-    def walls_ack(self, s, at, state, current_id=None, message=None, code=None):
+    def walls_ack(self, s, at, state, current_id=None, message=None):
         self.acks.append((s.name, at, state, current_id, message))
-        self.codes.append(code)
         if state in ("applied", "failed") and (self.pending.get(s.name) or {}).get("at") == at:
             del self.pending[s.name]      # the phone drops a choice once it is settled
 
-    def look_apply(self, s, settings, theme=None, background=None, overwrite_wallpaper=False, parts=None, stamp=None):
+    def look_apply(self, s, settings, theme=None, background=None, parts=None, stamp=None):
         self.calls.append(("look_apply", s.name))
         if s.name in self.fail:
             raise self.fail[s.name]
-        if s.name in self.unsaved and not overwrite_wallpaper:
-            raise OpError("The current wallpaper cannot be saved first, so the look was not applied. Allow "
-                          "Homa Lawn photo access on the phone, or apply again to replace it.",
-                          code="wallpaper_unsaved")
-        self.overwrote.append(overwrite_wallpaper)
+        if s.name in self.unsaved:     # it goes ahead anyway (the note is the real ops' business)
+            self.applied_with_note.append(s.name)
         self.targets.append(settings.target())
         self.parts.append(parts)
         name, bg = self.cur()
@@ -205,7 +200,7 @@ class WallOps(FakeOps):
         self.n = getattr(self, "n", 0) + 1
         return Result("Look applied.", [], data={"snapshot": f"look-{self.n}", "theme": name, "background": used})
 
-    def undo(self, s, no_backup=False):
+    def undo(self, s):
         self.calls.append(("undo", s.name))
         return Result(f"Restored look-{self.n}", [], data=f"look-{self.n}")
 
@@ -827,36 +822,23 @@ def test_the_phone_asking_for_the_list_gets_it_at_once_and_not_on_every_read(tmp
     run(go())
 
 
-# -- a wallpaper that cannot be saved first: the phone asks, Replace overwrites ---------------------
-def test_ack_with_a_code_and_an_older_build_gets_the_message_alone():
-    t = FakeT()
-    phonewall.ack(t, 7, "failed", message="no", code="wallpaper_unsaved")
-    assert t.calls == [(phonewall.ACK, {"at": 7, "state": "failed", "message": "no", "code": "wallpaper_unsaved"})]
-
-    class Older(FakeT):
-        def call(self, method, params=None):
-            if method == phonewall.ACK and "code" in params:
-                raise ProviderError("bad_params: unknown params for launcher.theme_wallpaper_ack: code",
-                                    code="bad_params")
-            return super().call(method, params)
-    o = Older()
-    phonewall.ack(o, 7, "failed", message="no", code="wallpaper_unsaved")
-    assert o.calls == [(phonewall.ACK, {"at": 7, "state": "failed", "message": "no"})]
-
-
-def test_choice_reads_the_overwrite_of_replace():
+# -- a wallpaper that cannot be saved first never stops a choice -------------------------------------
+def test_choice_ignores_the_overwrite_of_an_older_phone_build():
     t = FakeT()
     keep = {"home": {"kind": "keep"}, "lock": {"kind": "keep"}}
     t.answers[phonewall.CHOICE] = {"choice": {"at": 4, "screens": keep, "overwrite": True}}
-    assert phonewall.choice(t)["overwrite"] is True
-    t.answers[phonewall.CHOICE] = {"choice": {"at": 4, "screens": keep, "overwrite": "yes"}}
     assert "overwrite" not in phonewall.choice(t)
 
 
-def test_an_unsaved_wallpaper_asks_on_the_phone_and_replace_overwrites_it(tmp_path):
-    """The current wallpaper cannot be backed up: the phone gets no long message but the code for
-    its overwrite question; nothing is kept on the computer (the window asks nothing). Replace sends
-    the same choice again with overwrite, which applies without the backup."""
+def test_ack_sends_no_code():
+    t = FakeT()
+    phonewall.ack(t, 7, "failed", message="no")
+    assert t.calls == [(phonewall.ACK, {"at": 7, "state": "failed", "message": "no"})]
+
+
+def test_an_unsaved_wallpaper_is_applied_and_acknowledged_without_a_question(tmp_path):
+    """The current wallpaper cannot be backed up: the choice is applied like any other, the phone
+    hears "applied" and the look stays; an older build's `overwrite` changes nothing."""
     async def go():
         svc, ops, cur, ts = service(tmp_path)
         ops.unsaved.add("A")
@@ -864,19 +846,13 @@ def test_an_unsaved_wallpaper_asks_on_the_phone_and_replace_overwrites_it(tmp_pa
         try:
             await until(lambda: ops.pushes.get("A"))
             v = ops.last("A")
-            before = looks_on_disk(svc)["A"]
             want = scr(("wallpaper", v.items[2].id), ("wallpaper", v.items[2].id))
-            ops.pending["A"] = {"at": 50, "screens": want, "id": None, "target": None}
-            await until(lambda: any(a[1] == 50 and a[2] == "failed" for a in ops.acks))
-            i = next(k for k, a in enumerate(ops.acks) if a[1] == 50 and a[2] == "failed")
-            assert ops.codes[i] == daemon.WALLPAPER_UNSAVED and ops.acks[i][4] == daemon.MSG_PICK_UNSAVED
-            assert looks_on_disk(svc)["A"] == before
+            ops.pending["A"] = {"at": 50, "screens": want, "id": None, "target": None, "overwrite": True}
+            await until(lambda: any(a[1] == 50 and a[2] == "applied" for a in ops.acks))
+            assert not any(a[2] == "failed" for a in ops.acks)
+            assert ops.applied_with_note == ["A"]
             ph = svc.phones[fp_of("A")]
             assert ph.error is None and ph.error_code is None and not ph.pending
-            assert ops.overwrote == []
-            ops.pending["A"] = {"at": 51, "screens": want, "id": None, "target": None, "overwrite": True}
-            await until(lambda: any(a[1] == 51 and a[2] == "applied" for a in ops.acks))
-            assert ops.overwrote == [True]
             assert looks_on_disk(svc)["A"]["picks"]["alpha"]["home"] == str(ts[0].backgrounds[2])
         finally:
             await svc.stop()
@@ -1151,7 +1127,7 @@ def test_a_wallpaper_picked_for_the_home_screen_alone_on_a_separate_look(tmp_pat
     run(go())
 
 
-def test_an_unsaved_wallpaper_on_a_format_3_choice_puts_the_look_back_and_replace_applies_it(tmp_path):
+def test_an_unsaved_wallpaper_on_a_format_3_choice_is_applied_too(tmp_path):
     async def go():
         svc, ops, cur, ts = service(tmp_path)
         ops.unsaved.add("A")
@@ -1159,14 +1135,11 @@ def test_an_unsaved_wallpaper_on_a_format_3_choice_puts_the_look_back_and_replac
         try:
             await until(lambda: ops.pushes.get("A"))
             v = ops.last("A")
-            before = looks_on_disk(svc)["A"]
             want = scr(("wallpaper", v.items[1].id), ("wallpaper", v.items[1].id))
             ops.pending["A"] = model_choice(341, want, True, parallax=True)
-            await until(lambda: any(a[1] == 341 and a[2] == "failed" for a in ops.acks))
-            assert ops.codes[-1] == daemon.WALLPAPER_UNSAVED and looks_on_disk(svc)["A"] == before
-            ops.pending["A"] = model_choice(342, want, True, parallax=True, overwrite=True)
-            await until(lambda: any(a[1] == 342 and a[2] == "applied" for a in ops.acks))
-            assert ops.overwrote == [True] and looks_on_disk(svc)["A"]["wallpaper"]["parallax"] is True
+            await until(lambda: any(a[1] == 341 and a[2] == "applied" for a in ops.acks))
+            assert not any(a[2] == "failed" for a in ops.acks)
+            assert ops.applied_with_note == ["A"] and looks_on_disk(svc)["A"]["wallpaper"]["parallax"] is True
         finally:
             await svc.stop()
     run(go())

@@ -41,7 +41,7 @@ def test_window_undo_puts_the_phone_back(avd_hygiene, link_transport, tmp_path):
     la.wait_loaded()
     seed = tmp_path / "seed.png"
     Image.new("RGB", (400, 200), (30, 60, 200)).save(seed)
-    la.set_wallpaper(str(seed), backup=False, target="both")
+    la.set_wallpaper(str(seed), target="both")
 
     run_dir = Path(tempfile.mkdtemp(prefix="hu"))
     sock = run_dir / "homalawnd.sock"
@@ -112,6 +112,6 @@ def test_window_undo_puts_the_phone_back(avd_hygiene, link_transport, tmp_path):
         except subprocess.TimeoutExpired:
             svc.kill()
         log.close()
-        avd_hygiene.restore(saved, force=True, no_backup=True)
+        avd_hygiene.restore(saved, force=True)
         snapshots.delete(saved)
         shutil.rmtree(run_dir, ignore_errors=True)

@@ -11,7 +11,7 @@ from homalawn.session import (LOCK_FOLLOWS_HOME, LOCK_WALLPAPER_FILE, MSG_LOCK_N
                              WALLPAPER_RECORD, Launcher)
 from homalawn.transport import NotSupported, ProviderError
 from test_session import FakeDevice
-from test_transport import _img, _phone_cannot_read_wallpaper, linked  # noqa: F401 (fixture)
+from test_transport import _img, _phone_cannot_read_wallpaper, _seed, linked  # noqa: F401 (fixture)
 
 
 def _sets(phone):
@@ -95,7 +95,7 @@ def test_second_lock_change_backs_up_the_first_without_reading_the_phone(linked,
     _phone_cannot_read_wallpaper(phone)
     phone.lock_wallpaper = phone.wallpaper  # the lock screen cannot be read either
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG lock 1"), backup=False, target="lock")
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG lock 1"), target="lock")
     rec = json.loads((snapshots.root().parent / WALLPAPER_RECORD).read_text())
     assert rec["lock_id"] == dev.lock_id and rec["lock_snapshot"] == "current-lock-wallpaper"
     snap = la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG lock 2"), target="lock")
@@ -108,8 +108,8 @@ def test_home_and_lock_records_are_kept_apart(linked, tmp_path):
     _phone_cannot_read_wallpaper(phone)
     phone.lock_wallpaper = phone.wallpaper
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "h.png", b"\x89PNG home 1"), backup=False)
-    la.set_wallpaper(_img(tmp_path, "l.png", b"\x89PNG lock 1"), backup=False, target="lock")
+    _seed(la, _img(tmp_path, "h.png", b"\x89PNG home 1"))
+    _seed(la, _img(tmp_path, "l.png", b"\x89PNG lock 1"), target="lock")
     snap = la.set_wallpaper(_img(tmp_path, "h2.png", b"\x89PNG home 2"))  # home held survived the lock change
     assert snapshots.load(snap) == {WALLPAPER_FILE: b"\x89PNG home 1"}
     assert dev.lock_now == b"\x89PNG lock 1"
@@ -125,8 +125,8 @@ def test_home_change_moves_the_held_picture_to_the_lock_screen(linked, tmp_path)
     phone.lock_wallpaper = phone.wallpaper
     dev.lock_id, dev.lock_now = -1, None
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG one"), backup=False, target="both")
-    la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG two"), backup=False)  # home only
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG one"), target="both")
+    _seed(la, _img(tmp_path, "b.png", b"\x89PNG two"))  # home only
     assert dev.lock_now == b"\x89PNG one"
     snap = la.set_wallpaper(_img(tmp_path, "c.png", b"\x89PNG three"), target="lock")
     assert snapshots.load(snap) == {LOCK_WALLPAPER_FILE: b"\x89PNG one"}
@@ -139,7 +139,7 @@ def test_lock_reset_keeps_the_home_picture_known(linked, tmp_path):
     _phone_cannot_read_wallpaper(phone)
     dev.lock_id, dev.lock_now = -1, None
     la = Launcher(t)
-    la.set_wallpaper(_img(tmp_path, "a.png", b"\x89PNG home"), backup=False, target="both")
+    _seed(la, _img(tmp_path, "a.png", b"\x89PNG home"), target="both")
     la.set_wallpaper(_img(tmp_path, "b.png", b"\x89PNG lock"), target="lock")
     la.undo()  # the lock screen shows the home picture again; home id changed
     snap = la.set_wallpaper(_img(tmp_path, "c.png", b"\x89PNG next"))
@@ -153,8 +153,8 @@ def test_crop_sends_a_picture_of_the_screen_size(linked, tmp_path):
     Image.new("RGB", (3840, 2160), (10, 20, 30)).save(p)
     s = ops.Session()
     s._t = t
-    r = ops.wallpaper(s, str(p), no_backup=True, target="lock", crop="center")
-    assert r.text == "Lock screen wallpaper set (cropped to the screen, 1080x2400)."
+    r = ops.wallpaper(s, str(p), target="lock", crop="center")
+    assert r.text.startswith("Lock screen wallpaper set (cropped to the screen, 1080x2400).")
     assert Image.open(io.BytesIO(dev.lock_now)).size == (1080, 2400)
     assert dev.wallpaper_now is None  # home untouched
 

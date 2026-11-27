@@ -26,7 +26,7 @@ State (`phones` and the `state` event), per phone, besides the connection and lo
   without a build here, the old app, no release yet, no network). Worked out in a thread when the
   phone's app or version changes, and at most hourly otherwise (GitHub is asked at most hourly).
 - `error` / `error_code`: the phone's problem as a sentence, and for the cases the window treats
-  specially its code: `wallpaper_unsaved`, `not_paired`, `old_app` (the phone runs an app from
+  specially its code: `not_paired`, `old_app` (the phone runs an app from
   before the rename, appid.OLD: nothing is applied to it; the sentence says to remove it and add
   the phone again).
 And for the whole service, `serving`: null, or {"url", "urls", "expires_at", "version", "source",
@@ -78,7 +78,6 @@ DEFAULTS = {"check_interval": 10, "follow_interval": 2, "backoff_min": 2, "backo
 RELOAD = "reload"     # Phone.waiting: Lawnchair did not reload in time; tried again after retry_interval
 NOT_LOADED = "not_loaded"   # ops.NOT_LOADED
 INVALID = "invalid"         # ops.INVALID: a home.apply the phone would not take (errors located)
-WALLPAPER_UNSAVED = "wallpaper_unsaved"   # session.WALLPAPER_UNSAVED: a look needs consent to replace it
 # RELOAD retries in a row before the service stops trying by itself (the next Omarchy change or look
 # change tries again): each try saves a look- snapshot and only the newest
 # snapshots.KEEP_LOOK are kept, so endless retries would push out the one taken before the change
@@ -93,9 +92,6 @@ WALLS_RELIST = 10     # s: a phone asking for the whole list again (needs_list) 
 MSG_PICK_GONE = "That wallpaper is no longer in the theme on the computer."
 MSG_GRADIENT_GONE = "That gradient is no longer offered: the theme's colours changed on the computer."
 MSG_PICK_OFF = "Wallpaper sync is off for this phone."
-# a phone choice whose wallpaper cannot be saved first: a build with the overwrite question shows
-# its own dialog (ack code wallpaper_unsaved); an older one shows this line
-MSG_PICK_UNSAVED = "The current wallpaper can't be saved first, so it was not replaced."
 GRADIENT_MIN, GRADIENT_MAX = 16, 4096    # px: the sizes look.gradients draws
 
 
@@ -209,7 +205,7 @@ class Phone:
     applied: dict | None = None
     pending: bool = False
     error: str | None = None
-    error_code: str | None = None  # WALLPAPER_UNSAVED: the window asks whether to overwrite it
+    error_code: str | None = None  # the window treats this code specially (not_paired, old_app)
     wake: asyncio.Event = field(default_factory=asyncio.Event)   # check the connection now
     device: str | None = None                                    # snapshot device key
     task: asyncio.Task | None = None                             # its connection watcher
@@ -228,8 +224,7 @@ class Phone:
                                        # our builds share one version, so only this tells them apart
     walls_relist_at: float | None = None   # clock time the phone's needs_list was last answered
     choice_seen: Any = None            # `at` of the last choice taken from the phone
-    choice: dict | None = None         # a choice taken but not applied yet: {at, current_id, parts, before,
-                                       # overwrite (the phone's Replace: no backup of the wallpaper)}
+    choice: dict | None = None         # a choice taken but not applied yet: {at, current_id, parts, before}
     pick_undo: dict | None = None      # the newest apply of a phone choice: {snapshot, before (look.json entry)}
     look_source: dict | None = None    # whose look the phone shows: {self, name, scope}; None = none / unread
     failures: int = 0                  # connection checks failed in a row (sets the back-off)
@@ -855,15 +850,14 @@ class Service:
             return int(self.clock() * 1000)
         return stamp
 
-    async def _apply(self, ph: Phone, retry: bool = False, overwrite_wallpaper: bool = False) -> Any:
+    async def _apply(self, ph: Phone, retry: bool = False) -> Any:
         """Apply this phone's look now. Success clears pending and error; a failure keeps the
         previous look, records the message, and (only when the link broke) leaves it pending for
         the reconnect. A locked phone gets everything at once (wallpapers and colours apply at once;
         a home-screen reload Lawnchair leaves for the unlock is reported in the notes, never as a
         failure: session.Launcher.wait_loaded). When Lawnchair did not reload in time it stays pending and is
         tried again after retry_interval (each try may save one more snapshot). A wallpaper that
-        cannot be saved first fails with `wallpaper_unsaved` (also recorded as the phone's
-        error_code) unless `overwrite_wallpaper`: the user's consent, never assumed here."""
+        cannot be saved first never fails the apply: it is replaced and a note says so."""
         if appid.is_old(ph.app_package):   # nothing can be applied to the old app; the phone's state says why
             ph.error, ph.error_code, ph.pending, ph.waiting = OLD_APP_SAYS.format(phone=ph.name), OLD_APP, False, None
             self._changed()
@@ -872,9 +866,7 @@ class Service:
         omarchy = self._read_current() if settings.source == "follow" else None
         # a choice from the phone changes only the screens it names
         parts = ph.choice.get("parts") if ph.choice is not None else None
-        overwrite_wallpaper = overwrite_wallpaper or (ph.choice is not None and ph.choice.get("overwrite") is True)
-        kw = ({"overwrite_wallpaper": True} if overwrite_wallpaper else {}) | (
-            {"parts": parts} if parts is not None else {}) | {"stamp": self._stamp(ph)}
+        kw = ({"parts": parts} if parts is not None else {}) | {"stamp": self._stamp(ph)}
 
         def apply(session, st):
             return self.ops.look_apply(session, st, **kw)
@@ -894,10 +886,6 @@ class Service:
             else:
                 ph.error = str(e)
                 ph.pending = not ph.connected
-                if getattr(e, "cause_code", None) == WALLPAPER_UNSAVED:
-                    ph.error_code = WALLPAPER_UNSAVED
-                    self._changed()
-                    raise Fail(WALLPAPER_UNSAVED, str(e)) from e
             self._changed()
             raise
         used = r.data if isinstance(r.data, dict) and "theme" in r.data else (
@@ -1014,11 +1002,10 @@ class Service:
             ph.walls_polling = False
 
     async def _walls_ack(self, ph: Phone, at, state: str, current_id: str | None = None,
-                         message: str | None = None, code: str | None = None) -> None:
-        args = (at, state, current_id, message) + ((code,) if code is not None else ())
+                         message: str | None = None) -> None:
         try:
             async with ph.lock:
-                await asyncio.to_thread(self.ops.walls_ack, ph.session, *args)
+                await asyncio.to_thread(self.ops.walls_ack, ph.session, at, state, current_id, message)
         except Exception as e:
             self._walls_failed(ph, e, f"telling the phone its wallpaper was {state}")
 
@@ -1168,8 +1155,7 @@ class Service:
             await self._walls_ack(ph, c["at"], "applied", current_id=current_id)
             await self._push_walls(ph)
             return
-        ph.choice = {"at": c["at"], "current_id": current_id, "parts": parts, "before": before,
-                     "overwrite": c.get("overwrite") is True}
+        ph.choice = {"at": c["at"], "current_id": current_id, "parts": parts, "before": before}
         ph.error, ph.error_code = None, None
         self._changed()
         try:
@@ -1178,18 +1164,6 @@ class Service:
             if e.code in ("offline", "busy"):
                 return                        # still pending: applied (and acknowledged) at the reconnect
             ph.choice = None
-            if e.code == WALLPAPER_UNSAVED:
-                # the phone asks whether to replace it anyway (its Replace sends the same choice with
-                # overwrite); until then nothing changed: the settings go back, the window asks nothing
-                async with self._looks_lock:
-                    self.looks[ph.fp] = lookconf.validate(before)
-                    await asyncio.to_thread(lookconf.save, dict(self.looks), self.look_path)
-                ph.error, ph.error_code, ph.pending = None, None, False
-                self._changed()
-                log.info("%s: the wallpaper cannot be saved first; the phone asks whether to replace it", ph.name)
-                await self._walls_ack(ph, c["at"], "failed", message=MSG_PICK_UNSAVED, code=WALLPAPER_UNSAVED)
-                await self._push_walls(ph)
-                return
             await self._walls_ack(ph, c["at"], "failed", message=str(e))
             await self._push_walls(ph)        # the saved setting stands; the screen shows it
             return
@@ -1404,11 +1378,11 @@ class Service:
             self._changed()
             return out
         self._changed()
-        r = await self._apply(ph, overwrite_wallpaper=params.get("overwrite_wallpaper") is True)
+        r = await self._apply(ph)
         return {**out, "text": r.text, "notes": list(r.notes)}
 
     async def m_look_apply(self, params, writer):
-        r = await self._apply(self._phone(params), overwrite_wallpaper=params.get("overwrite_wallpaper") is True)
+        r = await self._apply(self._phone(params))
         return {"text": r.text, "notes": list(r.notes), "data": r.data}
 
     async def m_undo(self, params, writer):

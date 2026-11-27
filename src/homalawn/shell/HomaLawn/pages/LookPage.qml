@@ -42,9 +42,6 @@ Item {
   readonly property var presence: ({ here: true })
   property bool applying: false      // look.set (Apply) on its way
   property bool retrying: false      // look.apply (Retry) on its way
-  property bool overwriting: false   // look.apply with the consent to replace an unsaved wallpaper
-  // Cancel on the overwrite question: hidden until that failure clears or Apply runs again.
-  property bool overwriteDismissed: false
   // The theme grid shows two rows until asked for all.
   property bool allThemes: false
   // Scroll the settings column (the test harness uses it), kept within the content.
@@ -148,13 +145,7 @@ Item {
   // The last apply to this phone failed (say, no photo access yet): the error line offers Retry,
   // which asks the service to apply the saved look again (follow: Omarchy's current one).
   readonly property bool canRetry: !!saved && saved.source !== "off" && !!phoneState
-    && phoneState.id === phone && !!phoneState.error && !unsavedWallpaper
-  // The last apply (Apply, or following Omarchy) stopped because the phone's current wallpaper
-  // cannot be saved first: instead of an error the page asks whether to replace it.
-  readonly property bool unsavedWallpaper: !!phoneState && phoneState.id === phone
-    && phoneState.error_code === "wallpaper_unsaved"
-  readonly property bool askOverwrite: unsavedWallpaper && !overwriteDismissed
-
+    && phoneState.id === phone && !!phoneState.error
   function themeBySlug(s) {
     if (!s) return null
     var want = Paths.slug(s)
@@ -318,7 +309,6 @@ Item {
   function load() {
     loadLayout()
     lookPhone = phone
-    overwriteDismissed = false
     saved = phoneState && phoneState.id === phone && phoneState.look ? twoScreens(copy(phoneState.look)) : null
     look = twoScreens(copy(draftOf(phone))) || copy(saved)
     keepDraft()
@@ -340,7 +330,6 @@ Item {
   function applyNow() {
     if (!changed || applying || !backend || !lookPhone) return false
     applying = true
-    overwriteDismissed = false
     var who = lookPhone
     var whoName = phoneName
     var sent = copy(look)
@@ -349,7 +338,7 @@ Item {
       if (!presence.here) return
       page.applying = false
       if (err) {
-        if (err.code !== "wallpaper_unsaved") page.toast(err.message || err.code)   // the page asks instead
+        page.toast(err.message || err.code)
         return
       }
       if (page.lookPhone === who && result && result.look) {
@@ -383,31 +372,8 @@ Item {
     backend.call("look.apply", { phone: who }, function (err, result) {
       if (!presence.here) return
       page.retrying = false
-      if (err && err.code === "wallpaper_unsaved") return   // the page asks instead
       page.toast(err ? (err.message || err.code) : (result && result.text ? result.text : "Applied."))
     })
-    return true
-  }
-
-  // The overwrite question's Replace: apply the saved look again, replacing the current
-  // wallpaper without saving it first (the look's undo step still holds the colours and mode).
-  function overwriteNow() {
-    if (!unsavedWallpaper || overwriting || busyHere || !backend) return false
-    overwriting = true
-    var who = lookPhone
-    var presence = page.presence
-    backend.call("look.apply", { phone: who, overwrite_wallpaper: true }, function (err, result) {
-      if (!presence.here) return
-      page.overwriting = false
-      page.toast(err ? (err.message || err.code) : (result && result.text ? result.text : "Applied."))
-    })
-    return true
-  }
-
-  // Its Cancel: leave the phone's wallpaper as it is.
-  function cancelOverwrite() {
-    if (!askOverwrite) return false
-    overwriteDismissed = true
     return true
   }
 
@@ -548,7 +514,6 @@ Item {
   // HomaLawnView sets backend, phone, phoneState and host one by one after the page is made.
   onPhoneChanged: load()
   onBackendChanged: if (lookPhone && !look) load()
-  onUnsavedWallpaperChanged: if (!unsavedWallpaper) overwriteDismissed = false
   onPhoneStateChanged: {
     if (phoneState && phoneState.id === lookPhone && phoneState.look) {
       if (!look) {
@@ -619,28 +584,8 @@ Item {
     anchors.right: parent.right
     anchors.top: parent.top
 
-    // The current wallpaper cannot be backed up first: ask before replacing it.
-    Item {
-      visible: page.askOverwrite
-      width: status.width
-      height: visible ? overwriteBar.height + 16 : 0
-      ConfirmBar {
-        id: overwriteBar
-        x: Theme.margin
-        y: 8
-        width: parent.width - 2 * Theme.margin
-        text: "Replace current wallpaper?"
-        detail: "The wallpaper set on " + page.phoneName + " can't be backed up, so Undo can't bring it back."
-        action: "Replace"
-        destructive: true
-        working: page.overwriting
-        active: !page.busyHere && page.online
-        onConfirmed: page.overwriteNow()
-        onCancelled: page.cancelOverwrite()
-      }
-    }
     StatusLine {
-      visible: !!(page.phoneState && page.phoneState.error) && !page.unsavedWallpaper
+      visible: !!(page.phoneState && page.phoneState.error)
       tone: Theme.red
       text: page.phoneState && page.phoneState.error ? String(page.phoneState.error) : ""
       action: page.canRetry && page.online ? "Retry" : ""
@@ -655,9 +600,9 @@ Item {
     id: applyBar
     visible: !!page.look
     changes: page.changes
-    applying: page.applying || page.overwriting
+    applying: page.applying
     canApply: !page.busyHere
-    failed: page.unsavedWallpaper || !!(page.phoneState && page.phoneState.error)
+    failed: !!(page.phoneState && page.phoneState.error)
     onApply: page.applyNow()
     onDiscard: page.discard()
   }

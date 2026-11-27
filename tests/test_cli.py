@@ -103,7 +103,7 @@ def test_undo_prints_snapshot_and_notes(monkeypatch):
     from homalawn.session import Launcher
     _no_guard(monkeypatch)
     monkeypatch.setenv("HOMALAWN_SERIAL", "emu-2")
-    monkeypatch.setattr(Launcher, "undo", lambda self, no_backup=False: ("grid-20261001-120000", ["note A"]))
+    monkeypatch.setattr(Launcher, "undo", lambda self: ("grid-20261001-120000", ["note A"]))
     res = CliRunner().invoke(cli.app, ["undo"])
     assert res.exit_code == 0 and "note A" in res.output and "grid-20261001-120000" in res.output
 

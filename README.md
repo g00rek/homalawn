@@ -174,7 +174,7 @@ Homa Lawn is **alpha**. It is used every day, but expect rough edges and changes
   [Troubleshooting](docs/guide/troubleshooting.md#the-first-tap-after-going-home-does-nothing-samsung).
 - **Some wallpapers cannot be backed up** on Android 13 and newer: if the wallpaper was set on the
   phone itself, Android does not let Homa Lawn read it, so it cannot be saved before it is replaced.
-  Homa Lawn asks **Replace current wallpaper?** first. See
+  The change goes ahead anyway and says that undo will not bring that wallpaper back. See
   [Wallpaper & style](docs/guide/theme-sync.md#wallpaper-backups).
 - **Screen control cannot see views apps mark as sensitive** (banking, passwords) on Android 14
   and newer.
